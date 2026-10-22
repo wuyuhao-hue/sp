@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import io
+import json
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
@@ -10,7 +12,7 @@ from PIL import Image
 
 from . import store
 from .compose import compose, pick_variant
-from .locate import locate_local, region_luminance
+from .locate import garment_bbox, locate_local, region_luminance
 
 pool = ThreadPoolExecutor(max_workers=4)
 
@@ -61,24 +63,93 @@ def size_factor(meta: dict) -> float:
 
 
 # ---------------- 定位 ----------------
-def locate_image(product: dict, img: dict) -> dict:
+CALIBRATION = store.DATA / "calibration.json"
+
+
+def calibration() -> dict:
+    """从用户的手动调整里学到的整体偏好：相对衣服轮廓框的平均偏移和大小比例。"""
+    rows = store._read(CALIBRATION, [])
+    if len(rows) < 3:
+        return {"n": len(rows), "dx": 0.0, "dy": 0.0, "scale": 1.0}
+    arr = np.array([[r["dx"], r["dy"], r["scale"]] for r in rows[-100:]])
+    dx, dy, scale = np.median(arr, axis=0)
+    return {"n": len(rows), "dx": float(dx), "dy": float(dy), "scale": float(np.clip(scale, 0.5, 2.0))}
+
+
+def record_correction(place: dict) -> None:
+    """用户手动调整了一张自动识别过的图：记下与原始识别结果的差别。"""
+    auto, bb = place.get("auto"), place.get("bbox")
+    if not auto or not bb or not place.get("printable"):
+        return
+    bw, bh = max(bb[2] - bb[0], 1e-3), max(bb[3] - bb[1], 1e-3)
+    row = {"dx": (place["x"] - auto["x"]) / bw, "dy": (place["y"] - auto["y"]) / bh,
+           "scale": place["w"] / max(auto["w"], 1e-4), "t": time.time()}
+    # 同一张图连续拖多次，只保留最后一次
+    rows = [r for r in store._read(CALIBRATION, []) if r.get("key") != place.get("key")]
+    row["key"] = place.get("key")
+    rows.append(row)
+    store._write(CALIBRATION, rows[-300:])
+
+
+def reset_calibration() -> None:
+    CALIBRATION.unlink(missing_ok=True)
+
+
+def locate_image(product: dict, img: dict, cal: dict | None = None) -> dict:
     rgb = np.asarray(Image.open(store.product_dir(product["id"]) / img["file"]).convert("RGB"))
     try:
         r = locate_local(rgb)
     except Exception as e:  # noqa: BLE001
         r = {"printable": False, "reason": f"识别出错：{e}"}
-    r.update({"source": "auto", "angle": 0.0})
+    r.update({"source": "auto", "angle": 0.0, "key": f"{product['id']}/{img['id']}"})
     if not r["printable"]:
         # 给一个默认位置，用户手动开启时可以直接用
         r.update({"x": 0.62, "y": 0.38, "w": 0.12})
+        return r
+    r["auto"] = {"x": r["x"], "y": r["y"], "w": r["w"]}
+    cal = cal or calibration()
+    if cal["n"] >= 3:
+        bb = r["bbox"]
+        r["x"] += cal["dx"] * (bb[2] - bb[0])
+        r["y"] += cal["dy"] * (bb[3] - bb[1])
+        r["w"] *= cal["scale"]
     return r
 
 
 def locate_product(product: dict, force: bool = False) -> dict:
-    todo = [img for img in product["images"] if force or not img.get("place")]
-    for img, place in zip(todo, pool.map(lambda i: locate_image(product, i), todo)):
+    """force=True 时重新识别，但保留用户手动调整过的图。"""
+    cal = calibration()
+    todo = [img for img in product["images"]
+            if not img.get("place") or (force and (img["place"] or {}).get("source") != "manual")]
+    for img, place in zip(todo, pool.map(lambda i: locate_image(product, i, cal), todo)):
         img["place"] = place
     return store.save_product(product)
+
+
+def debug_pack(max_images: int = 400) -> Path:
+    """把原图（缩小到 800px）和识别/调整结果打包，发给开发者批量调优定位算法。"""
+    import zipfile
+
+    out = store.EXPORTS / f"定位调试包-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    n = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("calibration.json", json.dumps(store._read(CALIBRATION, []), ensure_ascii=False))
+        for p in store.list_products():
+            pdir = store.product_dir(p["id"])
+            rows = []
+            for img in p["images"]:
+                if n >= max_images:
+                    break
+                im = Image.open(pdir / img["file"]).convert("RGB")
+                scale = min(1.0, 800 / max(im.size))
+                im = im.resize((round(im.width * scale), round(im.height * scale)), Image.LANCZOS)
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=85)
+                z.writestr(f"{p['id']}/{img['id']}.jpg", buf.getvalue())
+                rows.append({"id": img["id"], "kind": img["kind"], "place": img.get("place")})
+                n += 1
+            z.writestr(f"{p['id']}/places.json", json.dumps(rows, ensure_ascii=False))
+    return out
 
 
 # ---------------- 印标 ----------------
@@ -106,6 +177,49 @@ def render_image(product: dict, img: dict, meta: dict) -> dict:
     img["refined"] = False
     img["v"] = int(time.time() * 1000)
     return img
+
+
+def sync_place(product: dict, src: dict) -> int:
+    """同款不同颜色的图通常构图一致：按衣服轮廓框的相对位置，把 src 的位置换算到其它图上。"""
+    def bbox(img: dict):
+        place = img.get("place") or {}
+        if not place.get("bbox"):  # 旧版本采集的商品没有轮廓框，现算一次
+            rgb = np.asarray(Image.open(store.product_dir(product["id"]) / img["file"]).convert("RGB"))
+            place["bbox"] = garment_bbox(rgb)
+        return place.get("bbox")
+
+    sp = src.get("place") or {}
+    sb = bbox(src) if sp.get("printable") else None
+    if not sp.get("printable") or not sb:
+        raise ValueError("这张图没有识别到衣服轮廓，无法同步")
+    meta = store.get_logo(product["logo_id"]) if product.get("logo_id") else None
+    sw, sh = sb[2] - sb[0], sb[3] - sb[1]
+    targets = []
+    for img in product["images"]:
+        tp = img.get("place") or {}
+        if img is src or not tp.get("printable"):
+            continue
+        tb = bbox(img)
+        if not tb:
+            continue
+        tw, th = tb[2] - tb[0], tb[3] - tb[1]
+        # 轮廓比例差太多说明不是同一个构图，不动它
+        if abs((tw / th) / (sw / sh) - 1) > 0.25:
+            continue
+        tp.update({
+            "x": tb[0] + (sp["x"] - sb[0]) / sw * tw,
+            "y": tb[1] + (sp["y"] - sb[1]) / sh * th,
+            "w": sp["w"] * tw / sw,
+            "angle": sp.get("angle", 0.0),
+            "source": "manual",
+        })
+        for k in ("color", "style"):
+            if sp.get(k):
+                tp[k] = sp[k]
+        targets.append(img)
+    if meta:
+        list(pool.map(lambda i: render_image(product, i, meta), targets))
+    return len(targets)
 
 
 def clear_outputs(product: dict) -> dict:

@@ -47,7 +47,24 @@ def pip_install(py: Path) -> None:
     raise SystemExit("依赖安装失败，请检查网络后重新双击启动。")
 
 
+def disable_quick_edit() -> None:
+    """关闭命令行窗口的"快速编辑"：否则鼠标点一下黑窗口，程序就会被暂停，看起来像卡死。"""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        handle = k32.GetStdHandle(-10)
+        mode = ctypes.c_uint32()
+        if k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            k32.SetConsoleMode(handle, (mode.value & ~0x0040) | 0x0080)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
+    disable_quick_edit()
     if sys.version_info < (3, 9):
         raise SystemExit(f"需要 Python 3.9 或更高版本，当前是 {sys.version.split()[0]}")
     if port_in_use():

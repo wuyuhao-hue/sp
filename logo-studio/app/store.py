@@ -25,25 +25,38 @@ DEFAULT_SETTINGS = {
     "image_model": "gpt-image-2",
     "vision_model": "",
     "locate_mode": "local",  # local / ai
+    "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）
     "browser": "chrome",  # chrome / edge
-    "scrape_delay": 5.0,
+    "scrape_delay": 3.0,
     "scrape_detail_images": False,
     "export_wb_size": True,
 }
 
 
 def _read(path: Path, default):
-    try:
-        return json.loads(path.read_text("utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return default
+    # Windows 上文件正被另一个线程替换时会短暂"拒绝访问"，稍等重试
+    for attempt in range(20):
+        try:
+            return json.loads(path.read_text("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return default
+        except PermissionError:
+            time.sleep(0.05 * (attempt + 1))
+    return default
 
 
 def _write(path: Path, obj) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex[:6]}.tmp")
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=1), "utf-8")
-    tmp.replace(path)
+    for attempt in range(40):
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (attempt + 1))
+    tmp.unlink(missing_ok=True)
+    raise PermissionError(f"文件被占用，无法保存：{path}")
 
 
 def new_id() -> str:

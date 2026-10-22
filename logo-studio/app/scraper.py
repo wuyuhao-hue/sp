@@ -371,22 +371,26 @@ class Browser:
             self.page.wait_for_timeout(int(random.uniform(delay, delay * 2) * 1000))
 
     def download(self, url: str, referer: str) -> Image.Image | None:
-        """图片在公共 CDN 上，直接下载，不占用浏览器、不带账号 cookie。"""
-        for attempt in range(3):
-            try:
-                if attempt < 2:
-                    r = httpx.get(url, headers={"User-Agent": UA, "Referer": referer}, timeout=30, follow_redirects=True)
-                    ok, body = r.status_code == 200, r.content
-                else:
-                    r = self.ctx.request.get(url, headers={"Referer": referer}, timeout=30000)
-                    ok, body = r.ok, r.body()
-                if ok:
-                    im = Image.open(io.BytesIO(body))
-                    im.load()
-                    return im
-            except Exception:  # noqa: BLE001
-                time.sleep(1)
-        return None
+        return download_image(url, referer, self.ctx)
+
+
+def download_image(url: str, referer: str, ctx=None) -> Image.Image | None:
+    """图片在公共 CDN 上，直接下载，不占用浏览器、不带账号 cookie。"""
+    for attempt in range(3):
+        try:
+            if attempt < 2 or ctx is None:
+                r = httpx.get(url, headers={"User-Agent": UA, "Referer": referer}, timeout=30, follow_redirects=True)
+                ok, body = r.status_code == 200, r.content
+            else:
+                r = ctx.request.get(url, headers={"Referer": referer}, timeout=30000)
+                ok, body = r.ok, r.body()
+            if ok:
+                im = Image.open(io.BytesIO(body))
+                im.load()
+                return im
+        except Exception:  # noqa: BLE001
+            time.sleep(1)
+    return None
 
 
 browser = Browser()
@@ -413,8 +417,10 @@ def _save_image(im: Image.Image, path: Path) -> tuple[int, int]:
     return im.size
 
 
-def save_offer(b: Browser, raw: dict, offer_id: str, job: Job) -> dict | None:
-    """把页面上提取到的数据解析、下载图片并保存为商品。"""
+def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | None:
+    """把页面上提取到的数据解析、下载图片并保存为商品。b 为空时（扩展采集）直接从 CDN 下载。"""
+    from concurrent.futures import ThreadPoolExecutor
+
     url = f"https://detail.1688.com/offer/{offer_id}.html"
     pid = f"1688-{offer_id}"
     info = parse_offer(raw, offer_id, url)
@@ -425,27 +431,31 @@ def save_offer(b: Browser, raw: dict, offer_id: str, job: Job) -> dict | None:
         return None
 
     pdir = store.product_dir(pid)
-    images = []
-    targets = [("main", u, None) for u in info["main_images"]]
+    targets: list[tuple[str, str, str | None]] = [("main", u, None) for u in info["main_images"]]
     for prop in info["sku_props"]:
         for v in prop["values"]:
             if v["image"]:
                 targets.append(("sku", v["image"], v["name"]))
-    seen: dict[str, dict] = {}
+    uniq: dict[str, tuple[int, str, str | None]] = {}
+    sku_of: dict[str, str] = {}
     for i, (kind, u, sku_name) in enumerate(targets):
-        if u in seen:
+        if u not in uniq:
+            uniq[u] = (i, kind, sku_name)
+        elif sku_name:
             # SKU 图和主图是同一张时，只记下对应的 SKU 名称
-            if sku_name and not seen[u].get("sku"):
-                seen[u]["sku"] = sku_name
-            continue
-        im = b.download(u, url)
+            sku_of.setdefault(u, sku_name)
+    job.note(f"下载 {len(uniq)} 张图片…")
+    ctx = b.ctx if b else None
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        downloaded = list(ex.map(lambda u: download_image(u, url, ctx), uniq))
+    images = []
+    for (u, (i, kind, sku_name)), im in zip(uniq.items(), downloaded):
         if im is None:
             continue
         iid = f"{kind}{i:02d}"
         size = _save_image(im, pdir / "orig" / f"{iid}.jpg")
-        images.append({"id": iid, "kind": kind, "sku": sku_name, "src": u,
+        images.append({"id": iid, "kind": kind, "sku": sku_name or sku_of.get(u), "src": u,
                        "file": f"orig/{iid}.jpg", "size": size, "place": None, "out": None})
-        seen[u] = images[-1]
 
     if not images:
         job.note(f"✗ {offer_id} 图片全部下载失败，请检查网络后重试")

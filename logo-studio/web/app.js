@@ -18,7 +18,7 @@ createApp({
     settings: {}, browserState: { state: 'idle', message: '' }, jobs: [], hiddenJobs: [],
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
     busy: false, compare: false, wrapSize: { w: 600, h: 600 }, dragging: false, dragBox: null, natural: { w: 1, h: 1 },
-    toastMsg: '', toastErr: false, dropOver: false, testMsg: '', variantTarget: null,
+    toastMsg: '', toastErr: false, cal: {}, ext: {}, extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'), dropOver: false, testMsg: '', variantTarget: null,
     colorOpts: [['', '跟随Logo'], ['auto', '自动'], ['light', '浅'], ['dark', '深'], ['original', '原色']],
     styleOpts: [['', '跟随Logo'], ['print', '印花'], ['embroidery', '刺绣']],
   }),
@@ -54,13 +54,32 @@ createApp({
         width: `calc(${b.w * 100}% + 12px)`, height: `calc(${b.h * 100}% + 12px)`, transform: `rotate(${b.angle || 0}deg)`,
       };
     },
+    calText() {
+      const c = this.cal, parts = [];
+      const pct = v => Math.abs(Math.round(v * 100)) + '%';
+      if (Math.abs(c.dx) >= 0.005) parts.push((c.dx > 0 ? '往右 ' : '往左 ') + pct(c.dx));
+      if (Math.abs(c.dy) >= 0.005) parts.push((c.dy > 0 ? '往下 ' : '往上 ') + pct(c.dy));
+      if (Math.abs(c.scale - 1) >= 0.03) parts.push((c.scale > 1 ? '放大 ' : '缩小 ') + pct(c.scale - 1));
+      return parts.length ? parts.join('，') + '（相对衣服大小）' : '和自动识别基本一致';
+    },
     visibleJobs() { return this.jobs.filter(j => !this.hiddenJobs.includes(j.id)).slice(0, 3); },
+    extMode() { return (this.settings.scrape_mode || 'extension') === 'extension'; },
+    statusTitle() { return this.extMode ? (this.ext.message || '') : this.browserState.message; },
     browserDot() {
+      if (this.extMode) return this.ext.status ? 'warn' : this.ext.connected ? 'ok' : (this.extInstalled ? 'warn' : 'err');
       return { ready: 'ok', need_login: 'warn', need_verify: 'warn', starting: 'warn', error: 'err' }[this.browserState.state] || '';
     },
     browserLabel() {
+      if (this.extMode) {
+        if (this.ext.status === 'login') return '请在 Chrome 中登录 1688';
+        if (this.ext.status === 'verify') return '请在 Chrome 中完成验证';
+        return this.ext.connected ? '采集助手已连接' : (this.extInstalled ? '采集助手连接中…' : '未安装采集助手');
+      }
       return { ready: '浏览器已连接', need_login: '等待登录 1688', need_verify: '等待滑块验证', starting: '浏览器启动中', error: '浏览器出错' }[this.browserState.state] || '浏览器未启动';
     },
+  },
+  watch: {
+    tab(t) { if (t === 'settings') this.loadCal(); },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll()]);
@@ -87,6 +106,8 @@ createApp({
       try {
         const s = await api('/api/state');
         this.browserState = s.browser;
+        this.ext = s.ext || {};
+        this.extInstalled = this.extInstalled || !!document.documentElement.getAttribute('data-logo-studio-ext');
         if (!this.settingsLoaded) { this.settings = s.settings; this.settingsLoaded = true; }
         const prevDone = this.jobs.reduce((n, j) => n + j.done + (j.status === 'done' ? 1 : 0), 0);
         this.jobs = s.jobs;
@@ -153,6 +174,15 @@ createApp({
         this.setCurrent(await api(`/api/products/${this.current.id}/images/${this.img.id}/place`, { body: patch }));
       } catch (e) { this.toast(e.message, true); }
       this.busy = false; this.dragBox = null;
+    },
+    async syncPlace() {
+      this.busy = true;
+      try {
+        const r = await api(`/api/products/${this.current.id}/images/${this.img.id}/sync`, { body: {} });
+        this.setCurrent(r.product);
+        this.toast(r.count ? `已同步到 ${r.count} 张同款图` : '没有找到构图一致的其它图片');
+      } catch (e) { this.toast(e.message, true); }
+      this.busy = false;
     },
     async relocateImage() {
       this.busy = true;
@@ -225,11 +255,15 @@ createApp({
         this.jobs.unshift(job);
         this.showScrape = false;
         this.scrapeForm.links = ''; this.scrapeForm.shops = '';
+        window.postMessage({ logoStudio: 'kick' }, '*');
       } catch (e) { this.toast(e.message, true); }
     },
     async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
     async scrapeTabs() {
-      try { this.jobs.unshift(await api('/api/scrape/tabs', { body: {} })); this.showScrape = false; }
+      try {
+        this.jobs.unshift(await api('/api/scrape/tabs', { body: {} })); this.showScrape = false;
+        window.postMessage({ logoStudio: 'kick' }, '*');
+      }
       catch (e) { this.toast(e.message, true); }
     },
     async cancelJob(j) { await api(`/api/jobs/${j.id}/cancel`, { body: {} }); },
@@ -265,6 +299,19 @@ createApp({
     },
 
     // ---------- 设置 ----------
+    async loadCal() { this.cal = await api('/api/calibration'); },
+    async resetCal() {
+      if (!confirm('清除后，新识别的位置会回到默认算法。确定？')) return;
+      this.cal = await api('/api/calibration', { method: 'DELETE' });
+    },
+    async debugPack() {
+      this.toast('正在打包，图片多时需要十几秒…');
+      try {
+        const r = await api('/api/debug-pack', { body: {} });
+        this.toast('已生成：' + r.name);
+        this.openFolder('');
+      } catch (e) { this.toast(e.message, true); }
+    },
     async saveSettings() {
       const s = await api('/api/settings', { body: this.settings });
       this.settings = s.settings;

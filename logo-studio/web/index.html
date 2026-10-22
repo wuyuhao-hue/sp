@@ -18,8 +18,8 @@
       <button :class="{on: tab==='settings'}" @click="tab='settings'">设置</button>
     </nav>
     <div class="spacer"></div>
-    <span class="pill" :title="browserState.message"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
-    <button class="btn sm" @click="openBrowser">打开浏览器</button>
+    <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
+    <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
   </header>
 
   <!-- 商品工作区 -->
@@ -96,6 +96,7 @@
         <span class="range">角度<input type="range" min="-30" max="30" step="1" :value="place.angle||0" @change="patchPlace({angle: +$event.target.value})">{{ place.angle||0 }}°</span>
         <span class="sep"></span>
         <button class="btn sm ghost" @click="relocateImage" title="重新自动识别位置">重新识别</button>
+        <button class="btn sm ghost" :disabled="!place.printable" @click="syncPlace" title="同款不同颜色的图构图一样时，把这张图的位置、大小同步过去">同步到同款图</button>
         <button class="btn sm ghost" :disabled="!img.out" @click="refine" title="用中转站 gpt-image 精修（可选，需在设置里配置）">AI 精修</button>
       </div>
 
@@ -214,11 +215,28 @@
       <div class="card">
         <div class="set-title">采集</div>
         <div class="form-grid">
-          <div class="field"><label>采集用的浏览器</label>
+          <div class="field"><label>采集方式</label>
+            <select class="input" v-model="settings.scrape_mode"><option value="extension">Chrome 扩展：在你自己的 Chrome 里静默采集（推荐）</option><option value="browser">独立浏览器窗口（备用）</option></select></div>
+          <div class="field" v-if="settings.scrape_mode !== 'extension'"><label>独立窗口使用的浏览器</label>
             <select class="input" v-model="settings.browser"><option value="chrome">Chrome（推荐）</option><option value="edge">Edge</option></select></div>
           <div class="field"><label>每个商品间隔（秒，越大越不容易被风控）</label><input class="input" type="number" min="1" step="0.5" v-model.number="settings.scrape_delay"></div>
           <div class="field"><label>导出图片</label>
             <span class="switch" :class="{on: settings.export_wb_size}" @click="settings.export_wb_size=!settings.export_wb_size" style="height:36px"><i></i>转为 WB 尺寸（3:4，至少 900×1200）</span></div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <div class="set-title">定位学习</div>
+        <div class="form-grid">
+          <div class="full note">你在图上手动拖动、缩放 logo 后，工具会记住你和自动识别结果的差别，之后新识别的商品会自动按你的习惯修正。调整过 3 张以上开始生效。</div>
+          <div class="full row between">
+            <span v-if="cal.n >= 3">已从 <b>{{ cal.n }}</b> 次调整中学习：{{ calText }}</span>
+            <span v-else class="muted">已记录 {{ cal.n || 0 }} 次调整，再调 {{ 3 - (cal.n || 0) }} 次开始生效</span>
+            <button class="btn sm" :disabled="!cal.n" @click="resetCal">清除学习记录</button>
+          </div>
+          <div class="full row between">
+            <span class="muted">定位不准的商品很多时，导出调试包发给开发者，可以用你的真实图片一次性批量调优。</span>
+            <button class="btn sm" @click="debugPack">导出定位调试包</button>
+          </div>
         </div>
       </div>
       <div class="card" style="margin-top:16px">
@@ -245,7 +263,20 @@
         <div class="field"><label>店铺链接（整店采集，每行一个）</label>
           <textarea class="input" rows="2" v-model="scrapeForm.shops" placeholder="https://shopxxxx.1688.com"></textarea></div>
         <div class="field" style="width:200px"><label>每个店铺最多翻页</label><input class="input" type="number" min="1" max="50" v-model.number="scrapeForm.max_pages"></div>
-        <div class="note">会打开一个独立的 Chrome 窗口（和你平时用的 Chrome 互不影响）。<b>第一次使用请在窗口里登录 1688</b>（建议用小号），之后会记住登录状态。遇到人机验证时在窗口里手动完成，程序会自动继续。<br>
+        <div class="note" v-if="extMode && !extInstalled">
+          <b>还没有安装「采集助手」Chrome 扩展</b>，装一次就行：<br>
+          1. 在 Chrome 地址栏输入 <b>chrome://extensions</b> 打开扩展页<br>
+          2. 打开右上角的「开发者模式」<br>
+          3. 点「加载已解压的扩展程序」，选择程序目录里的 <b>logo-studio\chrome-extension</b> 文件夹
+          <button class="btn sm" style="margin-left:6px" @click="openFolder('extension')">打开这个文件夹</button><br>
+          4. 回到本页面按 F5 刷新
+        </div>
+        <div class="note" v-else-if="extMode">
+          采集在你自己的 Chrome 里进行，使用你已登录的 1688 账号：会自动打开一个<b>最小化的窗口</b>逐个读取商品页，不影响你正常上网。
+          遇到登录或人机验证时这个窗口会弹出来，处理完会自动缩回去继续。<br>
+          <b>更省事：</b>浏览 1688 时，商品页右下角有「采集到印标工作台」按钮，点一下就采集；或者开好多个商品标签页后，点左下角「采集已打开的标签页」。
+        </div>
+        <div class="note" v-else>会打开一个独立的 Chrome 窗口（和你平时用的 Chrome 互不影响）。<b>第一次使用请在窗口里登录 1688</b>（建议用小号），之后会记住登录状态。遇到人机验证时在窗口里手动完成，程序会自动继续。<br>
         <b>最不容易触发验证的方式：</b>自己在这个窗口里打开想要的商品页（可以开很多个标签页），然后点左下角「采集已打开的标签页」，程序不做任何跳转，只读取页面数据。</div>
       </div>
       <div class="modal-foot"><button class="btn" style="margin-right:auto" @click="scrapeTabs">采集已打开的标签页</button><button class="btn" @click="showScrape=false">取消</button><button class="btn primary" @click="startScrape">开始采集</button></div>
