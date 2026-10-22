@@ -14,7 +14,7 @@ from PIL import Image
 
 from . import ai, jobs, pipeline, store
 from .export import export_products
-from .scraper import browser, run_scrape
+from .scraper import browser, run_scrape, run_scrape_tabs
 
 WEB = store.ROOT / "web"
 app = FastAPI(title="印标工作台")
@@ -192,10 +192,17 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     return job.to_dict()
 
 
+@app.post("/api/scrape/tabs")
+def scrape_tabs():
+    job = jobs.Job("scrape", "采集浏览器中已打开的商品页")
+    browser.submit(run_scrape_tabs, job)
+    return job.to_dict()
+
+
 @app.post("/api/browser/open")
 def open_browser():
     def go(b):
-        b.goto("https://login.1688.com/")
+        b.page.bring_to_front()
     browser.submit(go)
     return {"ok": True}
 

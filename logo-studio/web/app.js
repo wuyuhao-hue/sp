@@ -227,7 +227,11 @@ createApp({
         this.scrapeForm.links = ''; this.scrapeForm.shops = '';
       } catch (e) { this.toast(e.message, true); }
     },
-    async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，请在弹出的窗口中登录 1688'); },
+    async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
+    async scrapeTabs() {
+      try { this.jobs.unshift(await api('/api/scrape/tabs', { body: {} })); this.showScrape = false; }
+      catch (e) { this.toast(e.message, true); }
+    },
     async cancelJob(j) { await api(`/api/jobs/${j.id}/cancel`, { body: {} }); },
     hideJob(j) { this.hiddenJobs.push(j.id); },
     async openFolder(path) { await api('/api/open-folder', { body: { path } }).catch(e => this.toast(e.message, true)); },

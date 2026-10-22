@@ -19,7 +19,7 @@
     </nav>
     <div class="spacer"></div>
     <span class="pill" :title="browserState.message"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
-    <button class="btn sm" @click="openBrowser">打开 1688 登录</button>
+    <button class="btn sm" @click="openBrowser">打开浏览器</button>
   </header>
 
   <!-- 商品工作区 -->
@@ -214,6 +214,8 @@
       <div class="card">
         <div class="set-title">采集</div>
         <div class="form-grid">
+          <div class="field"><label>采集用的浏览器</label>
+            <select class="input" v-model="settings.browser"><option value="chrome">Chrome（推荐）</option><option value="edge">Edge</option></select></div>
           <div class="field"><label>每个商品间隔（秒，越大越不容易被风控）</label><input class="input" type="number" min="1" step="0.5" v-model.number="settings.scrape_delay"></div>
           <div class="field"><label>导出图片</label>
             <span class="switch" :class="{on: settings.export_wb_size}" @click="settings.export_wb_size=!settings.export_wb_size" style="height:36px"><i></i>转为 WB 尺寸（3:4，至少 900×1200）</span></div>
@@ -243,9 +245,10 @@
         <div class="field"><label>店铺链接（整店采集，每行一个）</label>
           <textarea class="input" rows="2" v-model="scrapeForm.shops" placeholder="https://shopxxxx.1688.com"></textarea></div>
         <div class="field" style="width:200px"><label>每个店铺最多翻页</label><input class="input" type="number" min="1" max="50" v-model.number="scrapeForm.max_pages"></div>
-        <div class="note">会自动打开一个 Edge 浏览器窗口。<b>第一次使用请在窗口里登录 1688</b>（建议用小号），之后会记住登录状态。遇到滑块验证时，在窗口里手动拖一下即可继续。采集过程中请不要关闭这个浏览器窗口。</div>
+        <div class="note">会打开一个独立的 Chrome 窗口（和你平时用的 Chrome 互不影响）。<b>第一次使用请在窗口里登录 1688</b>（建议用小号），之后会记住登录状态。遇到人机验证时在窗口里手动完成，程序会自动继续。<br>
+        <b>最不容易触发验证的方式：</b>自己在这个窗口里打开想要的商品页（可以开很多个标签页），然后点左下角「采集已打开的标签页」，程序不做任何跳转，只读取页面数据。</div>
       </div>
-      <div class="modal-foot"><button class="btn" @click="showScrape=false">取消</button><button class="btn primary" @click="startScrape">开始采集</button></div>
+      <div class="modal-foot"><button class="btn" style="margin-right:auto" @click="scrapeTabs">采集已打开的标签页</button><button class="btn" @click="showScrape=false">取消</button><button class="btn primary" @click="startScrape">开始采集</button></div>
     </div>
   </div>
 

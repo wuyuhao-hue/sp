@@ -25,7 +25,8 @@ DEFAULT_SETTINGS = {
     "image_model": "gpt-image-2",
     "vision_model": "",
     "locate_mode": "local",  # local / ai
-    "scrape_delay": 3.0,
+    "browser": "chrome",  # chrome / edge
+    "scrape_delay": 5.0,
     "scrape_detail_images": False,
     "export_wb_size": True,
 }
