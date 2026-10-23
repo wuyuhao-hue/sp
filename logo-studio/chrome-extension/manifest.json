@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "印标工作台 采集助手",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "在你自己的 Chrome 里静默采集 1688 商品，发送到本机运行的印标工作台。",
   "permissions": ["tabs", "scripting", "storage", "alarms"],
   "host_permissions": ["*://*.1688.com/*", "http://127.0.0.1:8765/*", "http://localhost:8765/*"],

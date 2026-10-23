@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>印标工作台</title>
+<meta name="referrer" content="no-referrer">
+<title>AI 套图工作台</title>
 <link rel="stylesheet" href="/static/style.css">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='9' fill='%236366f1'/><path d='M9 22l5-12 4 8 2-4 3 8z' fill='white'/></svg>">
 </head>
@@ -11,18 +12,20 @@
 <div id="app" v-cloak>
   <!-- 顶栏 -->
   <header class="topbar">
-    <div class="brand"><div class="brand-mark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.5 16 10 4 20"/><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/></svg></div>印标工作台</div>
+    <div class="brand"><div class="brand-mark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.5 16 10 4 20"/><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/></svg></div>AI 套图工作台</div>
     <nav class="nav">
       <button :class="{on: tab==='products'}" @click="tab='products'">商品</button>
+      <button :class="{on: tab==='queue'}" @click="tab='queue'">待上架<span class="count" v-if="queueCount">{{ queueCount }}</span></button>
       <button :class="{on: tab==='logos'}" @click="tab='logos'">Logo 库</button>
       <button :class="{on: tab==='settings'}" @click="tab='settings'">设置</button>
     </nav>
     <div class="spacer"></div>
+    <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
   </header>
 
-  <!-- 商品工作区 -->
+  <!-- ================= 商品 ================= -->
   <main class="workspace" v-if="tab==='products'">
     <aside class="sidebar" :class="{selecting: selected.length}">
       <div class="side-head">
@@ -30,7 +33,7 @@
           <button class="btn primary grow" @click="showScrape=true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>采集 1688
           </button>
-          <button class="btn" @click="$refs.importInput.click()" title="导入本地图片作为一个商品">导入图片</button>
+          <button class="btn" @click="$refs.importInput.click()" title="导入本地图片作为一个商品：第一张是 SKU 图，其余是参考图">导入图片</button>
           <input ref="importInput" type="file" accept="image/*" multiple hidden @change="importLocal">
         </div>
         <input class="search" v-model="query" placeholder="搜索标题 / 商品ID">
@@ -42,13 +45,15 @@
       <div class="plist">
         <div v-for="p in filtered" :key="p.id" class="pcard" :class="{on: current && current.id===p.id}" @click="openProduct(p.id)">
           <i class="check" :class="{on: selected.includes(p.id)}" @click.stop="toggleSel(p.id)"></i>
-          <img :src="p.thumb ? fileUrl(p.id, p.thumb, p.v) : ''" loading="lazy">
+          <img :src="p.thumb || ''" loading="lazy">
           <div class="grow">
             <div class="t">{{ p.title || '（无标题）' }}</div>
             <div class="meta">
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
-              <span class="tag">{{ p.count }} 图</span>
-              <span class="tag accent" v-if="p.logo_id">{{ logoName(p.logo_id) }}</span>
+              <span class="tag">{{ p.sku_count }} SKU</span>
+              <span class="tag accent" v-if="p.set_count">{{ p.set_count }} 套图</span>
+              <span class="tag ok" v-if="p.queued">{{ p.queued }} 待上架</span>
+              <span class="tag warn" v-if="p.running">生成中</span>
             </div>
           </div>
         </div>
@@ -57,196 +62,280 @@
         </div>
       </div>
       <div class="batchbar" v-if="selected.length">
-        <div class="faint">对选中的 {{ selected.length }} 个商品：</div>
-        <button class="btn primary block" :disabled="!activeLogo" @click="batchApply(activeLogo)">印上「{{ activeLogo ? logoName(activeLogo) : '先在右侧选 logo' }}」</button>
         <div class="row">
-          <button class="btn grow" @click="batchApply(null)">恢复原图</button>
-          <button class="btn grow" @click="exportSel">导出</button>
-          <button class="btn danger" @click="deleteSel">删除</button>
+          <span class="faint grow">已选 {{ selected.length }} 个商品</span>
+          <button class="btn sm danger" @click="deleteSel">删除</button>
         </div>
       </div>
     </aside>
 
-    <!-- 舞台 -->
-    <section class="stage" v-if="current">
+    <!-- 中间 -->
+    <section class="stage scroll" v-if="current">
       <div class="stage-head">
         <div class="grow">
           <h2 :title="current.title">{{ current.title || '（无标题）' }}</h2>
           <div class="faint" style="margin-top:4px">
             <template v-if="current.offer_id">1688 · {{ current.offer_id }} · </template>
-            {{ current.images.length }} 张图 · 识别可印 {{ printableCount }} 张
-            <template v-if="current.logo_id"> · 当前 logo：<b style="color:var(--accent)">{{ logoName(current.logo_id) }}</b></template>
+            {{ skus.length }} 个 SKU · {{ (current.main_images||[]).length }} 主图 · {{ (current.detail_images||[]).length }} 详情图
+            <template v-if="current.price_min"> · <span class="price">¥{{ fmtPrice(current.price_min, current.price_max) }}</span></template>
           </div>
         </div>
-        <a v-if="current.url" class="btn sm ghost" :href="current.url" target="_blank">打开原链接</a>
-        <button class="btn sm" @click="exportOne">导出此商品</button>
+        <a v-if="current.url" class="btn sm ghost" :href="current.url" target="_blank">打开 1688 原链接</a>
       </div>
 
-      <div class="toolbar" v-if="img">
-        <span class="switch" :class="{on: place.printable}" @click="patchPlace({printable: !place.printable})"><i></i>这张图印 logo</span>
-        <span class="sep"></span>
-        <span class="faint">颜色</span>
-        <span class="seg">
-          <button v-for="o in colorOpts" :key="o[0]" :class="{on: (place.color||'') === o[0]}" @click="patchPlace({color: o[0] || null})">{{ o[1] }}</button>
-        </span>
-        <span class="faint">工艺</span>
-        <span class="seg">
-          <button v-for="o in styleOpts" :key="o[0]" :class="{on: (place.style||'') === o[0]}" @click="patchPlace({style: o[0] || null})">{{ o[1] }}</button>
-        </span>
-        <span class="range">角度<input type="range" min="-30" max="30" step="1" :value="place.angle||0" @change="patchPlace({angle: +$event.target.value})">{{ place.angle||0 }}°</span>
-        <span class="sep"></span>
-        <button class="btn sm ghost" @click="relocateImage" title="重新自动识别位置">重新识别</button>
-        <button class="btn sm ghost" :disabled="!place.printable" @click="syncPlace" title="同款不同颜色的图构图一样时，把这张图的位置、大小同步过去">同步到同款图</button>
-        <button class="btn sm ghost" :disabled="!img.out" @click="refine" title="用中转站 gpt-image 精修（可选，需在设置里配置）">AI 精修</button>
-      </div>
-
-      <div class="canvas-wrap" ref="wrap">
-        <div class="canvas" v-if="img" ref="canvas" @mousedown="startCompare" @mouseup="compare=false" @mouseleave="compare=false">
-          <img class="main" :src="shownSrc" draggable="false" @load="imgLoaded" :style="{maxHeight: wrapSize.h + 'px', maxWidth: wrapSize.w + 'px'}">
-          <div class="skipmask" v-if="!place.printable"><span>{{ place.reason || '这张图不印' }} · 打开上方开关可手动印</span></div>
-          <div class="lbox" v-if="place.printable && box && !compare" :class="{drag: dragging}" :style="boxStyle" @mousedown.stop="startDrag($event, 'move')">
-            <span class="lbl">{{ current.logo_id ? '拖动调整位置' : '印标位置（先选右侧 logo）' }}</span>
-            <i class="h" @mousedown.stop="startDrag($event, 'resize')"></i>
+      <div class="block">
+        <div class="block-head">
+          <b>选择 SKU</b><span class="faint">买家买的是 SKU，每个勾选的颜色单独生成一套图（WB 上每个颜色是一张商品卡）</span>
+          <span class="spacer"></span>
+          <button class="btn sm ghost" @click="skuSel = skuSel.length === skus.length ? [] : skus.map(k => k.name)">{{ skuSel.length === skus.length ? '全不选' : '全选' }}</button>
+        </div>
+        <div class="sku-grid">
+          <div v-for="k in skus" :key="k.name" class="sku-card" :class="{on: skuSel.includes(k.name)}" @click="toggleSku(k.name)">
+            <img :src="imgSrc(k.image)">
+            <i class="check" :class="{on: skuSel.includes(k.name)}"></i>
+            <button class="zoom-btn" title="查看大图" @click.stop="zoom(imgSrc(k.image))">⤢</button>
+            <div class="nm" :title="k.name">{{ k.name }}</div>
+            <div class="faint" v-if="setsOf(k.name).length">{{ setsOf(k.name).length }} 套图</div>
           </div>
-          <span class="compare-hint" v-if="img.out">{{ compare ? '原图' : '按住图片空白处查看原图' }}</span>
-          <div class="busy" v-if="busy"><div class="spinner"></div></div>
         </div>
       </div>
 
-      <div class="thumbs">
-        <div v-for="i in current.images" :key="i.id" class="thumb" :class="{on: img && img.id===i.id, off: !(i.place||{}).printable}" @click="imgId=i.id">
-          <img :src="fileUrl(current.id, i.out || i.file, i.v)" loading="lazy">
-          <span class="b" :class="{p: i.out}">{{ i.kind==='sku' ? (i.sku || 'SKU') : '主图' }}</span>
+      <div class="block">
+        <div class="block-head" style="cursor:pointer" @click="showRefs = !showRefs">
+          <b>参考图</b><span class="faint">主图和详情图只用来帮 AI 理解细节，不会作为 SKU</span>
+          <span class="spacer"></span><span class="faint">{{ showRefs ? '收起 ▲' : '展开 ▼' }}</span>
         </div>
+        <div class="ref-strip" v-if="showRefs">
+          <img v-for="u in (current.main_images||[])" :key="u" :src="imgSrc(u)" loading="lazy" @click="zoom(imgSrc(u))">
+          <span class="sep-v" v-if="(current.detail_images||[]).length"></span>
+          <img v-for="u in (current.detail_images||[])" :key="u" :src="imgSrc(u)" loading="lazy" class="detail" @click="zoom(imgSrc(u))">
+        </div>
+      </div>
+
+      <div class="block" v-for="st in setsSorted" :key="st.id">
+        <div class="block-head">
+          <img class="mini" :src="imgSrc(st.sku_image)">
+          <b>{{ st.sku }}</b>
+          <span class="tag accent" v-if="st.logo_name">{{ st.logo_name }}</span>
+          <span class="tag" v-else>无 logo</span>
+          <span class="tag warn" v-if="st.status==='running'">生成中 {{ st.images.filter(i => i.status==='done').length }}/{{ st.images.length }}</span>
+          <span class="tag" v-else-if="st.status==='partial'" style="color:var(--danger)">有 {{ st.images.filter(i => i.status==='failed').length }} 张失败</span>
+          <span class="tag ok" v-if="st.queued">已在待上架</span>
+          <span class="spacer"></span>
+          <select class="input sm" v-if="logos.length && st.images.some(i => i.logo)" :disabled="st.status==='running'" @change="swapLogo(st, $event)">
+            <option value="">换成其他 logo…</option>
+            <option v-for="l in logos" :key="l.id" :value="l.id" :disabled="l.id===st.logo_id">{{ l.name }}</option>
+          </select>
+          <button class="btn sm" :class="{primary: !st.queued}" :disabled="st.status==='running'" @click="setQueued(st, !st.queued)">{{ st.queued ? '移出待上架' : '移入待上架' }}</button>
+          <button class="btn sm ghost danger" @click="deleteSet(st)">删除</button>
+        </div>
+        <div class="gen-grid">
+          <div v-for="(im, i) in st.images" :key="i" class="gen" :class="im.status">
+            <img v-if="im.file" :src="fileUrl(current.id, im.file, im.v)" @click="openLightbox(st, i)">
+            <div class="gen-state" v-if="im.status==='running' || im.status==='pending'"><div class="spinner"></div><span>{{ im.status==='running' ? '生成中…' : '排队中' }}</span></div>
+            <div class="gen-state err" v-else-if="im.status==='failed'" :title="im.error"><span>生成失败</span><small>{{ (im.error||'').slice(0, 80) }}</small><button class="btn sm" @click="regen(st, i)">重试</button></div>
+            <div class="gen-lbl"><span>{{ i + 1 }}. {{ shotName(im.type) }}</span><span class="tag accent" v-if="im.logo">印标</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="block empty-sets" v-if="!current.sets || !current.sets.length">
+        <div class="faint">还没有套图。勾选上方的 SKU，在右侧选 logo，然后点「生成套图」。</div>
       </div>
     </section>
     <section class="stage" v-else>
       <div class="empty">
         <div class="ill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.38 3.46 16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.47a1 1 0 0 0 .99.84H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.84l.58-3.47a2 2 0 0 0-1.34-2.23z"/></svg></div>
-        <div style="font-size:16px;color:var(--text);font-weight:600">选择一个商品开始印标</div>
-        <div>左侧选商品 → 右侧点 logo，即可印到所有合适的图片上<br>再点另一个 logo 会从原图重新生成，不会叠加</div>
+        <div style="font-size:16px;color:var(--text);font-weight:600">选择一个商品开始</div>
+        <div>勾选 SKU → 选 logo → AI 生成整套上架图<br>同一个 SKU 换 logo 时，只重做印标的那几张</div>
       </div>
     </section>
 
     <!-- 右侧 -->
     <aside class="rightbar">
-      <div class="sec">
-        <h3>选择 Logo <button class="btn sm ghost" @click="tab='logos'">管理</button></h3>
-        <div class="logo-grid">
-          <div class="logo-tile none" :class="{on: current && !current.logo_id}" @click="applyLogo(null)">
-            <div class="pv checker">原图</div><div class="nm">不印 / 恢复原图</div>
-          </div>
-          <div v-for="l in logos" :key="l.id" class="logo-tile" :class="{on: current ? current.logo_id===l.id : activeLogo===l.id}" @click="applyLogo(l.id)">
-            <div class="pv checker"><img :src="logoUrl(l)"></div>
-            <div class="nm">{{ l.name }}</div>
+      <template v-if="current">
+        <div class="sec">
+          <h3>Logo <button class="btn sm ghost" @click="tab='logos'">管理</button></h3>
+          <div class="logo-grid">
+            <div class="logo-tile none" :class="{on: !genLogo}" @click="genLogo=null"><div class="pv checker">不印</div><div class="nm">不印标</div></div>
+            <div v-for="l in logos" :key="l.id" class="logo-tile" :class="{on: genLogo===l.id}" @click="genLogo=l.id">
+              <div class="pv checker"><img :src="logoUrl(l)"></div><div class="nm">{{ l.name }}</div>
+            </div>
           </div>
         </div>
-        <div v-if="!logos.length" class="note" style="margin-top:10px">还没有 logo，去「Logo 库」上传你的商标（透明底 PNG 最佳）。</div>
-      </div>
-      <div class="sec" v-if="current">
-        <h3>商品信息</h3>
-        <div class="kv">
-          <span class="k">价格</span><span class="price">{{ current.price_min ? '¥' + fmtPrice(current.price_min, current.price_max) : '—' }}</span>
-          <span class="k">尺码</span><span class="chips"><span class="tag" v-for="s in current.sizes" :key="s">{{ s }}</span><span v-if="!current.sizes.length" class="faint">—</span></span>
-          <template v-for="pr in current.sku_props.filter(x => x.values.map(v => v.name).join() !== current.sizes.join())" :key="pr.name">
-            <span class="k">{{ pr.name }}</span><span class="chips"><span class="tag" v-for="v in pr.values" :key="v.name">{{ v.name }}</span></span>
-          </template>
+        <div class="sec">
+          <h3>套图模板 <button class="btn sm ghost" @click="tab='settings'">修改</button></h3>
+          <ol class="shot-list">
+            <li v-for="(sh, i) in activeShots" :key="i">{{ shotName(sh.type) }}<span class="tag accent" v-if="sh.logo && genLogo && canLogo(sh.type)">印标</span></li>
+          </ol>
+          <button class="btn primary block" style="margin-top:12px" :disabled="!skuSel.length || generating" @click="generate">
+            生成套图 · {{ skuSel.length }} 个 SKU × {{ activeShots.length }} 张
+          </button>
+          <div class="faint" style="margin-top:8px">共调用生图 {{ skuSel.length * activeShots.length }} 次<template v-if="!skuSel.length">（先勾选 SKU）</template></div>
         </div>
-      </div>
-      <div class="sec" v-if="current && current.skus.length">
-        <h3>SKU（{{ current.skus.length }}）</h3>
-        <table class="sku-table"><tr v-for="s in current.skus.slice(0, 60)" :key="s.name"><td>{{ s.name }}</td><td>{{ s.price != null ? '¥' + s.price : '' }}</td></tr></table>
-      </div>
+        <div class="sec">
+          <h3>AI 商品理解 <button class="btn sm ghost" v-if="settings.text_model" :disabled="analyzing" @click="analyze">{{ analyzing ? '理解中…' : (aiInfo.description_en ? '重新理解' : '开始理解') }}</button></h3>
+          <div class="note" v-if="!settings.text_model" style="margin-bottom:10px">没有设置「商品理解模型」，卖点由生图模型根据图片自己写。可以在下面手动填写卖点，或到设置里填一个能看图的对话模型。</div>
+          <div class="field"><label>模特</label>
+            <select class="input" :value="aiInfo.gender || guessGender" @change="saveInfo({gender: $event.target.value})">
+              <option value="male">男模特</option><option value="female">女模特</option><option value="unisex">中性</option>
+            </select></div>
+          <div class="field" style="margin-top:10px"><label>首图卖点（{{ langName }}，每行一个，最多 3 个）</label>
+            <textarea class="input" rows="3" :value="(aiInfo['selling_points_' + lang] || []).join('\n')" @change="saveInfo({['selling_points_' + lang]: $event.target.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3)})" placeholder="留空则由 AI 根据图片自己写"></textarea></div>
+          <div class="faint" v-if="aiInfo.selling_points_cn && lang !== 'cn'" style="margin-top:4px">中文：{{ aiInfo.selling_points_cn.join(' / ') }}</div>
+          <div class="field" style="margin-top:10px"><label>俄语标题（导出用）</label>
+            <input class="input" :value="aiInfo.title_ru || ''" @change="saveInfo({title_ru: $event.target.value})"></div>
+          <div class="faint" v-if="aiInfo.description_en" style="margin-top:8px;line-height:1.5">{{ aiInfo.description_en }}</div>
+        </div>
+        <div class="sec">
+          <h3>商品信息</h3>
+          <div class="kv">
+            <span class="k">尺码</span><span class="chips"><span class="tag" v-for="s in current.sizes" :key="s">{{ s }}</span><span v-if="!current.sizes || !current.sizes.length" class="faint">—</span></span>
+            <span class="k">SKU</span><span class="faint">{{ (current.skus||[]).length }} 个组合</span>
+          </div>
+        </div>
+      </template>
     </aside>
   </main>
 
-  <!-- Logo 库 -->
+  <!-- ================= 待上架 ================= -->
+  <main class="page" v-if="tab==='queue'">
+    <div class="page-inner" style="max-width:1280px">
+      <div class="row between">
+        <div><h1>待上架</h1><div class="sub">每一套就是 WB 上的一张商品卡。导出后每套一个文件夹（01 是首图），并附一张汇总表。</div></div>
+        <div class="row">
+          <span class="row" style="cursor:pointer" @click="qSel = qSel.length === queue.length ? [] : queue.map(q => q.set.id)"><i class="check" :class="{on: queue.length && qSel.length === queue.length}"></i><span class="faint">全选</span></span>
+          <button class="btn primary" :disabled="!qSel.length" @click="exportQueue">导出选中（{{ qSel.length }}）</button>
+        </div>
+      </div>
+      <div class="q-grid">
+        <div class="card q-card" v-for="q in queue" :key="q.set.id" :class="{on: qSel.includes(q.set.id)}">
+          <div class="q-cover" @click="toggleQ(q.set.id)">
+            <img :src="fileUrl(q.pid, (q.set.images.find(i => i.file) || {}).file, (q.set.images.find(i => i.file) || {}).v)">
+            <i class="check" :class="{on: qSel.includes(q.set.id)}"></i>
+          </div>
+          <div class="q-strip"><img v-for="(im, i) in q.set.images.filter(x => x.file).slice(1)" :key="i" :src="fileUrl(q.pid, im.file, im.v)"></div>
+          <div class="q-body">
+            <div class="t">{{ q.title_ru || q.title }}</div>
+            <div class="meta" style="margin-top:6px">
+              <span class="tag">{{ q.set.sku }}</span>
+              <span class="tag accent" v-if="q.set.logo_name">{{ q.set.logo_name }}</span>
+              <span class="price" v-if="q.price_min">¥{{ fmtPrice(q.price_min, q.price_max) }}</span>
+            </div>
+            <div class="row between" style="margin-top:10px">
+              <span class="faint">{{ q.set.images.filter(i => i.file).length }} 张 · {{ (q.sizes||[]).join(' ') }}</span>
+              <span class="row"><button class="btn sm ghost" @click="gotoSet(q)">查看</button><button class="btn sm ghost" @click="unqueue(q)">移出</button></span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="empty" v-if="!queue.length" style="padding:80px 0"><div class="faint">还没有待上架的套图。在商品页生成套图后点「移入待上架」。</div></div>
+    </div>
+  </main>
+
+  <!-- ================= Logo 库 ================= -->
   <main class="page" v-if="tab==='logos'">
     <div class="page-inner">
       <h1>Logo 库</h1>
-      <div class="sub">上传你自己的商标。系统会根据衣服颜色自动选深色或浅色版本；你也可以给每个 logo 单独上传深色版、浅色版。</div>
+      <div class="sub">上传你自己的商标（透明底 PNG 最好，白底图会自动抠底）。生成时 AI 会把它印在左胸，颜色自动和衣服形成对比。</div>
       <div class="drop" :class="{over: dropOver}" @click="$refs.logoInput.click()" @dragover.prevent="dropOver=true" @dragleave="dropOver=false" @drop.prevent="dropLogo">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></svg>
         <div><b>点击或拖入 logo 图片</b>（PNG / JPG / WebP，可多选）</div>
-        <div class="faint">白底 JPG 会自动抠掉背景；SVG 请先导出为 PNG</div>
       </div>
       <input ref="logoInput" type="file" accept="image/png,image/jpeg,image/webp" multiple hidden @change="uploadLogos($event.target.files)">
       <div class="lib-grid" style="margin-top:20px">
         <div class="card lib-card" v-for="l in logos" :key="l.id">
-          <div class="lib-pv">
-            <div class="checker"><img :src="logoUrl(l)"></div>
-            <div class="dk" :class="{add: !l.light}" @click="!l.light && pickVariant(l, 'light')">
-              <img v-if="l.light" :src="logoUrl(l, 'light')"><span v-else style="font-size:22px">+</span>
-              <span class="cap">{{ l.light ? '浅色版' : '浅色版(自动)' }}</span>
-              <button class="x" v-if="l.light" @click.stop="delVariant(l, 'light')">✕</button>
-            </div>
-            <div class="lt" :class="{add: !l.dark}" @click="!l.dark && pickVariant(l, 'dark')">
-              <img v-if="l.dark" :src="logoUrl(l, 'dark')"><span v-else style="font-size:22px">+</span>
-              <span class="cap">{{ l.dark ? '深色版' : '深色版(自动)' }}</span>
-              <button class="x" v-if="l.dark" @click.stop="delVariant(l, 'dark')">✕</button>
-            </div>
-          </div>
+          <div class="lib-pv2"><div class="checker"><img :src="logoUrl(l)"></div><div class="dk"><img :src="logoUrl(l)"></div></div>
           <div class="field"><label>名称</label><input class="input" v-model="l.name" @change="saveLogo(l, {name: l.name})"></div>
           <div class="row">
-            <div class="field grow"><label>颜色</label>
-              <select class="input" v-model="l.color_mode" @change="saveLogo(l, {color_mode: l.color_mode})">
-                <option value="auto">自动深浅（推荐）</option><option value="original">原色（撞色时自动换）</option>
-                <option value="light">总是浅色</option><option value="dark">总是深色</option>
-              </select></div>
             <div class="field grow"><label>工艺</label>
               <select class="input" v-model="l.style" @change="saveLogo(l, {style: l.style})">
-                <option value="print">印花</option><option value="embroidery">刺绣</option>
+                <option value="print">印花</option><option value="embroidery">刺绣</option><option value="rubber">胶印</option><option value="patch">织标贴</option>
+              </select></div>
+            <div class="field grow"><label>颜色</label>
+              <select class="input" v-model="l.color_mode" @change="saveLogo(l, {color_mode: l.color_mode})">
+                <option value="auto">自动与衣服撞色</option><option value="original">保持原色</option>
               </select></div>
           </div>
-          <div class="field"><label>大小 {{ Math.round(l.scale*100) }}%</label>
-            <input type="range" min="0.4" max="2.5" step="0.05" v-model.number="l.scale" @change="saveLogo(l, {scale: l.scale})" style="accent-color:var(--accent)"></div>
-          <div class="row between"><span class="faint">改动对之后的印标生效</span><button class="btn sm danger" @click="deleteLogo(l)">删除</button></div>
+          <div class="row between"><span class="faint">改动对之后生成的图生效</span><button class="btn sm danger" @click="deleteLogo(l)">删除</button></div>
         </div>
       </div>
-      <input ref="variantInput" type="file" accept="image/*" hidden @change="uploadVariant">
     </div>
   </main>
 
-  <!-- 设置 -->
+  <!-- ================= 设置 ================= -->
   <main class="page" v-if="tab==='settings'">
-    <div class="page-inner" style="max-width:760px">
+    <div class="page-inner" style="max-width:860px">
       <h1>设置</h1>
-      <div class="sub">所有数据都保存在程序目录下的 data 文件夹。</div>
+      <div class="sub">所有数据保存在程序目录下的 data 文件夹。</div>
+
       <div class="card">
+        <div class="set-title">AI 中转站</div>
+        <div class="form-grid">
+          <div class="field full"><label>接口地址（OpenAI 格式，以 /v1 结尾）</label><input class="input" v-model="settings.api_base" placeholder="https://www.xpivot.top/v1"></div>
+          <div class="field"><label>令牌（API Key）</label><input class="input" v-model="settings.api_key" placeholder="sk-..."></div>
+          <div class="field"><label>生图模型</label><input class="input" v-model="settings.image_model" list="model-list" placeholder="gpt-image-2"></div>
+          <div class="field"><label>商品理解模型（可选，需要能看图）</label><input class="input" v-model="settings.text_model" list="model-list" placeholder="如 gpt-4o，留空则不使用"></div>
+          <div class="field"><label>调用方式</label>
+            <select class="input" v-model="settings.image_api">
+              <option value="auto">自动适配（推荐）</option><option value="edits">图片编辑接口 /images/edits</option><option value="chat">对话接口 /chat/completions</option>
+            </select>
+            <span class="faint" v-if="settings.image_api==='auto' && settings.image_api_detected">已自动选用：{{ settings.image_api_detected === 'edits' ? '图片编辑接口' : '对话接口' }}</span></div>
+          <div class="field"><label>生图尺寸</label>
+            <select class="input" v-model="settings.image_size">
+              <option value="1024x1536">1024×1536 竖版（推荐）</option><option value="1024x1024">1024×1024 方形</option><option value="1024x1792">1024×1792 竖版</option><option value="">不指定</option>
+            </select></div>
+          <div class="field"><label>质量</label>
+            <select class="input" v-model="settings.image_quality">
+              <option value="">不指定（中转站默认）</option><option value="standard">standard</option><option value="hd">hd</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option>
+            </select></div>
+          <div class="field"><label>同时生成几张</label><input class="input" type="number" min="1" max="8" v-model.number="settings.concurrency"></div>
+          <div class="full row"><button class="btn" @click="testApi">测试连接</button><span class="faint">{{ testMsg }}</span></div>
+          <datalist id="model-list"><option v-for="m in models" :key="m" :value="m"></option></datalist>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="set-title">套图模板</div>
+        <div class="form-grid">
+          <div class="field"><label>每套张数</label>
+            <select class="input" v-model.number="settings.shot_count"><option v-for="n in [5,6,7,8]" :key="n" :value="n">{{ n }} 张</option></select></div>
+          <div class="field"><label>首图卖点文字语言</label>
+            <select class="input" v-model="settings.copy_lang"><option value="ru">俄语（WB 推荐）</option><option value="en">英语</option><option value="cn">中文</option></select></div>
+          <div class="full">
+            <table class="shot-table">
+              <tr><th>#</th><th>图片类型</th><th>印标</th><th>额外要求（可选，中英文都行）</th></tr>
+              <tr v-for="(sh, i) in settings.shots" :key="i" :class="{off: i >= settings.shot_count}">
+                <td>{{ i + 1 }}</td>
+                <td><select class="input sm" v-model="sh.type"><option v-for="(name, key) in shotTypes" :key="key" :value="key">{{ name }}</option></select></td>
+                <td><span class="switch" :class="{on: sh.logo && canLogo(sh.type)}" @click="canLogo(sh.type) && (sh.logo = !sh.logo)" :title="canLogo(sh.type) ? '' : '这种图看不到胸口，不能印标'"><i></i></span></td>
+                <td><input class="input sm" v-model="sh.extra" placeholder="例如：背景用浅米色"></td>
+              </tr>
+            </table>
+            <div class="faint" style="margin-top:6px">灰色的行超出了张数，不会生成。背面、特写类的图看不到胸口，不能印标。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
+        <div class="set-title">风格参考图（可选）</div>
+        <div class="form-grid">
+          <div class="full note">上传 1～2 张你喜欢的 WB 商品图截图（比如你想参考的那两个商品），生成首图时会作为风格参考一起发给 AI：只学它的拍摄风格、排版和卖点样式，不会照抄商品。</div>
+          <div class="full style-refs">
+            <div v-for="r in settings.style_refs" :key="r" class="style-ref"><img :src="'/data/style_refs/' + r"><button class="x" @click="delStyleRef(r)">✕</button></div>
+            <div class="style-ref add" v-if="(settings.style_refs||[]).length < 2" @click="$refs.styleInput.click()">＋ 上传</div>
+            <input ref="styleInput" type="file" accept="image/*" hidden @change="addStyleRef">
+          </div>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:16px">
         <div class="set-title">采集</div>
         <div class="form-grid">
           <div class="field"><label>采集方式</label>
-            <select class="input" v-model="settings.scrape_mode"><option value="extension">Chrome 扩展：在你自己的 Chrome 里静默采集（推荐）</option><option value="browser">独立浏览器窗口（备用）</option></select></div>
+            <select class="input" v-model="settings.scrape_mode"><option value="extension">Chrome 扩展：在你自己的 Chrome 里采集（推荐）</option><option value="browser">独立浏览器窗口（备用）</option></select></div>
+          <div class="field"><label>每个商品间隔（秒）</label><input class="input" type="number" min="1" step="0.5" v-model.number="settings.scrape_delay"></div>
           <div class="field" v-if="settings.scrape_mode !== 'extension'"><label>独立窗口使用的浏览器</label>
-            <select class="input" v-model="settings.browser"><option value="chrome">Chrome（推荐）</option><option value="edge">Edge</option></select></div>
-          <div class="field"><label>每个商品间隔（秒，越大越不容易被风控）</label><input class="input" type="number" min="1" step="0.5" v-model.number="settings.scrape_delay"></div>
-          <div class="field"><label>导出图片</label>
-            <span class="switch" :class="{on: settings.export_wb_size}" @click="settings.export_wb_size=!settings.export_wb_size" style="height:36px"><i></i>转为 WB 尺寸（3:4，至少 900×1200）</span></div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <div class="set-title">定位学习</div>
-        <div class="form-grid">
-          <div class="full note">你在图上手动拖动、缩放 logo 后，工具会记住你和自动识别结果的差别，之后新识别的商品会自动按你的习惯修正。调整过 3 张以上开始生效。</div>
-          <div class="full row between">
-            <span v-if="cal.n >= 3">已从 <b>{{ cal.n }}</b> 次调整中学习：{{ calText }}</span>
-            <span v-else class="muted">已记录 {{ cal.n || 0 }} 次调整，再调 {{ 3 - (cal.n || 0) }} 次开始生效</span>
-            <button class="btn sm" :disabled="!cal.n" @click="resetCal">清除学习记录</button>
-          </div>
-          <div class="full row between">
-            <span class="muted">定位不准的商品很多时，导出调试包发给开发者，可以用你的真实图片一次性批量调优。</span>
-            <button class="btn sm" @click="debugPack">导出定位调试包</button>
-          </div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <div class="set-title">AI 精修（可选）</div>
-        <div class="form-grid">
-          <div class="full note">不填也能正常使用全部功能。填写后，印标页的「AI 精修」按钮会调用中转站的 gpt-image 对单张图的 logo 区域做更自然的融合，只替换 logo 周围一小块，其余部分保持不变。每次调用都会产生费用。</div>
-          <div class="field full"><label>中转站地址（OpenAI 格式，通常以 /v1 结尾）</label><input class="input" v-model="settings.api_base" placeholder="https://xxx.com/v1"></div>
-          <div class="field"><label>API Key</label><input class="input" v-model="settings.api_key" placeholder="sk-..."></div>
-          <div class="field"><label>生图模型名称</label><input class="input" v-model="settings.image_model" placeholder="gpt-image-2"></div>
-          <div class="full row"><button class="btn" @click="testApi">测试连接</button><span class="faint">{{ testMsg }}</span></div>
+            <select class="input" v-model="settings.browser"><option value="chrome">Chrome</option><option value="edge">Edge</option></select></div>
         </div>
       </div>
       <div class="row" style="margin-top:18px;justify-content:flex-end"><button class="btn primary" @click="saveSettings">保存设置</button></div>
@@ -272,14 +361,31 @@
           4. 回到本页面按 F5 刷新
         </div>
         <div class="note" v-else-if="extMode">
-          采集在你自己的 Chrome 里进行，使用你已登录的 1688 账号：会自动打开一个<b>最小化的窗口</b>逐个读取商品页，不影响你正常上网。
-          遇到登录或人机验证时这个窗口会弹出来，处理完会自动缩回去继续。<br>
+          采集在你自己的 Chrome 里进行，使用你已登录的 1688 账号：会自动打开一个<b>最小化的窗口</b>逐个读取商品页，不影响你正常上网。遇到登录或人机验证时这个窗口会弹出来，处理完会自动缩回去继续。只保存图片链接，不下载图片。<br>
           <b>更省事：</b>浏览 1688 时，商品页右下角有「采集到印标工作台」按钮，点一下就采集；或者开好多个商品标签页后，点左下角「采集已打开的标签页」。
         </div>
-        <div class="note" v-else>会打开一个独立的 Chrome 窗口（和你平时用的 Chrome 互不影响）。<b>第一次使用请在窗口里登录 1688</b>（建议用小号），之后会记住登录状态。遇到人机验证时在窗口里手动完成，程序会自动继续。<br>
-        <b>最不容易触发验证的方式：</b>自己在这个窗口里打开想要的商品页（可以开很多个标签页），然后点左下角「采集已打开的标签页」，程序不做任何跳转，只读取页面数据。</div>
+        <div class="note" v-else>会打开一个独立的 Chrome 窗口（和你平时用的 Chrome 互不影响）。第一次使用请在窗口里登录 1688，遇到人机验证时在窗口里手动完成，程序会自动继续。</div>
       </div>
       <div class="modal-foot"><button class="btn" style="margin-right:auto" @click="scrapeTabs">采集已打开的标签页</button><button class="btn" @click="showScrape=false">取消</button><button class="btn primary" @click="startScrape">开始采集</button></div>
+    </div>
+  </div>
+
+  <!-- 大图 -->
+  <div class="modal-bg" v-if="lightbox" @mousedown.self="lightbox=null">
+    <div class="lightbox">
+      <img :src="lightbox.src">
+      <div class="lb-side" v-if="lightbox.set">
+        <h3>{{ lightbox.set.sku }} · 第 {{ lightbox.idx + 1 }} 张</h3>
+        <div class="faint">{{ shotName(lightbox.set.images[lightbox.idx].type) }}<template v-if="lightbox.set.images[lightbox.idx].logo"> · 印标（{{ lightbox.set.logo_name }}）</template></div>
+        <div class="field" style="margin-top:14px"><label>对这张不满意？写下修改要求后重新生成（可选）</label>
+          <textarea class="input" rows="4" v-model="lightbox.extra" placeholder="例如：logo 再小一点；模特换成站姿；背景更浅"></textarea></div>
+        <button class="btn primary block" style="margin-top:10px" @click="regen(lightbox.set, lightbox.idx, lightbox.extra); lightbox=null">重新生成这张</button>
+        <div class="row" style="margin-top:10px">
+          <button class="btn grow" :disabled="lightbox.idx===0" @click="openLightbox(lightbox.set, lightbox.idx - 1)">‹ 上一张</button>
+          <button class="btn grow" :disabled="lightbox.idx >= lightbox.set.images.length - 1" @click="openLightbox(lightbox.set, lightbox.idx + 1)">下一张 ›</button>
+        </div>
+      </div>
+      <button class="btn sm lb-close" @click="lightbox=null">✕</button>
     </div>
   </div>
 

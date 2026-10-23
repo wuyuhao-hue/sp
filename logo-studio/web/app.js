@@ -10,17 +10,19 @@ async function api(path, opts = {}) {
   return data;
 }
 
+const LANG_NAME = { ru: '俄语', en: '英语', cn: '中文' };
+
 createApp({
   data: () => ({
     tab: 'products',
-    products: [], logos: [], current: null, imgId: null,
-    query: '', selected: [], activeLogo: null,
-    settings: {}, browserState: { state: 'idle', message: '' }, jobs: [], hiddenJobs: [],
+    products: [], logos: [], current: null, queue: [],
+    query: '', selected: [], skuSel: [], genLogo: null, showRefs: false,
+    settings: {}, shotTypes: {}, canLogoTypes: [], models: [],
+    browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
+    extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'),
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
-    busy: false, compare: false, wrapSize: { w: 600, h: 600 }, dragging: false, dragBox: null, natural: { w: 1, h: 1 },
-    toastMsg: '', toastErr: false, cal: {}, ext: {}, extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'), dropOver: false, testMsg: '', variantTarget: null,
-    colorOpts: [['', '跟随Logo'], ['auto', '自动'], ['light', '浅'], ['dark', '深'], ['original', '原色']],
-    styleOpts: [['', '跟随Logo'], ['print', '印花'], ['embroidery', '刺绣']],
+    generating: false, analyzing: false, lightbox: null, qSel: [],
+    toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
   }),
   computed: {
     filtered() {
@@ -28,40 +30,23 @@ createApp({
       return q ? this.products.filter(p => (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q)) : this.products;
     },
     allSelected() { return this.filtered.length && this.filtered.every(p => this.selected.includes(p.id)); },
-    img() { return this.current ? (this.current.images.find(i => i.id === this.imgId) || this.current.images[0]) : null; },
-    place() { return (this.img && this.img.place) || {}; },
-    printableCount() { return this.current ? this.current.images.filter(i => (i.place || {}).printable).length : 0; },
-    shownSrc() {
-      if (!this.img) return '';
-      const f = this.compare || !this.img.out ? this.img.file : this.img.out;
-      return this.fileUrl(this.current.id, f, this.img.v);
+    skus() {
+      const p = this.current;
+      if (!p) return [];
+      for (const prop of p.sku_props || []) {
+        const vals = prop.values.filter(v => v.image);
+        if (vals.length) return vals.map(v => ({ name: v.name, image: v.image }));
+      }
+      return p.main_images && p.main_images.length ? [{ name: '默认', image: p.main_images[0] }] : [];
     },
-    box() {
-      if (this.dragBox) return this.dragBox;
-      if (!this.img) return null;
-      if (this.img.rect) return { ...this.img.rect, angle: this.place.angle || 0 };
-      const p = this.place;
-      if (p.x == null) return null;
-      const logo = this.logos.find(l => l.id === this.current.logo_id);
-      const aspect = logo ? logo.aspect : 4;
-      return { x: p.x, y: p.y, w: p.w, h: p.w * this.natural.w / this.natural.h / aspect, angle: p.angle || 0 };
-    },
-    boxStyle() {
-      const b = this.box;
-      return {
-        // 四周留 6px，避免小 logo 的框太小不好拖
-        left: `calc(${(b.x - b.w / 2) * 100}% - 6px)`, top: `calc(${(b.y - b.h / 2) * 100}% - 6px)`,
-        width: `calc(${b.w * 100}% + 12px)`, height: `calc(${b.h * 100}% + 12px)`, transform: `rotate(${b.angle || 0}deg)`,
-      };
-    },
-    calText() {
-      const c = this.cal, parts = [];
-      const pct = v => Math.abs(Math.round(v * 100)) + '%';
-      if (Math.abs(c.dx) >= 0.005) parts.push((c.dx > 0 ? '往右 ' : '往左 ') + pct(c.dx));
-      if (Math.abs(c.dy) >= 0.005) parts.push((c.dy > 0 ? '往下 ' : '往上 ') + pct(c.dy));
-      if (Math.abs(c.scale - 1) >= 0.03) parts.push((c.scale > 1 ? '放大 ' : '缩小 ') + pct(c.scale - 1));
-      return parts.length ? parts.join('，') + '（相对衣服大小）' : '和自动识别基本一致';
-    },
+    setsSorted() { return [...((this.current && this.current.sets) || [])].sort((a, b) => b.created - a.created); },
+    aiInfo() { return (this.current && this.current.ai) || {}; },
+    guessGender() { const t = (this.current && this.current.title) || ''; return /女/.test(t) ? 'female' : /男/.test(t) ? 'male' : 'unisex'; },
+    lang() { return this.settings.copy_lang || 'ru'; },
+    langName() { return LANG_NAME[this.lang]; },
+    activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },
+    apiReady() { return !!(this.settings.api_base && this.settings.api_key); },
+    queueCount() { return this.products.reduce((n, p) => n + (p.queued || 0), 0); },
     visibleJobs() { return this.jobs.filter(j => !this.hiddenJobs.includes(j.id)).slice(0, 3); },
     extMode() { return (this.settings.scrape_mode || 'extension') === 'extension'; },
     statusTitle() { return this.extMode ? (this.ext.message || '') : this.browserState.message; },
@@ -79,155 +64,154 @@ createApp({
     },
   },
   watch: {
-    tab(t) { if (t === 'settings') this.loadCal(); },
+    tab(t) { if (t === 'queue') this.loadQueue(); },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll()]);
     if (this.products.length) this.openProduct(this.products[0].id);
     setInterval(this.poll, 1500);
-    window.addEventListener('keydown', this.onKey);
-    this._ro = new ResizeObserver(() => this.measure());
-    this.$watch('current', () => this.$nextTick(() => { if (this.$refs.wrap) this._ro.observe(this.$refs.wrap); this.measure(); }));
   },
   methods: {
     toast(msg, err = false) {
       this.toastMsg = msg; this.toastErr = err;
-      clearTimeout(this._t); this._t = setTimeout(() => (this.toastMsg = ''), err ? 4500 : 2200);
+      clearTimeout(this._t); this._t = setTimeout(() => (this.toastMsg = ''), err ? 5000 : 2400);
     },
-    fileUrl(pid, f, v) { return `/data/products/${pid}/${f}?v=${v || 0}`; },
-    logoUrl(l, slot = 'logo') { return `/data/logos/${l.id}/${l[slot]}?v=${l.v || 0}`; },
-    logoName(id) { const l = this.logos.find(l => l.id === id); return l ? l.name : '已删除的 logo'; },
+    imgSrc(u) {
+      if (!u) return '';
+      if (u.startsWith('local:')) { const [pid, ...rest] = u.slice(6).split('/'); return `/data/products/${pid}/${rest.join('/')}`; }
+      return u.includes('alicdn.com') && !/_\d+x\d+/.test(u) ? u + '_400x400.jpg' : u; // 列表里用缩略图，省流量
+    },
+    zoom(src) { this.lightbox = { src: src.replace(/_400x400\.jpg$/, '') }; },
+    fileUrl(pid, f, v) { return f ? `/data/products/${pid}/${f}?v=${v || 0}` : ''; },
+    logoUrl(l) { return `/data/logos/${l.id}/${l.logo}?v=${l.v || 0}`; },
     fmtPrice(a, b) { return a === b || b == null ? `${a}` : `${a}-${b}`; },
+    shotName(t) { return this.shotTypes[t] || t; },
+    canLogo(t) { return this.canLogoTypes.includes(t); },
+    setsOf(name) { return ((this.current && this.current.sets) || []).filter(s => s.sku === name); },
     jobStatus(j) { return { running: `${j.done}/${j.total || '?'}`, done: '完成', failed: '失败', pending: '排队中' }[j.status]; },
 
     async loadProducts() { this.products = await api('/api/products'); },
     async loadLogos() { this.logos = await api('/api/logos'); },
+    async loadQueue() {
+      this.queue = await api('/api/queue');
+      this.qSel = this.qSel.filter(id => this.queue.some(q => q.set.id === id));
+    },
     async poll() {
       try {
         const s = await api('/api/state');
         this.browserState = s.browser;
         this.ext = s.ext || {};
         this.extInstalled = this.extInstalled || !!document.documentElement.getAttribute('data-logo-studio-ext');
+        this.shotTypes = s.shot_types; this.canLogoTypes = s.can_logo;
         if (!this.settingsLoaded) { this.settings = s.settings; this.settingsLoaded = true; }
-        const prevDone = this.jobs.reduce((n, j) => n + j.done + (j.status === 'done' ? 1 : 0), 0);
+        const sig = s.jobs.map(j => `${j.id}:${j.done}:${j.status}`).join('|');
+        const running = s.jobs.some(j => j.status === 'running');
         this.jobs = s.jobs;
-        const nowDone = this.jobs.reduce((n, j) => n + j.done + (j.status === 'done' ? 1 : 0), 0);
-        if (nowDone !== prevDone) {
+        // 完成的任务几秒后自动收起（导出任务多留一会儿，方便点「打开文件夹」）
+        const now = Date.now();
+        this._doneAt = this._doneAt || {};
+        for (const j of s.jobs) {
+          if (j.status === 'running' || j.status === 'pending') continue;
+          this._doneAt[j.id] = this._doneAt[j.id] || now;
+          const keep = j.kind === 'export' ? 30000 : j.status === 'failed' ? 15000 : 6000;
+          if (now - this._doneAt[j.id] > keep && !this.hiddenJobs.includes(j.id)) this.hiddenJobs.push(j.id);
+        }
+        if (sig !== this._sig || running) {
+          this._sig = sig;
           await this.loadProducts();
-          if (this.current) this.refreshCurrent();
+          if (this.current) await this.refreshCurrent();
+          if (this.tab === 'queue') await this.loadQueue();
         }
       } catch (e) { /* 服务未就绪时忽略 */ }
     },
     async openProduct(id) {
       this.current = await api(`/api/products/${id}`);
-      const first = this.current.images.find(i => (i.place || {}).printable) || this.current.images[0];
-      this.imgId = first ? first.id : null;
+      this.skuSel = [];
     },
     async refreshCurrent() {
       const p = await api(`/api/products/${this.current.id}`).catch(() => null);
-      if (p) this.current = p; else this.current = null;
+      if (p) { this.current = p; if (this.lightbox && this.lightbox.set) this.syncLightbox(); } else this.current = null;
     },
-    setCurrent(p) {
-      this.current = p;
-      const s = this.products.find(x => x.id === p.id);
-      if (s) {
-        const t = p.images.find(i => i.out) || p.images[0];
-        Object.assign(s, { logo_id: p.logo_id, thumb: t ? (t.out || t.file) : null, v: t ? t.v : 0 });
-      }
-    },
-    toggleSel(id) {
-      const i = this.selected.indexOf(id);
-      i >= 0 ? this.selected.splice(i, 1) : this.selected.push(id);
-    },
+    toggleSel(id) { const i = this.selected.indexOf(id); i >= 0 ? this.selected.splice(i, 1) : this.selected.push(id); },
     toggleAll() { this.selected = this.allSelected ? [] : this.filtered.map(p => p.id); },
-    measure() {
-      const el = this.$refs.wrap;
-      if (el) this.wrapSize = { w: Math.max(el.clientWidth - 40, 200), h: Math.max(el.clientHeight - 32, 200) };
+    toggleSku(name) { const i = this.skuSel.indexOf(name); i >= 0 ? this.skuSel.splice(i, 1) : this.skuSel.push(name); },
+    toggleQ(id) { const i = this.qSel.indexOf(id); i >= 0 ? this.qSel.splice(i, 1) : this.qSel.push(id); },
+
+    // ---------- 生成 ----------
+    async generate() {
+      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.tab = 'settings'; return; }
+      this.generating = true;
+      try {
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/generate`, { body: { skus: this.skuSel, logo_id: this.genLogo } }));
+        this.toast('已开始生成，进度在右下角');
+        this.skuSel = [];
+        setTimeout(this.refreshCurrent, 600);
+      } catch (e) { this.toast(e.message, true); }
+      this.generating = false;
     },
-    imgLoaded(e) { this.natural = { w: e.target.naturalWidth, h: e.target.naturalHeight }; },
-    onKey(e) {
-      if (this.tab !== 'products' || !this.current || ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
-      const imgs = this.current.images, k = imgs.findIndex(i => i.id === this.img.id);
-      if (e.key === 'ArrowRight' && k < imgs.length - 1) this.imgId = imgs[k + 1].id;
-      if (e.key === 'ArrowLeft' && k > 0) this.imgId = imgs[k - 1].id;
-      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-        const list = this.filtered, j = list.findIndex(p => p.id === this.current.id) + (e.key === 'ArrowDown' ? 1 : -1);
-        if (list[j]) { e.preventDefault(); this.openProduct(list[j].id); }
-      }
+    async swapLogo(st, e) {
+      const id = e.target.value;
+      e.target.value = '';
+      if (!id) return;
+      const name = (this.logos.find(l => l.id === id) || {}).name;
+      const n = st.images.filter(i => i.logo).length;
+      if (!confirm(`用「${name}」生成一套新图？只重做 ${n} 张印标图，其余 ${st.images.length - n} 张直接复用。`)) return;
+      try {
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/swap`, { body: { logo_id: id } }));
+        setTimeout(this.refreshCurrent, 600);
+      } catch (err) { this.toast(err.message, true); }
+    },
+    async regen(st, i, extra) {
+      try {
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/images/${i}/regen`, { body: { extra: extra || null } }));
+        setTimeout(this.refreshCurrent, 400);
+      } catch (e) { this.toast(e.message, true); }
+    },
+    async setQueued(st, queued) {
+      this.current = await api(`/api/products/${this.current.id}/sets/${st.id}/queue`, { body: { queued } });
+      this.toast(queued ? '已移入待上架' : '已移出待上架');
+      this.loadProducts();
+    },
+    async deleteSet(st) {
+      if (!confirm(`删除「${st.sku}${st.logo_name ? ' / ' + st.logo_name : ''}」这套图？`)) return;
+      this.current = await api(`/api/products/${this.current.id}/sets/${st.id}`, { method: 'DELETE' });
+      this.loadProducts();
+    },
+    openLightbox(st, i) {
+      const im = st.images[i];
+      this.lightbox = { set: st, idx: i, src: this.fileUrl(this.current.id, im.file, im.v), extra: im.extra || '' };
+    },
+    syncLightbox() {
+      const st = (this.current.sets || []).find(s => s.id === this.lightbox.set.id);
+      if (st) { this.lightbox.set = st; const im = st.images[this.lightbox.idx]; this.lightbox.src = this.fileUrl(this.current.id, im.file, im.v); }
     },
 
-    // ---------- 印标 ----------
-    async applyLogo(logoId) {
-      this.activeLogo = logoId;
-      if (!this.current) { if (logoId) this.toast('已选中 logo，可以在左侧勾选商品批量印'); return; }
-      if (!logoId && !this.current.logo_id) return;
-      this.busy = true;
-      try {
-        this.setCurrent(await api(`/api/products/${this.current.id}/apply`, { body: { logo_id: logoId } }));
-        if (logoId && !this.printableCount) this.toast('这个商品没有识别到可印的图，可以选中图片后打开「这张图印 logo」', true);
-      } catch (e) { this.toast(e.message, true); }
-      this.busy = false;
-    },
-    async patchPlace(patch) {
-      this.busy = true;
-      try {
-        this.setCurrent(await api(`/api/products/${this.current.id}/images/${this.img.id}/place`, { body: patch }));
-      } catch (e) { this.toast(e.message, true); }
-      this.busy = false; this.dragBox = null;
-    },
-    async syncPlace() {
-      this.busy = true;
-      try {
-        const r = await api(`/api/products/${this.current.id}/images/${this.img.id}/sync`, { body: {} });
-        this.setCurrent(r.product);
-        this.toast(r.count ? `已同步到 ${r.count} 张同款图` : '没有找到构图一致的其它图片');
-      } catch (e) { this.toast(e.message, true); }
-      this.busy = false;
-    },
-    async relocateImage() {
-      this.busy = true;
-      try { this.setCurrent(await api(`/api/products/${this.current.id}/images/${this.img.id}/relocate`, { body: {} })); }
+    // ---------- 商品理解 ----------
+    async saveInfo(patch) {
+      try { this.current = await api(`/api/products/${this.current.id}/info`, { body: patch }); }
       catch (e) { this.toast(e.message, true); }
-      this.busy = false;
     },
-    async refine() {
-      this.busy = true;
-      this.toast('AI 精修中，通常需要 20~60 秒…');
-      try { this.setCurrent(await api(`/api/products/${this.current.id}/images/${this.img.id}/refine`, { body: {} })); this.toast('精修完成'); }
+    async analyze() {
+      this.analyzing = true;
+      try { this.current = await api(`/api/products/${this.current.id}/analyze`, { body: {} }); this.toast('商品理解完成'); }
       catch (e) { this.toast(e.message, true); }
-      this.busy = false;
-    },
-    startCompare(e) { if (this.img.out && e.button === 0) this.compare = true; },
-    startDrag(e, mode) {
-      const rect = this.$refs.canvas.getBoundingClientRect();
-      const start = { ...this.box }, sx = e.clientX, sy = e.clientY;
-      this.dragging = true;
-      const move = ev => {
-        const dx = (ev.clientX - sx) / rect.width, dy = (ev.clientY - sy) / rect.height;
-        if (mode === 'move') this.dragBox = { ...start, x: start.x + dx, y: start.y + dy };
-        else {
-          const w = Math.max(0.02, start.w + dx * 2);
-          this.dragBox = { ...start, w, h: start.h * w / start.w };
-        }
-      };
-      const up = () => {
-        window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
-        this.dragging = false;
-        const b = this.dragBox;
-        if (b) this.patchPlace({ x: b.x, y: b.y, w: b.w });
-      };
-      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      this.analyzing = false;
     },
 
-    // ---------- 批量 ----------
-    async batchApply(logoId) {
-      const job = await api('/api/batch/apply', { body: { ids: this.selected, logo_id: logoId } });
-      this.jobs.unshift(job);
+    // ---------- 待上架 ----------
+    async unqueue(q) {
+      await api(`/api/products/${q.pid}/sets/${q.set.id}/queue`, { body: { queued: false } });
+      this.loadQueue(); this.loadProducts();
     },
-    async exportSel() { this.jobs.unshift(await api('/api/export', { body: { ids: this.selected } })); },
-    async exportOne() { this.jobs.unshift(await api('/api/export', { body: { ids: [this.current.id] } })); },
+    async gotoSet(q) { this.tab = 'products'; await this.openProduct(q.pid); },
+    async exportQueue() {
+      const items = this.queue.filter(q => this.qSel.includes(q.set.id)).map(q => ({ pid: q.pid, sid: q.set.id }));
+      this.jobs.unshift(await api('/api/export', { body: { items } }));
+    },
+
+    // ---------- 商品 ----------
     async deleteSel() {
-      if (!confirm(`确定删除选中的 ${this.selected.length} 个商品？`)) return;
+      if (!confirm(`确定删除选中的 ${this.selected.length} 个商品（包括已生成的套图）？`)) return;
       await api('/api/products/delete', { body: { ids: this.selected } });
       if (this.current && this.selected.includes(this.current.id)) this.current = null;
       this.selected = [];
@@ -238,12 +222,11 @@ createApp({
       if (!files.length) return;
       const fd = new FormData();
       files.forEach(f => fd.append('files', f));
-      this.toast('正在导入并识别…');
       try {
         const p = await api('/api/products/import', { form: fd });
         await this.loadProducts();
         await this.openProduct(p.id);
-        this.toast(`已导入 ${p.count} 张图，识别到 ${p.printable} 张可印`);
+        this.toast('已导入');
       } catch (err) { this.toast(err.message, true); }
       e.target.value = '';
     },
@@ -251,26 +234,24 @@ createApp({
     // ---------- 采集 ----------
     async startScrape() {
       try {
-        const job = await api('/api/scrape', { body: this.scrapeForm });
-        this.jobs.unshift(job);
+        this.jobs.unshift(await api('/api/scrape', { body: this.scrapeForm }));
         this.showScrape = false;
         this.scrapeForm.links = ''; this.scrapeForm.shops = '';
         window.postMessage({ logoStudio: 'kick' }, '*');
       } catch (e) { this.toast(e.message, true); }
     },
-    async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
     async scrapeTabs() {
       try {
         this.jobs.unshift(await api('/api/scrape/tabs', { body: {} })); this.showScrape = false;
         window.postMessage({ logoStudio: 'kick' }, '*');
-      }
-      catch (e) { this.toast(e.message, true); }
+      } catch (e) { this.toast(e.message, true); }
     },
+    async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
     async cancelJob(j) { await api(`/api/jobs/${j.id}/cancel`, { body: {} }); },
     hideJob(j) { this.hiddenJobs.push(j.id); },
     async openFolder(path) { await api('/api/open-folder', { body: { path } }).catch(e => this.toast(e.message, true)); },
 
-    // ---------- Logo 库 ----------
+    // ---------- Logo ----------
     dropLogo(e) { this.dropOver = false; this.uploadLogos(e.dataTransfer.files); },
     async uploadLogos(files) {
       for (const f of files) {
@@ -279,39 +260,16 @@ createApp({
         try { await api('/api/logos', { form: fd }); } catch (e) { this.toast(e.message, true); }
       }
       await this.loadLogos();
-      this.$refs.logoInput && (this.$refs.logoInput.value = '');
+      if (this.$refs.logoInput) this.$refs.logoInput.value = '';
     },
-    async saveLogo(l, patch) { Object.assign(l, await api(`/api/logos/${l.id}`, { body: patch })); this.toast('已保存，重新点击该 logo 即可按新设置印标'); },
-    pickVariant(l, slot) { this.variantTarget = { l, slot }; this.$refs.variantInput.click(); },
-    async uploadVariant(e) {
-      const f = e.target.files[0];
-      if (!f || !this.variantTarget) return;
-      const fd = new FormData(); fd.append('file', f);
-      const { l, slot } = this.variantTarget;
-      Object.assign(l, await api(`/api/logos/${l.id}/variant/${slot}`, { form: fd }));
-      e.target.value = '';
-    },
-    async delVariant(l, slot) { Object.assign(l, await api(`/api/logos/${l.id}/variant/${slot}`, { method: 'DELETE' })); },
+    async saveLogo(l, patch) { Object.assign(l, await api(`/api/logos/${l.id}`, { body: patch })); this.toast('已保存'); },
     async deleteLogo(l) {
-      if (!confirm(`删除 logo「${l.name}」？`)) return;
+      if (!confirm(`删除 logo「${l.name}」？已生成的图不受影响。`)) return;
       await api(`/api/logos/${l.id}`, { method: 'DELETE' });
       await this.loadLogos();
     },
 
     // ---------- 设置 ----------
-    async loadCal() { this.cal = await api('/api/calibration'); },
-    async resetCal() {
-      if (!confirm('清除后，新识别的位置会回到默认算法。确定？')) return;
-      this.cal = await api('/api/calibration', { method: 'DELETE' });
-    },
-    async debugPack() {
-      this.toast('正在打包，图片多时需要十几秒…');
-      try {
-        const r = await api('/api/debug-pack', { body: {} });
-        this.toast('已生成：' + r.name);
-        this.openFolder('');
-      } catch (e) { this.toast(e.message, true); }
-    },
     async saveSettings() {
       const s = await api('/api/settings', { body: this.settings });
       this.settings = s.settings;
@@ -322,6 +280,15 @@ createApp({
       this.testMsg = '测试中…';
       const r = await api('/api/settings/test', { body: {} });
       this.testMsg = r.message;
+      this.models = r.models || [];
     },
+    async addStyleRef(e) {
+      const f = e.target.files[0];
+      if (!f) return;
+      const fd = new FormData(); fd.append('file', f);
+      this.settings.style_refs = await api('/api/style-refs', { form: fd });
+      e.target.value = '';
+    },
+    async delStyleRef(r) { this.settings.style_refs = await api(`/api/style-refs/${r}`, { method: 'DELETE' }); },
   },
 }).mount('#app');

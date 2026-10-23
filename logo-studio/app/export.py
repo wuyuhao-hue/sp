@@ -1,91 +1,63 @@
-"""导出：每个商品一个文件夹（印好 logo 的图），外加一张汇总表，方便上架 Wildberries。
-
-WB 图片要求：比例 3:4，建议 900x1200 以上。开启「WB 尺寸」后自动补白边到 3:4 并缩放到 900x1200。
-"""
+"""导出待上架的套图：每套一个文件夹（01.jpg 是首图），外加一张汇总表，方便上架 Wildberries。"""
 from __future__ import annotations
 
 import re
+import shutil
 import time
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from PIL import Image
 
 from . import store
 
 
-def _fit_wb(im: Image.Image) -> Image.Image:
-    W, H = im.size
-    target = 3 / 4
-    if abs(W / H - target) > 0.01:
-        if W / H > target:
-            nw, nh = W, round(W / target)
-        else:
-            nw, nh = round(H * target), H
-        canvas = Image.new("RGB", (nw, nh), (255, 255, 255))
-        canvas.paste(im, ((nw - W) // 2, (nh - H) // 2))
-        im = canvas
-    if im.width < 900:
-        im = im.resize((900, 1200), Image.LANCZOS)
-    return im
-
-
 def _safe(name: str) -> str:
-    return re.sub(r'[\\/:*?"<>|\r\n]+', "_", name).strip()[:40] or "商品"
+    return re.sub(r'[\\/:*?"<>|\r\n]+', "_", str(name)).strip()[:40] or "商品"
 
 
-def export_products(pids: list[str], job) -> None:
-    s = store.get_settings()
+def export_sets(items: list[dict], job) -> None:
+    """items: [{pid, sid}]"""
     root = store.EXPORTS / time.strftime("%Y%m%d-%H%M%S")
     root.mkdir(parents=True)
     wb = Workbook()
     ws = wb.active
-    ws.title = "SKU"
-    head = ["商品ID", "标题", "SKU", "颜色/规格", "尺码", "价格(元)", "库存", "使用Logo", "图片文件夹", "图片文件", "1688链接"]
+    ws.title = "待上架"
+    head = ["文件夹", "1688商品ID", "中文标题", "俄语标题", "颜色/款式", "尺码", "价格(元)", "库存", "Logo",
+            "卖点(俄)", "卖点(中)", "图片数", "1688链接"]
     ws.append(head)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="4F46E5")
-    job.total = len(pids)
-    for pid in pids:
-        p = store.get_product(pid)
-        if not p:
+    job.total = len(items)
+    for it in items:
+        p = store.get_product(it["pid"])
+        st = next((x for x in (p or {}).get("sets", []) if x["id"] == it["sid"]), None)
+        if not st:
+            job.done += 1
             continue
-        pdir = store.product_dir(pid)
-        folder = root / f"{_safe(p.get('offer_id') or pid)}_{_safe(p.get('title', ''))}"
-        folder.mkdir()
-        files = []
-        sku_files: dict[str, str] = {}
-        n = 1
-        for img in p["images"]:
-            if img.get("skip_export"):
-                continue
-            src = pdir / (img.get("out") or img["file"])
-            im = Image.open(src).convert("RGB")
-            if s.get("export_wb_size"):
-                im = _fit_wb(im)
-            name = f"{n:02d}_{'主图' if img['kind'] == 'main' else 'SKU_' + _safe(img.get('sku') or '')}.jpg"
-            im.save(folder / name, quality=95)
-            files.append(name)
-            if img.get("sku"):
-                sku_files[img["sku"]] = name
-            n += 1
-        logo = store.get_logo(p["logo_id"]) if p.get("logo_id") else None
-        skus = p.get("skus") or [{"name": "", "parts": [], "price": p.get("price_min"), "stock": 0}]
-        for sku in skus:
-            parts = sku.get("parts") or []
-            size = next((x for x in parts if x in (p.get("sizes") or [])), "")
-            color = " / ".join(x for x in parts if x != size)
-            ws.append([p.get("offer_id") or pid, p.get("title", ""), sku.get("name", ""), color, size,
-                       sku.get("price"), sku.get("stock"), logo["name"] if logo else "",
-                       folder.name, sku_files.get(color) or ", ".join(files[:1]), p.get("url", "")])
+        pdir = store.product_dir(p["id"])
+        folder = root / _safe(f"{p.get('offer_id') or p['id']}_{st['sku']}_{st.get('logo_name') or '无标'}")
+        folder.mkdir(exist_ok=True)
+        n = 0
+        for im in st["images"]:
+            if im.get("file") and (pdir / im["file"]).exists():
+                n += 1
+                shutil.copy(pdir / im["file"], folder / f"{n:02d}.jpg")
+        info = p.get("ai") or {}
+        sizes = p.get("sizes") or [""]
+        for size in sizes:
+            sku = next((k for k in p.get("skus") or []
+                        if st["sku"] in (k.get("parts") or []) and (not size or size in (k.get("parts") or []))), {})
+            ws.append([folder.name, p.get("offer_id") or "", p.get("title", ""), info.get("title_ru", ""), st["sku"],
+                       size, sku.get("price", p.get("price_min")), sku.get("stock", ""), st.get("logo_name", ""),
+                       " / ".join(info.get("selling_points_ru") or []), " / ".join(info.get("selling_points_cn") or []),
+                       n, p.get("url", "")])
         job.done += 1
-    widths = [16, 50, 30, 18, 10, 10, 8, 14, 40, 30, 46]
-    for i, w in enumerate(widths):
+    for i, w in enumerate([36, 16, 40, 40, 14, 8, 10, 8, 12, 40, 30, 8, 46]):
         ws.column_dimensions[chr(65 + i)].width = w
     for row in ws.iter_rows(min_row=2):
         for c in row:
             c.alignment = Alignment(vertical="center")
-    wb.save(root / "商品汇总.xlsx")
+    wb.save(root / "上架汇总.xlsx")
     job.results.append(str(root))
     job.finish(f"导出完成：{root}")

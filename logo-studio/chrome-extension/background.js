@@ -73,9 +73,14 @@ function pageExtract() {
   const gallery = [...document.querySelectorAll(
     '.detail-gallery-turn img, .img-list-wrapper img, .detail-gallery-img, #dt-tab img, [class*="gallery"] img')]
     .map(i => i.getAttribute('src') || i.getAttribute('data-lazy-src') || '').filter(Boolean);
+  const descSel = '#detailContentContainer img, .content-detail img, .detail-desc-module img, .html-description img, ' +
+    '.offer-description img, .desc-lazyload-container img, [class*="description"] img, [class*="detail-content"] img';
+  const details = [...document.querySelectorAll(descSel)]
+    .map(i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-src') || i.getAttribute('src') || '')
+    .filter(s => s && s.includes('alicdn'));
   const titleEl = document.querySelector('.title-text, .d-title, .od-pc-offer-title-contain h1, h1');
   return {
-    globals, gallery,
+    globals, gallery, details,
     h1: titleEl ? titleEl.innerText.trim() : '',
     title: document.title,
     // 数据对象都没找到时才带上整页 HTML，供服务端兜底解析
@@ -95,7 +100,7 @@ function pageBlocked() {
 }
 
 async function pageScrollAndCollect() {
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 14; i++) {
     window.scrollBy(0, 400 + Math.random() * 400);
     await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
   }
@@ -146,6 +151,7 @@ async function doOffer(task) {
       await waitUnblocked(win, tab);
     }
   }
+  await exec(tab, pageScrollAndCollect).catch(() => {}); // 滚到底，让详情图加载出来
   const raw = await exec(tab, pageExtract);
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { raw } });
 }

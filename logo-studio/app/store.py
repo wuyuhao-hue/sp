@@ -14,22 +14,52 @@ LOGOS = DATA / "logos"
 EXPORTS = DATA / "exports"
 DEBUG = DATA / "debug"
 SETTINGS_FILE = DATA / "settings.json"
-for d in (PRODUCTS, LOGOS, EXPORTS, DEBUG):
+STYLE_REFS = DATA / "style_refs"
+for d in (PRODUCTS, LOGOS, EXPORTS, DEBUG, STYLE_REFS):
     d.mkdir(parents=True, exist_ok=True)
 
 _lock = threading.RLock()
+
+# 套图模板里可选的图片类型：(中文名, 是否默认印标)
+SHOT_TYPES = {
+    "hero": "卖点首图（模特+卖点文字）",
+    "model_front": "模特正面",
+    "model_side": "模特侧面",
+    "model_back": "模特背面",
+    "flat_front": "平铺/挂拍正面（无模特）",
+    "detail_fabric": "面料特写",
+    "detail_feature": "细节特写（领口/拉链/口袋/内衬）",
+    "lifestyle": "街拍场景",
+}
+
+DEFAULT_SHOTS = [
+    {"type": "hero", "logo": True},
+    {"type": "model_front", "logo": True},
+    {"type": "model_back", "logo": False},
+    {"type": "detail_fabric", "logo": False},
+    {"type": "flat_front", "logo": True},
+    {"type": "model_side", "logo": False},
+    {"type": "detail_feature", "logo": False},
+    {"type": "lifestyle", "logo": False},
+]
 
 DEFAULT_SETTINGS = {
     "api_base": "",
     "api_key": "",
     "image_model": "gpt-image-2",
-    "vision_model": "",
-    "locate_mode": "local",  # local / ai
+    "text_model": "",          # 可选：能看图的对话模型，用来理解商品、写俄语卖点
+    "image_quality": "",       # 留空则不传，由中转站决定；可填 standard / hd / low / medium / high
+    "image_api": "auto",       # auto 自动适配 / edits 图片编辑接口 / chat 对话接口
+    "image_api_detected": "",
+    "image_size": "1024x1536",
+    "concurrency": 3,
+    "shot_count": 6,
+    "shots": DEFAULT_SHOTS,
+    "copy_lang": "ru",         # 首图卖点文字语言
+    "style_refs": [],          # 风格参考图文件名（data/style_refs/ 下）
     "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）
     "browser": "chrome",  # chrome / edge
     "scrape_delay": 3.0,
-    "scrape_detail_images": False,
-    "export_wb_size": True,
 }
 
 
@@ -90,6 +120,21 @@ def save_product(p: dict) -> dict:
         p["updated"] = time.time()
         _write(product_dir(p["id"]) / "product.json", p)
         return p
+
+
+_product_locks: dict[str, threading.Lock] = {}
+
+
+def update_product(pid: str, fn) -> dict | None:
+    """在锁内读-改-写商品，避免多个生图线程同时保存互相覆盖。fn(product) 原地修改。"""
+    with _lock:
+        lk = _product_locks.setdefault(pid, threading.Lock())
+    with lk:
+        p = get_product(pid)
+        if p is None:
+            return None
+        fn(p)
+        return save_product(p)
 
 
 def list_products() -> list[dict]:

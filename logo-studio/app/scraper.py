@@ -46,9 +46,14 @@ EXTRACT_JS = r"""
   const gallery = [...document.querySelectorAll(
     '.detail-gallery-turn img, .img-list-wrapper img, .detail-gallery-img, #dt-tab img, [class*="gallery"] img')]
     .map(i => i.getAttribute('src') || i.getAttribute('data-lazy-src') || '').filter(Boolean);
+  const descSel = '#detailContentContainer img, .content-detail img, .detail-desc-module img, .html-description img, ' +
+    '.offer-description img, .desc-lazyload-container img, [class*="description"] img, [class*="detail-content"] img';
+  const details = [...document.querySelectorAll(descSel)]
+    .map(i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-src') || i.getAttribute('src') || '')
+    .filter(s => s && s.includes('alicdn'));
   const titleEl = document.querySelector('.title-text, .d-title, .od-pc-offer-title-contain h1, h1');
   return {
-    globals, gallery,
+    globals, gallery, details,
     h1: titleEl ? titleEl.innerText.trim() : '',
     title: document.title,
     html: document.documentElement.outerHTML.slice(0, 4000000),
@@ -123,6 +128,12 @@ def parse_offer(raw: dict, offer_id: str, url: str) -> dict:
             seen.add(u)
             main_images.append(u)
 
+    detail_images, seen_d = [], set(main_images)
+    for u in map(norm_img, raw.get("details") or []):
+        if u and u not in seen_d and not u.endswith(".gif"):
+            seen_d.add(u)
+            detail_images.append(u)
+
     sku_props = []
     props = _first(g, "skuProps", lambda v: isinstance(v, list) and v) or []
     for p in props:
@@ -180,6 +191,7 @@ def parse_offer(raw: dict, offer_id: str, url: str) -> dict:
         "url": url,
         "title": (title or "").strip(),
         "main_images": main_images,
+        "detail_images": detail_images[:30],
         "sku_props": sku_props,
         "skus": skus,
         "sizes": sizes,
@@ -370,9 +382,6 @@ class Browser:
         else:
             self.page.wait_for_timeout(int(random.uniform(delay, delay * 2) * 1000))
 
-    def download(self, url: str, referer: str) -> Image.Image | None:
-        return download_image(url, referer, self.ctx)
-
 
 def download_image(url: str, referer: str, ctx=None) -> Image.Image | None:
     """图片在公共 CDN 上，直接下载，不占用浏览器、不带账号 cookie。"""
@@ -405,22 +414,8 @@ def extract_offer_ids(text: str) -> list[str]:
     return ids
 
 
-def _save_image(im: Image.Image, path: Path) -> tuple[int, int]:
-    if im.mode in ("RGBA", "LA", "P"):
-        im = im.convert("RGBA")
-        bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-        bg.alpha_composite(im)
-        im = bg
-    im = im.convert("RGB")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    im.save(path, quality=95)
-    return im.size
-
-
 def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | None:
-    """把页面上提取到的数据解析、下载图片并保存为商品。b 为空时（扩展采集）直接从 CDN 下载。"""
-    from concurrent.futures import ThreadPoolExecutor
-
+    """把页面上提取到的数据解析后保存为商品。图片只保存原始网址，生图时再临时读取。"""
     url = f"https://detail.1688.com/offer/{offer_id}.html"
     pid = f"1688-{offer_id}"
     info = parse_offer(raw, offer_id, url)
@@ -429,43 +424,11 @@ def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | 
         dump.write_text(json.dumps(raw, ensure_ascii=False)[:20_000_000], "utf-8")
         job.note(f"{offer_id} 解析失败，已保存调试文件 data/debug/{dump.name}，请发给开发者")
         return None
-
-    pdir = store.product_dir(pid)
-    targets: list[tuple[str, str, str | None]] = [("main", u, None) for u in info["main_images"]]
-    for prop in info["sku_props"]:
-        for v in prop["values"]:
-            if v["image"]:
-                targets.append(("sku", v["image"], v["name"]))
-    uniq: dict[str, tuple[int, str, str | None]] = {}
-    sku_of: dict[str, str] = {}
-    for i, (kind, u, sku_name) in enumerate(targets):
-        if u not in uniq:
-            uniq[u] = (i, kind, sku_name)
-        elif sku_name:
-            # SKU 图和主图是同一张时，只记下对应的 SKU 名称
-            sku_of.setdefault(u, sku_name)
-    job.note(f"下载 {len(uniq)} 张图片…")
-    ctx = b.ctx if b else None
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        downloaded = list(ex.map(lambda u: download_image(u, url, ctx), uniq))
-    images = []
-    for (u, (i, kind, sku_name)), im in zip(uniq.items(), downloaded):
-        if im is None:
-            continue
-        iid = f"{kind}{i:02d}"
-        size = _save_image(im, pdir / "orig" / f"{iid}.jpg")
-        images.append({"id": iid, "kind": kind, "sku": sku_name or sku_of.get(u), "src": u,
-                       "file": f"orig/{iid}.jpg", "size": size, "place": None, "out": None})
-
-    if not images:
-        job.note(f"✗ {offer_id} 图片全部下载失败，请检查网络后重试")
-        return None
-    product = {
-        "id": pid, "source": "1688", "created": time.time(),
-        **info, "images": images, "logo_id": None,
-    }
+    product = {"id": pid, "source": "1688", "created": time.time(), **info, "sets": [], "ai": {}}
     store.save_product(product)
-    job.note(f"✓ {info['title'][:30] or offer_id}（{len(images)} 张图）")
+    n_sku = sum(1 for p in info["sku_props"] for v in p["values"] if v["image"])
+    job.note(f"✓ {info['title'][:30] or offer_id}（{n_sku} 个 SKU 图 / {len(info['main_images'])} 主图 / "
+             f"{len(info['detail_images'])} 详情图）")
     return product
 
 
@@ -507,8 +470,6 @@ def collect_shop_offers(b: Browser, shop_url: str, max_pages: int, job: Job) -> 
 
 
 def run_scrape(b: Browser, links: list[str], shops: list[str], max_pages: int, job: Job) -> None:
-    from .pipeline import locate_product
-
     job.status = "running"
     b.wait_unblocked(job)
     offer_ids = []
@@ -527,7 +488,6 @@ def run_scrape(b: Browser, links: list[str], shops: list[str], max_pages: int, j
         try:
             p = scrape_offer(b, oid, job)
             if p:
-                locate_product(p)
                 job.results.append(p["id"])
         except Exception as e:  # noqa: BLE001
             if "closed" in str(e).lower():
@@ -541,8 +501,6 @@ def run_scrape(b: Browser, links: list[str], shops: list[str], max_pages: int, j
 
 def run_scrape_tabs(b: Browser, job: Job) -> None:
     """采集浏览器里已经打开的所有 1688 商品页：程序不做任何跳转，最不容易触发验证。"""
-    from .pipeline import locate_product
-
     job.status = "running"
     pages = [pg for pg in b.ctx.pages if OFFER_RE.search(pg.url) and "1688.com" in pg.url]
     job.total = len(pages)
@@ -559,7 +517,6 @@ def run_scrape_tabs(b: Browser, job: Job) -> None:
             else:
                 p = save_offer(b, pg.evaluate(EXTRACT_JS), oid, job)
                 if p:
-                    locate_product(p)
                     job.results.append(p["id"])
         except Exception as e:  # noqa: BLE001
             job.note(f"✗ {oid}：{str(e).splitlines()[0][:120]}")

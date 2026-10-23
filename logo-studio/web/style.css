@@ -243,3 +243,66 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; line-height
 .toast.err { background: var(--danger); }
 .fade-enter-active, .fade-leave-active { transition: all .2s; }
 .fade-enter-from, .fade-leave-to { opacity: 0; transform: translate(-50%, -8px); }
+
+/* ---------- AI 套图 ---------- */
+.nav .count { margin-left: 6px; font-size: 11px; background: var(--accent); color: #fff; padding: 0 6px; border-radius: 99px; }
+.stage.scroll { overflow-y: auto; padding-bottom: 40px; }
+.block { margin: 0 20px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; box-shadow: var(--shadow); }
+.block-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.block-head .spacer { flex: 1; }
+.block-head img.mini { width: 28px; height: 28px; border-radius: 6px; object-fit: cover; }
+.empty-sets { text-align: center; padding: 30px; }
+.sku-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(108px, 1fr)); gap: 10px; }
+.sku-card { position: relative; border: 2px solid var(--line); border-radius: 11px; padding: 6px; cursor: pointer; transition: .15s; background: #fff; }
+.sku-card:hover { border-color: #c7cbf6; }
+.sku-card.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.sku-card img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 7px; background: #eceef3; display: block; }
+.sku-card .check { position: absolute; top: 10px; left: 10px; }
+.sku-card .nm { font-size: 12px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ref-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; align-items: center; }
+.ref-strip img { width: 74px; height: 74px; object-fit: cover; border-radius: 8px; cursor: zoom-in; flex: none; background: #eceef3; }
+.ref-strip img.detail { height: 100px; width: 64px; }
+.sep-v { width: 1px; align-self: stretch; background: var(--line); margin: 0 4px; flex: none; }
+.gen-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
+.gen { position: relative; aspect-ratio: 3 / 4; border-radius: 10px; overflow: hidden; background: linear-gradient(135deg, #f1f2f7, #e8eaf2); border: 1px solid var(--line); }
+.gen img { width: 100%; height: 100%; object-fit: cover; cursor: zoom-in; display: block; }
+.gen-state { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; font-size: 12px; color: var(--muted); padding: 10px; text-align: center; }
+.gen-state.err { background: #fff5f5; color: var(--danger); }
+.gen-state.err small { color: var(--muted); font-size: 11px; line-height: 1.4; word-break: break-all; }
+.gen-lbl { position: absolute; left: 0; right: 0; bottom: 0; display: flex; justify-content: space-between; align-items: center; padding: 18px 8px 6px; font-size: 11px; color: #fff; background: linear-gradient(transparent, rgba(0,0,0,.55)); pointer-events: none; }
+.gen-lbl .tag { border: 0; }
+.shot-list { margin: 0; padding-left: 20px; font-size: 13px; line-height: 2; }
+.shot-list .tag { margin-left: 6px; }
+.input.sm { height: 28px; font-size: 12px; padding: 0 8px; border-radius: 7px; width: auto; }
+.shot-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.shot-table th { text-align: left; font-weight: 500; color: var(--muted); font-size: 12px; padding: 6px; border-bottom: 1px solid var(--line); }
+.shot-table td { padding: 6px; border-bottom: 1px dashed var(--line); }
+.shot-table td .input.sm { width: 100%; }
+.shot-table tr.off { opacity: .4; }
+.style-refs { display: flex; gap: 12px; flex-wrap: wrap; }
+.style-ref { position: relative; width: 120px; height: 160px; border-radius: 10px; overflow: hidden; border: 1px solid var(--line); background: var(--panel-2); }
+.style-ref img { width: 100%; height: 100%; object-fit: cover; }
+.style-ref.add { display: grid; place-items: center; color: var(--muted); cursor: pointer; border-style: dashed; }
+.style-ref .x { position: absolute; top: 6px; right: 6px; width: 22px; height: 22px; border-radius: 6px; border: 0; background: rgba(0,0,0,.5); color: #fff; }
+.lib-pv2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.lib-pv2 > div { height: 90px; border-radius: 9px; display: grid; place-items: center; padding: 12px; }
+.lib-pv2 img { max-width: 100%; max-height: 100%; }
+.lib-pv2 .dk { background: #24262e; }
+.q-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; margin-top: 20px; }
+.q-card { overflow: hidden; border: 2px solid var(--line); }
+.q-card.on { border-color: var(--accent); }
+.q-cover { position: relative; aspect-ratio: 3 / 4; cursor: pointer; background: #eceef3; }
+.q-cover img { width: 100%; height: 100%; object-fit: cover; }
+.q-cover .check { position: absolute; top: 10px; left: 10px; }
+.q-strip { display: flex; gap: 4px; padding: 6px; overflow-x: auto; background: var(--panel-2); }
+.q-strip img { width: 36px; height: 48px; object-fit: cover; border-radius: 4px; flex: none; }
+.q-body { padding: 10px 12px 12px; }
+.q-body .t { font-size: 13px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.lightbox { position: relative; display: flex; gap: 0; background: var(--panel); border-radius: 16px; overflow: hidden; max-width: calc(100vw - 40px); max-height: calc(100vh - 40px); box-shadow: var(--shadow-lg); }
+.lightbox > img { max-height: calc(100vh - 40px); max-width: calc(100vw - 400px); object-fit: contain; background: #f4f5f8; display: block; }
+.lb-side { width: 320px; padding: 20px; display: flex; flex-direction: column; }
+.lb-side h3 { margin: 0 0 4px; font-size: 15px; }
+.lb-close { position: absolute; top: 10px; right: 10px; }
+.sku-card .zoom-btn { position: absolute; top: 10px; right: 10px; width: 24px; height: 24px; border-radius: 6px; border: 0; background: rgba(255,255,255,.9); color: var(--text); font-size: 13px; line-height: 24px; padding: 0; opacity: 0; transition: .15s; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+.sku-card:hover .zoom-btn { opacity: 1; }
+.lb-side .btn.block { width: auto; align-self: stretch; }

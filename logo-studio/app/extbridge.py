@@ -123,12 +123,9 @@ def set_status(status: str, message: str) -> None:
 
 
 def _process_offer(job: jobs.Job, offer_id: str, raw: dict) -> None:
-    from .pipeline import locate_product
-
     try:
         p = save_offer(None, raw, offer_id, job)
         if p:
-            locate_product(p)
             job.results.append(p["id"])
     except Exception as e:  # noqa: BLE001
         job.note(f"✗ {offer_id}：{str(e).splitlines()[0][:120]}")
