@@ -24,7 +24,7 @@ POLL_EVERY = float(os.environ.get("WB_POLL_EVERY", "8"))
 POLL_TIMES = int(os.environ.get("WB_POLL_TIMES", "225"))      # 新卡最多约 30 分钟
 POLL_AMBIGUOUS = int(os.environ.get("WB_POLL_AMBIGUOUS", "12"))  # 建卡结果不确定时只短轮询
 MEDIA_WORKERS = int(os.environ.get("WB_MEDIA_WORKERS", "1"))  # 图片上传同时传几个颜色（WB 对图片接口限流严，默认 1 个）
-MAX_AUTO_RESUME = 8  # 被 WB 长时间限流后自动续传的最多次数
+MAX_AUTO_RESUME = 8  # 连续这么多次自动续传都没有任何进展才停（有进展会重新计数）
 STOCK_DELAYS = [float(x) for x in os.environ.get("WB_STOCK_DELAYS", "20,40,80,160,300,600,600").split(",")]
 
 
@@ -214,6 +214,17 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
         total = sum(len(m) for m in media.values()) or 1
         lock = threading.Lock()
 
+        def push_one(vc, n):
+            imgs = media[vc]
+            cli.upload_media_file(nm[vc], n, imgs[n - 1])
+            with lock:
+                done[vc] = n
+                sent = sum(min(done.get(k, 0), len(media[k])) for k in media)
+                _update(pid, key, shop_id, lambda P, d=dict(done), pct=38 + int(47 * sent / total): P.update(
+                    media_done=d, progress={"stage": f"上传图片 {sent}/{total}", "pct": pct}))
+            if job:
+                job.note(f"上传图片 {codes[vc]['sku']} 第 {n}/{len(imgs)} 张")
+
         def push(vc):
             imgs = media[vc]
             for n in range(done.get(vc, 0) + 1, len(imgs) + 1):
@@ -226,8 +237,15 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 if job:
                     job.note(f"上传图片 {codes[vc]['sku']} 第 {n}/{len(imgs)} 张")
 
-        with ThreadPoolExecutor(max_workers=max(1, min(MEDIA_WORKERS, len(media)))) as ex:
-            list(ex.map(push, list(media)))
+        if MEDIA_WORKERS <= 1:
+            # 先给每个颜色传第 1 张（主图），再传第 2 张……：WB 图片额度紧张时，每个颜色都先有主图
+            for n in range(1, max(len(m) for m in media.values()) + 1):
+                for vc in media:
+                    if done.get(vc, 0) + 1 == n and n <= len(media[vc]):
+                        push_one(vc, n)
+        else:
+            with ThreadPoolExecutor(max_workers=min(MEDIA_WORKERS, len(media))) as ex:
+                list(ex.map(push, list(media)))
 
         _stage(pid, key, shop_id, job, "提交价格和折扣", 92)
         disc = max(0, min(99, int(float(L["pricing"].get("discount") or 0))))
@@ -269,7 +287,10 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             job.finish("上架完成")
     except RateLimited as e:
         # WB 要求等很久：不算失败，到点后自动从断点续传（已建的卡按供应商编码找回，不会重复建卡）
-        n = int(LS.pub(store.get_product(pid)["listings"][key], shop_id).get("auto_resume") or 0)
+        P0 = LS.pub(store.get_product(pid)["listings"][key], shop_id)
+        mark = len(P0.get("nm") or {}) + sum((P0.get("media_done") or {}).values())  # 已完成的进度
+        # 每次续传有进展（多建了卡/多传了图）就重新计数；连续多次一点进展都没有才停
+        n = 0 if mark > int(P0.get("resume_mark") or -1) else int(P0.get("auto_resume") or 0)
         at = time.time() + e.retry_after + 5
         if n >= MAX_AUTO_RESUME:
             _update(pid, key, shop_id, lambda P: P.update(status="failed", error=f"多次被 WB 限流，已停止自动续传：{e}"))
@@ -277,7 +298,8 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             if job:
                 job.fail(str(e))
             return
-        _update(pid, key, shop_id, lambda P: P.update(status="waiting", error=str(e), retry_at=at, auto_resume=n + 1))
+        _update(pid, key, shop_id, lambda P: P.update(status="waiting", error=str(e), retry_at=at, auto_resume=n + 1,
+                                                     resume_mark=mark))
         _stage(pid, key, shop_id, job, f"⏸ {e}。{time.strftime('%H:%M', time.localtime(at))} 后自动从断点继续，不用再点", 0)
         _schedule_resume(pid, key, shop_id, at)
         if job:
