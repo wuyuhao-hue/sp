@@ -192,7 +192,7 @@
         </div>
         <div class="sec">
           <h3>AI 商品理解 <button class="btn sm ghost" v-if="settings.text_model" :disabled="analyzing" @click="analyze">{{ analyzing ? '理解中…' : (aiInfo.description_en ? '重新理解' : '开始理解') }}</button></h3>
-          <div class="note" v-if="!settings.text_model" style="margin-bottom:10px">没有设置「商品理解模型」，卖点由生图模型根据图片自己写。可以在下面手动填写卖点，或到设置里填一个能看图的对话模型。</div>
+          <div class="note" v-if="!settings.text_model" style="margin-bottom:10px">没有设置「商品理解模型」：卖点由程序从标题和详情图文字里自动提取（不花钱），也可以在下面手动写。想让 AI 写得更好，可以到设置里填一个能看图的对话模型（如 gpt-4o-mini）。</div>
           <div class="field"><label>模特</label>
             <select class="input" :value="aiInfo.gender || guessGender" @change="saveInfo({gender: $event.target.value})">
               <option value="male">男模特</option><option value="female">女模特</option><option value="unisex">中性</option>
@@ -202,12 +202,12 @@
             <span class="faint">首图显示前 3 条，背面图显示第 4~6 条。{{ settings.text_model ? '「重新理解」会让 AI 重写卖点。' : '设置「商品理解模型」后可由 AI 写卖点。' }}留空时自动提取（灰字为当前自动提取的结果）。</span></div>
           <div class="faint" v-if="aiInfo.selling_points_cn && lang !== 'cn'" style="margin-top:4px">中文：{{ aiInfo.selling_points_cn.join(' / ') }}</div>
           <div class="row" style="margin-top:10px;gap:10px">
-            <div class="field grow"><label>首图底部大字</label>
+            <div class="field grow" title="首图、背面图底部的半透明大字，表示品类（如 Куртка 外套、Пуховик 羽绒服）。自动填写，清空即不显示"><label>首图底部大字 ⓘ</label>
               <input class="input" :value="aiInfo.big_word || ''" @change="saveInfo({big_word: $event.target.value.trim()})" placeholder="如 Пуховик"></div>
-            <div class="field grow"><label>尺码标</label>
+            <div class="field grow" title="只在没有卖点时，首图左侧才显示这个尺码区间标签；有卖点时不显示"><label>尺码标（无卖点时显示）ⓘ</label>
               <input class="input" :value="aiInfo.size_label || ''" @change="saveInfo({size_label: $event.target.value.trim()})" placeholder="如 46-54"></div>
           </div>
-          <div class="faint" style="margin-top:4px">改了会自动更新已生成套图的首图和背面图（本地处理，不花钱）</div>
+          <div class="faint" style="margin-top:4px">都是自动填的，不改也行；改了会自动更新已生成的首图和背面图（不花钱）。大字清空就不显示。</div>
           <div class="field" style="margin-top:10px"><label class="row between">尺码表（每行一个尺码，用 | 分隔，第一行是表头）
               <button class="btn sm ghost" :disabled="readingSize || !(current.detail_images||[]).length" title="本地识别详情图里的尺码表，不调用任何接口" @click="readSizeTable">{{ readingSize ? '识别中…' : '从详情图识别' }}</button></label>
             <textarea class="input mono" rows="5" :value="sizeTableText" @change="saveInfo({size_table: $event.target.value})" placeholder="Размер | Длина | Обхват груди | Ширина плеч&#10;L | 73 | 114 | 47&#10;XL | 75 | 118 | 48.5"></textarea>
