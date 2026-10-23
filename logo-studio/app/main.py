@@ -78,7 +78,8 @@ def state():
     return {"browser": {"state": browser.state, "message": browser.message}, "ext": ext,
             "jobs": jobs.list_jobs(), "settings": s,
             "shot_types": {**store.SHOT_TYPES, "size_chart": "尺码表（本地生成）"},
-            "can_logo": sorted(studio.CAN_LOGO), "default_shots": store.DEFAULT_SHOTS, "version": VERSION}
+            "can_logo": sorted(studio.CAN_LOGO), "default_shots": store.DEFAULT_SHOTS, "version": VERSION,
+            "styles": {k: v["name"] for k, v in store.STYLES.items()}}
 
 
 @app.get("/api/version")
@@ -213,7 +214,7 @@ def analyze(pid: str):
 
 
 @app.post("/api/products/{pid}/generate")
-def generate(pid: str, skus: list[str] = Body(...), logo_id: str | None = Body(None)):
+def generate(pid: str, skus: list[str] = Body(...), logo_id: str | None = Body(None), style: str | None = Body(None)):
     p = _product_or_404(pid)
     if not skus:
         raise HTTPException(400, "请至少选择一个 SKU")
@@ -222,7 +223,8 @@ def generate(pid: str, skus: list[str] = Body(...), logo_id: str | None = Body(N
         raise HTTPException(400, "请先在「设置」里填写中转站地址和令牌")
     n = int(s.get("shot_count") or 6)
     job = jobs.Job("generate", f"生成套图：{p.get('title', '')[:16]}（{len(skus)} 个 SKU × {n} 张）")
-    jobs.run_in_thread(job, studio.generate, pid, skus, logo_id)
+    jobs.run_in_thread(job, lambda pid_, skus_, logo_, j: studio.generate(pid_, skus_, logo_, j, style=style),
+                       pid, skus, logo_id)
     return job.to_dict()
 
 
@@ -299,6 +301,32 @@ def queue_list():
                             "offer_id": p.get("offer_id"), "price_min": p.get("price_min"), "price_max": p.get("price_max"),
                             "sizes": p.get("sizes") or [], "set": st})
     return out
+
+
+@app.post("/api/batch/generate")
+def batch_generate(ids: list[str] = Body(...), logo_id: str | None = Body(None), style: str | None = Body(None),
+                   sku_scope: str = Body("all")):
+    s = store.get_settings()
+    if not s.get("api_base") or not s.get("api_key"):
+        raise HTTPException(400, "请先在「设置」里填写中转站地址和令牌")
+    job = jobs.Job("generate", f"批量生成：{len(ids)} 个商品（{'全部颜色' if sku_scope == 'all' else '每个商品第一个颜色'}）")
+    jobs.run_in_thread(job, studio.batch_generate, ids, logo_id, style, sku_scope)
+    return job.to_dict()
+
+
+@app.post("/api/batch/queue")
+def batch_queue(ids: list[str] = Body(..., embed=True)):
+    """把选中商品里已经生成完成的套图全部移入待上架。"""
+    n = 0
+    for pid in ids:
+        def fn(p):
+            nonlocal n
+            for st in p.get("sets") or []:
+                if st.get("status") in ("done", "partial") and not st.get("queued"):
+                    st["queued"] = True
+                    n += 1
+        store.update_product(pid, fn)
+    return {"count": n}
 
 
 # ---------------- 采集 ----------------

@@ -84,8 +84,7 @@ SHOT_PROMPTS = {
         "At the top: " + HEADLINE + " about fit and comfort, and one smaller subtitle line in {lang}. Optionally a small "
         "round inset showing the lining. Based only on these real features: {facts}"
     ),
-    "flat_front": "The garment alone, front view, on an invisible ghost mannequin (no person), centered on a plain light "
-                  "background with a soft natural shadow. No text.",
+    "flat_front": "The garment alone, front view, on an invisible ghost mannequin (no person), centered, {bg}. No text.",
     "material_info": (
         "Close-up of the garment's most important material — its lining, insulation or outer fabric, whichever is most "
         "characteristic — filling most of the frame, soft dramatic studio light. At the top: " + HEADLINE + " and 1-2 "
@@ -108,8 +107,7 @@ LAYOUT_FREE = (
     "garment details (a logo, color swatches and a word will be added there later). No text, no logos, no graphics "
     "anywhere in the image."
 )
-GHOST_BG = ("on a clean bright background: soft white-to-light-grey with a subtle light-blue diagonal shape on the right "
-            "side, gentle studio shadow")
+GHOST_BG = "{bg}"  # 由套图风格决定
 SHOT_PROMPTS.update({
     "hero": (
         "MAIN LISTING IMAGE: the garment alone on an invisible ghost mannequin (no person), front view, zipped, large "
@@ -130,8 +128,8 @@ SHOT_PROMPTS.update({
         "panel with " + HEADLINE + " and 1-2 short lines in {lang}. At the bottom: a row of 3-4 simple thin-line circular "
         "icons, each with a 2-3 word caption in {lang}. Based only on these real features: {facts}"
     ),
-    "side_ghost": "The garment alone on an invisible ghost mannequin (no person), 45-degree side view, centered on a plain "
-                  "light background with a soft natural shadow. No text.",
+    "side_ghost": "The garment alone on an invisible ghost mannequin (no person), 45-degree side view, centered, {bg}. "
+                  "No text.",
     "hero_ai_text": SHOT_PROMPTS["hero"],
     "detail_collage": (
         "A clean product-detail collage on white made of 2-3 large close-up photos of real details of this garment "
@@ -160,9 +158,23 @@ SHOT_PROMPTS["detail_collage"] = (
     + CLOSE_ONLY
 )
 SHOT_PROMPTS["detail_fabric"] += CLOSE_ONLY
+SHOT_PROMPTS["layers_info"] = (
+    "A clean technical infographic showing how the garment keeps warm: a realistic cutaway cross-section of the garment's "
+    "fabric layers (outer shell, insulation or padding, inner lining — only the layers this garment really has), peeled "
+    "apart slightly in 3D with thin leader lines, each layer labeled with a short {lang} name and 2-4 word benefit. At the "
+    "top: " + HEADLINE + ". Small thin-line icons (wind, cold, warmth) around it. Based only on these real features: {facts}"
+    + CLOSE_ONLY
+)
+SHOT_PROMPTS["function_scene"] = (
+    "A close-up of the garment's outer fabric (a sleeve or shoulder area) demonstrating its protection: wind-blown snow "
+    "and a few rain droplets hitting and beading off the surface, motion streaks of cold wind, the fabric staying dry; "
+    "dramatic but clean. A short bold caption in {lang} about protection from wind and cold, plus 2-3 small line icons "
+    "with 2-word captions. Based only on these real features: {facts}" + CLOSE_ONLY
+)
 CAN_LOGO = {"hero", "hero_ai_text", "hero_model", "model_front", "model_side", "flat_front", "lifestyle", "side_ghost",
             "open_lining"}
-USES_STYLE = {"hero_ai_text", "hero_model", "back_info", "material_info", "material_tech", "detail_collage"}
+USES_STYLE = {"hero_ai_text", "hero_model", "back_info", "material_info", "material_tech", "detail_collage",
+              "layers_info", "function_scene"}
 OVERLAY_FULL = {"hero", "back_overlay"}   # 本地叠加：左上 logo、尺码标、颜色圆点、底部大字
 OVERLAY_WORD = {"open_lining"}            # 本地叠加：只加底部大字
 
@@ -247,8 +259,12 @@ def ensure_analysis(product: dict, force: bool = False) -> dict:
     return info
 
 
+def style_of(key: str | None) -> dict:
+    return store.STYLES.get(key or "classic") or store.STYLES["classic"]
+
+
 def build_prompt(product: dict, sku: dict, shot: dict, logo: dict | None, n_product: int, n_style: int = 0,
-                 marker_aspect: float | None = None) -> str:
+                 marker_aspect: float | None = None, style: str | None = None) -> str:
     """输入图顺序：商品参考图 n_product 张（第 1 张是 SKU 图）→ 风格参考图 n_style 张 → logo（AI 画 logo 时）。
     marker_aspect 不为空时，让 AI 在左胸放洋红色占位块（之后由程序换成 logo 原图）。"""
     info = product.get("ai") or {}
@@ -270,7 +286,9 @@ def build_prompt(product: dict, sku: dict, shot: dict, logo: dict | None, n_prod
                              else f" (color variant \"{sku['name']}\")",
                              others=OTHER_REFS.format(n=n_product) if n_product > 1 else "", desc=desc),
         STYLE_REFS.format(a=n_product + 1, b=n_product + n_style) if n_style else "",
-        SHOT_PROMPTS[shot["type"]].format(model=model, points=points, lang=lang, facts=facts),
+        SHOT_PROMPTS[shot["type"]].format(model=model, points=points, lang=lang, facts=facts,
+                                          bg=style_of(style)["bg"]),
+        "VISUAL STYLE: " + style_of(style)["mood"] + ". Any panels, icons and text in the image must follow this palette.",
     ]
     if marker_aspect:
         from .logo_place import marker_prompt
@@ -349,13 +367,13 @@ def make_garment(pid: str, img: dict, logo: dict | None) -> tuple[Image.Image, s
     return apply_logo(base, img["place"], logo), ""
 
 
-def render_final(pid: str, img: dict, logo: dict | None, product: dict | None = None) -> Image.Image:
+def render_final(pid: str, img: dict, logo: dict | None, product: dict | None = None, style: str | None = None) -> Image.Image:
     """印好 logo 的图 → 首图/背面图的本地叠加层（左上 logo、尺码标、颜色圆点、底部大字）。不调用 AI。"""
     from . import overlay
 
     p = product or store.get_product(pid)
     out = Image.open(store.product_dir(pid) / (img.get("garment") or img["base"])).convert("RGB")
-    s = store.get_settings()
+    s = {**store.get_settings(), "theme": style_of(style)["theme"]}
     if img["type"] in OVERLAY_FULL:
         out = overlay.apply(out, p, logo, "full_back" if img["type"] == "back_overlay" else "full", s)
     elif img["type"] in OVERLAY_WORD:
@@ -382,7 +400,8 @@ def _ai_image(p: dict, st: dict, img: dict, logo: dict | None, job) -> dict:
     note = ""
     if want_logo and store.get_settings().get("logo_mode", "ai_crop") in ("ai_crop", "exact"):
         lg = Image.open(store.logo_dir(logo["id"]) / logo["logo"])
-        prompt = build_prompt(p, sku, shot, None, n_product, len(style), marker_aspect=lg.width / lg.height)
+        prompt = build_prompt(p, sku, shot, None, n_product, len(style), marker_aspect=lg.width / lg.height,
+                              style=st.get("style"))
         for _ in range(MAX_MARKER_TRIES):
             out = ai.to_wb(ai.edit_images(refs, prompt))
             mk = find_marker(out)
@@ -395,7 +414,7 @@ def _ai_image(p: dict, st: dict, img: dict, logo: dict | None, job) -> dict:
     use_logo = logo if want_logo else None
     if use_logo:
         refs.append(_logo_image(use_logo))
-    prompt = build_prompt(p, sku, shot, use_logo, n_product, len(style))
+    prompt = build_prompt(p, sku, shot, use_logo, n_product, len(style), style=st.get("style"))
     return {"base": ai.to_wb(ai.edit_images(refs, prompt, fidelity=bool(use_logo))), "marked": None, "place": None,
             "note": note}
 
@@ -435,7 +454,7 @@ def _gen_one(pid: str, sid: str, idx: int, job) -> None:
         garment, note2 = make_garment(pid, img, logo)
         garment.save(d / f"{n}_garment.jpg", quality=95)
         img["garment"] = f"{n}_garment.jpg"
-        render_final(pid, img, logo, p).save(d / f"{n}.jpg", quality=95)
+        render_final(pid, img, logo, p, st.get("style")).save(d / f"{n}.jpg", quality=95)
         note = note or note2
         _update_image(pid, sid, idx, status="done", file=f"{n}.jpg", base=img["base"], marked=img.get("marked"),
                       place=img.get("place"), garment=img["garment"], note=note, swap_from=None, relogo=False,
@@ -458,7 +477,7 @@ def rerender_set(pid: str, sid: str) -> None:
     logo = store.get_logo(st["logo_id"]) if st.get("logo_id") else None
     for i, im in enumerate(st["images"]):
         if im.get("base") and im.get("file") and (store.product_dir(pid) / im["base"]).exists():
-            render_final(pid, im, logo, p).save(store.product_dir(pid) / im["file"], quality=95)
+            render_final(pid, im, logo, p, st.get("style")).save(store.product_dir(pid) / im["file"], quality=95)
             _update_image(pid, sid, i, v=int(time.time() * 1000))
 
 
@@ -477,7 +496,8 @@ def _finish(tasks: list[tuple[str, str, int]], job) -> None:
     job.finish(f"完成：成功 {len(tasks) - failed} 张" + (f"，失败 {failed} 张（可单张重试）" if failed else ""))
 
 
-def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
+def generate(pid: str, sku_names: list[str], logo_id: str | None, job, style: str | None = None,
+             finish: bool = True) -> None:
     """为选中的 SKU 各生成一套图。先建好套图卡片（界面上立即显示"排队中"），
     AI 生图和尺码表识别同时进行，尺码表放在每套最后一张。"""
     import threading
@@ -496,7 +516,12 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
             continue
         sid = store.new_id()
         _set_dir(pid, sid)
-        st = {"id": sid, "sku": name, "sku_image": sku["image"], "logo_id": logo_id,
+        sk = style or s.get("style") or "classic"
+        if sk == "random":  # 随机风格：每套随机挑一种
+            import random
+
+            sk = random.choice(list(store.STYLES))
+        st = {"id": sid, "sku": name, "sku_image": sku["image"], "logo_id": logo_id, "style": sk,
               "logo_name": logo["name"] if logo else "", "created": time.time(), "status": "running",
               "queued": False, "parent": None,
               "images": [{"type": sh["type"], "logo": bool(sh.get("logo") and logo and sh["type"] in CAN_LOGO),
@@ -558,7 +583,27 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
         for sid in {t[1] for t in ai_tasks}:  # 卖点可能更新了：首图、背面图在本地重新叠加
             rerender_set(pid, sid)
     _run(size_tasks, job, finish=False)
-    _finish(ai_tasks + size_tasks, job)
+    if finish:
+        _finish(ai_tasks + size_tasks, job)
+
+
+def batch_generate(pids: list[str], logo_id: str | None, style: str | None, sku_scope: str, job) -> None:
+    """批量：对多个商品依次生成套图（每个商品内部的图片并发生成）。sku_scope：all 全部颜色 / first 只做第一个颜色。"""
+    for k, pid in enumerate(pids):
+        if job.cancelled:
+            break
+        p = store.get_product(pid)
+        if not p:
+            continue
+        skus = [x["name"] for x in sku_list(p)]
+        if sku_scope == "first":
+            skus = skus[:1]
+        job.note(f"[{k + 1}/{len(pids)}] {(p.get('title') or pid)[:20]}：{len(skus)} 个颜色")
+        try:
+            generate(pid, skus, logo_id, job, style=style, finish=False)
+        except Exception as e:  # noqa: BLE001
+            job.note(f"✗ {pid}：{str(e)[:100]}")
+    job.finish(f"批量完成：{len(pids)} 个商品，共 {job.done} 张图")
 
 
 def swap_logo(pid: str, src_sid: str, logo_id: str, job) -> None:
@@ -585,7 +630,7 @@ def swap_logo(pid: str, src_sid: str, logo_id: str, job) -> None:
                 tasks.append((pid, sid, i))
             else:
                 new.update(status="done", garment=new["base"], file=f"{n}.jpg", v=int(time.time() * 1000))
-                render_final(pid, new, logo, p).save(pdir / new["file"], quality=95)
+                render_final(pid, new, logo, p, src.get("style")).save(pdir / new["file"], quality=95)
         elif im.get("logo") and im.get("file"):
             new.update(status="pending", file=None, error="", swap_from=im["file"])
             tasks.append((pid, sid, i))
@@ -596,7 +641,8 @@ def swap_logo(pid: str, src_sid: str, logo_id: str, job) -> None:
             new.update(status="failed", file=None, error="原套图这张没有生成成功")
         images.append(new)
     st = {"id": sid, "sku": src["sku"], "sku_image": src["sku_image"], "logo_id": logo_id, "logo_name": logo["name"],
-          "created": time.time(), "status": "running" if tasks else "done", "queued": False, "parent": src_sid,
+          "style": src.get("style"), "created": time.time(), "status": "running" if tasks else "done", "queued": False,
+          "parent": src_sid,
           "images": images}
     store.update_product(pid, lambda x: x.setdefault("sets", []).append(st))
     job.note(f"换标：{len(tasks)} 张重新印胸口 logo，其余 {len(images) - len(tasks)} 张在本地处理")

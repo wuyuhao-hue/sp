@@ -16,7 +16,8 @@ createApp({
   data: () => ({
     tab: 'products',
     products: [], logos: [], current: null, queue: [],
-    query: '', selected: [], skuSel: [], genLogo: null, showRefs: false,
+    query: '', selected: [], skuSel: [], skuView: null, genLogo: null, genStyle: null, showRefs: false,
+    styles: {}, batch: { logo_id: null, style: 'random', sku_scope: 'all' },
     settings: {}, shotTypes: {}, canLogoTypes: [], defaultShots: [], models: [],
     browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
     extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'),
@@ -39,7 +40,11 @@ createApp({
       }
       return p.main_images && p.main_images.length ? [{ name: '默认', image: p.main_images[0] }] : [];
     },
-    setsSorted() { return [...((this.current && this.current.sets) || [])].sort((a, b) => b.created - a.created); },
+    setsSorted() {
+      const all = (this.current && this.current.sets) || [];
+      return all.filter(s => !this.skuView || s.sku === this.skuView).sort((a, b) => b.created - a.created);
+    },
+    styleOptions() { return { ...this.styles, random: '随机风格' }; },
     aiInfo() { return (this.current && this.current.ai) || {}; },
     guessGender() { const t = (this.current && this.current.title) || ''; return /女/.test(t) ? 'female' : /男/.test(t) ? 'male' : 'unisex'; },
     sizeTableText() {
@@ -92,6 +97,7 @@ createApp({
     logoUrl(l) { return `/data/logos/${l.id}/${l.logo}?v=${l.v || 0}`; },
     fmtPrice(a, b) { return a === b || b == null ? `${a}` : `${a}-${b}`; },
     shotName(t) { return this.shotTypes[t] || t; },
+    styleName(k) { return this.styleOptions[k] || k; },
     canLogo(t) { return this.canLogoTypes.includes(t); },
     setsOf(name) { return ((this.current && this.current.sets) || []).filter(s => s.sku === name); },
     jobStatus(j) { return { running: `${j.done}/${j.total || '?'}`, done: '完成', failed: '失败', pending: '排队中' }[j.status]; },
@@ -108,8 +114,8 @@ createApp({
         this.browserState = s.browser;
         this.ext = s.ext || {};
         this.extInstalled = this.extInstalled || !!document.documentElement.getAttribute('data-logo-studio-ext');
-        this.shotTypes = s.shot_types; this.canLogoTypes = s.can_logo; this.defaultShots = s.default_shots;
-        if (!this.settingsLoaded) { this.settings = s.settings; this.settingsLoaded = true; }
+        this.shotTypes = s.shot_types; this.canLogoTypes = s.can_logo; this.defaultShots = s.default_shots; this.styles = s.styles || {};
+        if (!this.settingsLoaded) { this.settings = s.settings; this.settingsLoaded = true; this.genStyle = s.settings.style || 'classic'; }
         const sig = s.jobs.map(j => `${j.id}:${j.done}:${j.status}`).join('|');
         const running = s.jobs.some(j => j.status === 'running');
         this.jobs = s.jobs;
@@ -132,7 +138,7 @@ createApp({
     },
     async openProduct(id) {
       this.current = await api(`/api/products/${id}`);
-      this.skuSel = [];
+      this.skuSel = []; this.skuView = null;
     },
     async refreshCurrent() {
       const p = await api(`/api/products/${this.current.id}`).catch(() => null);
@@ -148,7 +154,7 @@ createApp({
       if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.tab = 'settings'; return; }
       this.generating = true;
       try {
-        this.jobs.unshift(await api(`/api/products/${this.current.id}/generate`, { body: { skus: this.skuSel, logo_id: this.genLogo } }));
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/generate`, { body: { skus: this.skuSel, logo_id: this.genLogo, style: this.genStyle } }));
         this.toast('已开始生成，进度在右下角');
         this.skuSel = [];
         setTimeout(this.refreshCurrent, 600);
@@ -234,6 +240,19 @@ createApp({
     },
 
     // ---------- 商品 ----------
+    async batchGenerate() {
+      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.tab = 'settings'; return; }
+      const n = this.selected.length;
+      if (!confirm(`对 ${n} 个商品批量生成套图（${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}，每套约 ${this.activeShots.length + 1} 次生图调用）？`)) return;
+      try { this.jobs.unshift(await api('/api/batch/generate', { body: { ids: this.selected, ...this.batch } })); this.toast('已开始批量生成，进度在右下角'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async batchQueue() {
+      const r = await api('/api/batch/queue', { body: { ids: this.selected } });
+      this.toast(r.count ? `已移入待上架 ${r.count} 套` : '选中的商品没有已完成、未移入的套图');
+      this.loadProducts();
+      if (this.current) this.refreshCurrent();
+    },
     async deleteSel() {
       if (!confirm(`确定删除选中的 ${this.selected.length} 个商品（包括已生成的套图）？`)) return;
       await api('/api/products/delete', { body: { ids: this.selected } });

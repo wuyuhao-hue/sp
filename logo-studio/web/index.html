@@ -63,9 +63,18 @@
       </div>
       <div class="batchbar" v-if="selected.length">
         <div class="row">
-          <span class="faint grow">已选 {{ selected.length }} 个商品</span>
-          <button class="btn sm danger" @click="deleteSel">删除</button>
+          <span class="faint grow">已选 {{ selected.length }} 个商品，批量生成：</span>
+          <button class="btn sm ghost danger" @click="deleteSel">删除</button>
         </div>
+        <div class="row">
+          <select class="input sm grow" v-model="batch.logo_id"><option :value="null">不印标</option><option v-for="l in logos" :key="l.id" :value="l.id">{{ l.name }}</option></select>
+          <select class="input sm grow" v-model="batch.style"><option v-for="(n, k) in styleOptions" :key="k" :value="k">{{ n }}</option></select>
+        </div>
+        <div class="row">
+          <select class="input sm grow" v-model="batch.sku_scope"><option value="all">每个商品全部颜色</option><option value="first">每个商品只做第一个颜色</option></select>
+        </div>
+        <button class="btn primary block" @click="batchGenerate">批量生成套图</button>
+        <button class="btn block" @click="batchQueue">把已完成的套图全部移入待上架</button>
       </div>
     </aside>
 
@@ -85,14 +94,14 @@
 
       <div class="block">
         <div class="block-head">
-          <b>选择 SKU</b><span class="faint">买家买的是 SKU，每个勾选的颜色单独生成一套图（WB 上每个颜色是一张商品卡）</span>
+          <b>选择 SKU</b><span class="faint">勾选左上角选择要生成的颜色；点击卡片只看这个颜色的套图</span>
           <span class="spacer"></span>
           <button class="btn sm ghost" @click="skuSel = skuSel.length === skus.length ? [] : skus.map(k => k.name)">{{ skuSel.length === skus.length ? '全不选' : '全选' }}</button>
         </div>
         <div class="sku-grid">
-          <div v-for="k in skus" :key="k.name" class="sku-card" :class="{on: skuSel.includes(k.name)}" @click="toggleSku(k.name)">
+          <div v-for="k in skus" :key="k.name" class="sku-card" :class="{on: skuSel.includes(k.name), viewing: skuView === k.name}" @click="skuView = skuView === k.name ? null : k.name" title="点击：只看这个颜色的套图；勾选框：选中用于生成">
             <img :src="imgSrc(k.image)">
-            <i class="check" :class="{on: skuSel.includes(k.name)}"></i>
+            <i class="check big" :class="{on: skuSel.includes(k.name)}" @click.stop="toggleSku(k.name)"></i>
             <button class="zoom-btn" title="查看大图" @click.stop="zoom(imgSrc(k.image))">⤢</button>
             <div class="nm" :title="k.name">{{ k.name }}</div>
             <div class="faint" v-if="setsOf(k.name).length">{{ setsOf(k.name).length }} 套图</div>
@@ -112,12 +121,14 @@
         </div>
       </div>
 
+      <div class="view-filter" v-if="skuView">正在查看「{{ skuView }}」的套图（{{ setsSorted.length }} 套）<button class="btn sm ghost" @click="skuView = null">显示全部颜色</button></div>
       <div class="block" v-for="st in setsSorted" :key="st.id">
         <div class="block-head">
           <img class="mini" :src="imgSrc(st.sku_image)">
           <b>{{ st.sku }}</b>
           <span class="tag accent" v-if="st.logo_name">{{ st.logo_name }}</span>
           <span class="tag" v-else>无 logo</span>
+          <span class="tag" v-if="st.style">{{ styleName(st.style) }}</span>
           <span class="tag warn" v-if="st.status==='running'">生成中 {{ st.images.filter(i => i.status==='done').length }}/{{ st.images.length }}</span>
           <span class="tag" v-else-if="st.status==='partial'" style="color:var(--danger)">有 {{ st.images.filter(i => i.status==='failed').length }} 张失败</span>
           <span class="tag ok" v-if="st.queued">已在待上架</span>
@@ -165,7 +176,11 @@
           </div>
         </div>
         <div class="sec">
-          <h3>套图模板 <button class="btn sm ghost" @click="tab='settings'">修改</button></h3>
+          <h3>风格</h3>
+          <div class="style-grid">
+            <div v-for="(n, k) in styleOptions" :key="k" class="style-chip" :class="['st-' + k, {on: genStyle === k}]" @click="genStyle = k">{{ n }}</div>
+          </div>
+          <h3 style="margin-top:16px">推荐模板 1 <button class="btn sm ghost" @click="tab='settings'">修改</button></h3>
           <ol class="shot-list">
             <li v-for="(sh, i) in activeShots" :key="i">{{ shotName(sh.type) }}<span class="tag accent" v-if="sh.logo && genLogo && canLogo(sh.type)">印标</span></li>
             <li v-if="settings.size_chart_auto">尺码表<span class="tag">本地生成</span><span class="faint" v-if="!sizeTableText">（需先填尺码表）</span></li>
@@ -310,10 +325,12 @@
       </div>
 
       <div class="card" style="margin-top:16px">
-        <div class="set-title">套图模板</div>
+        <div class="set-title">套图模板（推荐模板 1）</div>
         <div class="form-grid">
           <div class="field"><label>每套张数</label>
             <select class="input" v-model.number="settings.shot_count"><option v-for="n in [5,6,7,8]" :key="n" :value="n">{{ n }} 张</option></select></div>
+          <div class="field"><label>默认风格</label>
+            <select class="input" v-model="settings.style"><option v-for="(n, k) in styleOptions" :key="k" :value="k">{{ n }}</option></select></div>
           <div class="field"><label>logo 印法</label>
             <select class="input" v-model="settings.logo_mode">
               <option value="ai_crop">AI 局部放大印标：胸口放大后由 AI 印上你的 logo（推荐，自然且还原度高）</option>
@@ -334,7 +351,7 @@
             </table>
             <div class="row between" style="margin-top:8px">
               <span class="faint">「胸口印 logo」打开的位置会在左胸印上你的 logo。换 logo 时衣服底图沿用，只重做胸口那一小块。背面、特写、拼图看不到完整胸口，开关是灰的。灰色的行超出了张数，不会生成。</span>
-              <button class="btn sm" @click="resetShots">恢复推荐模板</button>
+              <button class="btn sm" @click="resetShots">恢复推荐模板 1</button>
             </div>
             <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:14px">
               <span class="faint">首图 / 背面图本地叠加：</span>

@@ -19,13 +19,21 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default(size)
 
 
-def _logo_layer(logo_meta: dict, width: int) -> Image.Image:
+THEMES = {
+    # 卡片底色, 文字/图标颜色, 底部大字颜色, 左上 logo 颜色
+    "light": {"card": (255, 255, 255, 205), "ink": (20, 20, 24, 255), "word": (205, 207, 212, 215), "logo": "dark"},
+    "beige": {"card": (255, 250, 242, 215), "ink": (70, 50, 38, 255), "word": (226, 210, 190, 210), "logo": "dark"},
+    "dark": {"card": (18, 18, 22, 165), "ink": (245, 245, 245, 255), "word": (255, 255, 255, 70), "logo": "light"},
+}
+
+
+def _logo_layer(logo_meta: dict, width: int, tone: str = "dark") -> Image.Image:
     im = Image.open(store.logo_dir(logo_meta["id"]) / logo_meta["logo"]).convert("RGBA")
     # 太浅的 logo 放在浅色背景上看不见：换成深色
-    from .compose import DARK, logo_luminance, logo_to_mono
+    from .compose import DARK, LIGHT, logo_to_mono
 
     if logo_meta.get("color_mode") != "original":
-        im = logo_to_mono(im, DARK)  # 左上角放在浅色背景上：统一用黑色
+        im = logo_to_mono(im, LIGHT if tone == "light" else DARK)  # 浅色背景用黑色，深色背景用白色
     h = round(width * im.height / im.width)
     return im.resize((width, h), Image.LANCZOS)
 
@@ -57,6 +65,7 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
     im = base.convert("RGBA")
     W, H = im.size
     info = product.get("ai") or {}
+    th = THEMES.get(opts.get("theme") or "light", THEMES["light"])
     top = Image.new("RGBA", im.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(top)
 
@@ -67,12 +76,12 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
         while d.textlength(word, font=f) > W * 0.94 and size > 40:
             size -= 6
             f = _font(size)
-        d.text((W / 2, H * 0.985), word, font=f, fill=(205, 207, 212, 215), anchor="ms")
+        d.text((W / 2, H * 0.985), word, font=f, fill=th["word"], anchor="ms")
 
     if kind in ("full", "full_back"):
         y = int(H * 0.035)
         if opts.get("overlay_logo", True) and logo_meta:
-            lg = _logo_layer(logo_meta, int(W * 0.40))
+            lg = _logo_layer(logo_meta, int(W * 0.40), th["logo"])
             if lg.height > H * 0.13:
                 lg = lg.resize((round(lg.width * H * 0.13 / lg.height), int(H * 0.13)), Image.LANCZOS)
             top.alpha_composite(lg, (int(W * 0.05), y))
@@ -84,7 +93,7 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
             pts = pts[:3]
         label = (info.get("size_label") or "").strip()
         if opts.get("overlay_points", True) and pts:
-            _points_column(top, pts, int(W * 0.045), y, int(W * 0.27), H)
+            _points_column(top, pts, int(W * 0.045), y, int(W * 0.27), H, th)
         elif opts.get("overlay_size", True) and label:  # 没有卖点时用尺码区间兜底
             f = _font(int(H * 0.045))
             tw = d.textlength(label, font=f)
@@ -132,7 +141,7 @@ def _wrap(d: ImageDraw.ImageDraw, text: str, font, width: int) -> list[str]:
     return lines[:3]
 
 
-def _points_column(top: Image.Image, pts: list[str], x: int, y: int, col_w: int, H: int) -> None:
+def _points_column(top: Image.Image, pts: list[str], x: int, y: int, col_w: int, H: int, th: dict) -> None:
     """左侧卖点栏：每条一个圆形线条图标 + 下面一到两行俄文，放在半透明白色卡片上。"""
     from .points import draw_icon, icon_for
 
@@ -151,14 +160,14 @@ def _points_column(top: Image.Image, pts: list[str], x: int, y: int, col_w: int,
     line_h = int(f.size * 1.18)
     block_h = sum(icon + 10 + len(ls) * line_h + int(H * 0.025) for _, ls in items)
     card = Image.new("RGBA", (col_w + 24, block_h + 20), (0, 0, 0, 0))
-    ImageDraw.Draw(card).rounded_rectangle((0, 0, card.width - 1, card.height - 1), radius=18, fill=(255, 255, 255, 205))
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, card.width - 1, card.height - 1), radius=18, fill=th["card"])
     top.alpha_composite(card, (x - 12, y - 10))
     for t, lines in items:
-        ic = draw_icon(icon_for(t), icon)
+        ic = draw_icon(icon_for(t), icon, th["ink"])
         top.alpha_composite(ic, (x + (col_w - icon) // 2, y))
         y += icon + 10
         for ln in lines:
-            d.text((x + col_w / 2, y), ln, font=f, fill=(20, 20, 24, 255), anchor="ma")
+            d.text((x + col_w / 2, y), ln, font=f, fill=th["ink"], anchor="ma")
             y += line_h
         y += int(H * 0.025)
 

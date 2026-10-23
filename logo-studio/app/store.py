@@ -24,6 +24,8 @@ _lock = threading.RLock()
 SHOT_TYPES = {
     "hero": "首图：正面（隐形人台）+ 左上 logo / 卖点栏 / 颜色圆点 / 底部大字",
     "back_overlay": "背面（隐形人台）+ 左上 logo / 卖点栏 / 颜色圆点 / 底部大字",
+    "layers_info": "保暖结构剖面图（面料/填充/内里分层 + 俄语标注）",
+    "function_scene": "功能演示（风雪/雨水中的面料防护，只拍局部）",
     "open_lining": "敞开展示内衬 + 底部大字",
     "material_info": "内里/保暖层特写 + 俄语标题说明 + 图标",
     "material_tech": "面料工艺特写（防水/面料质感）+ 俄语说明",
@@ -44,14 +46,62 @@ SHOT_TYPES = {
 DEFAULT_SHOTS = [
     {"type": "hero", "logo": True, "extra": ""},
     {"type": "back_overlay", "logo": False, "extra": ""},
-    {"type": "open_lining", "logo": True, "extra": ""},
+    {"type": "layers_info", "logo": False, "extra": ""},
     {"type": "material_info", "logo": False, "extra": ""},
     {"type": "material_tech", "logo": False, "extra": ""},
     {"type": "detail_collage", "logo": False, "extra": ""},
+    {"type": "function_scene", "logo": False, "extra": ""},
     {"type": "detail_fabric", "logo": False, "extra": ""},
-    {"type": "side_ghost", "logo": True, "extra": ""},
 ]
-SHOTS_VERSION = 5
+SHOTS_VERSION = 6
+
+# 套图风格：同一个模板，换背景场景、色调和叠加层配色（参照俄罗斯电商常见审美）
+STYLES = {
+    "classic": {
+        "name": "经典棚拍",
+        "bg": "on a clean bright studio background: soft white-to-light-grey with a subtle light-blue diagonal shape on "
+              "the right side, gentle studio shadow",
+        "mood": "clean, bright, neutral light-grey and white palette with cool light-blue accents",
+        "theme": "light",
+    },
+    "winter": {
+        "name": "冬日雪景",
+        "bg": "in front of a soft-focus snowy winter landscape — snow-covered spruce forest or quiet snowy street, frosty "
+              "blue-white light, a few falling snowflakes, crisp cold daylight",
+        "mood": "frosty winter palette: icy blue, white and silver, crisp cold daylight, cozy contrast with the warm garment",
+        "theme": "light",
+    },
+    "beige": {
+        "name": "暖调奶咖",
+        "bg": "on a warm minimalist backdrop in cream, oat and latte tones with soft natural window light and a gentle "
+              "shadow, a subtle textured plaster wall",
+        "mood": "warm, cozy beige aesthetic: cream, latte, caramel and soft brown tones, soft natural light",
+        "theme": "beige",
+    },
+    "dark": {
+        "name": "高级深色",
+        "bg": "on a dramatic dark graphite-to-black gradient background with a soft rim light outlining the garment and "
+              "a faint reflective floor",
+        "mood": "premium dark palette: graphite, black and deep charcoal with crisp white highlights, dramatic contrast",
+        "theme": "dark",
+    },
+    "city": {
+        "name": "城市街景",
+        "bg": "in front of a softly blurred modern city street at golden-hour dusk with warm bokeh lights, the garment "
+              "sharp and dominant in the foreground",
+        "mood": "urban evening palette: warm amber city lights against cool blue dusk, modern and stylish",
+        "theme": "light",
+    },
+    "vivid": {
+        "name": "活力撞色",
+        "bg": "on a bold, saturated two-color gradient background (for example electric blue to warm orange) with a few "
+              "large soft geometric shapes, bright and eye-catching like a marketplace promo",
+        "mood": "vivid, energetic marketplace palette with bold saturated colors and strong contrast",
+        "theme": "light",
+    },
+}
+
+
 
 DEFAULT_SETTINGS = {
     "api_base": "",
@@ -68,6 +118,7 @@ DEFAULT_SETTINGS = {
     "shots_version": SHOTS_VERSION,
     "size_chart_auto": True,   # 每套最后自动加一张本地生成的尺码表
     "logo_mode": "ai_crop",    # ai_crop：AI 定位 + 胸口放大由 AI 印（推荐）/ exact：本地贴原图 / ai：AI 整张直接画
+    "style": "classic",        # 默认套图风格（random 为每套随机）
     "overlay_logo": True,      # 首图/背面图左上角放品牌 logo
     "overlay_points": True,    # 卖点栏（图标 + 俄文）
     "overlay_size": True,      # 没有卖点时显示尺码区间
