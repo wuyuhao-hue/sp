@@ -786,7 +786,7 @@ def listing_get(pid: str, key: str):
 @app.post("/api/listings/{pid}/{key}")
 def listing_save(pid: str, key: str, patch: dict = Body(...)):
     keys = ("subject_id", "subject_name", "title", "description", "brand", "country", "tnved", "charcs", "variants",
-            "sizes", "pricing", "package", "stock")
+            "sizes", "pricing", "package", "stock", "no_size")
 
     def fn(p):
         L = p["listings"][key]

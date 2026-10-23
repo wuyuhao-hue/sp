@@ -27,7 +27,7 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, dAll: false, gal: null, showSettings: false, setSec: 'ai', setSnap: '', matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, dAll: false, gal: null, dlg: null, showSettings: false, setSec: 'ai', setSnap: '', matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -120,6 +120,12 @@ createApp({
     },
     removedKeys() { return Object.keys((this.current && this.current.match_removed) || {}); },
     offerList() { return Object.values((this.current && this.current.match_offers) || {}).filter(o => (o.colors || []).length); },
+    edNoSize() {
+      if (!this.ed) return false;
+      if (this.ed.L.no_size) return true;
+      const on = this.ed.L.sizes.filter(s => s.enabled);
+      return on.length === 1 && !on[0].tech;   // 只有一个均码：本来就按无尺码上架
+    },
     matchLinks() {
       const m = {};
       for (const u of this.units) if (u.status === 'matched' && u.result && u.result.url) (m[u.result.url] = m[u.result.url] || { url: u.result.url, colors: [] }).colors.push(u.name);
@@ -194,6 +200,7 @@ createApp({
     });
     document.addEventListener('keydown', e => {
       if (this.gal && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { this.galStep(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); return; }
+      if (this.dlg) { if (e.key === 'Escape') this.dlgDone(false); else if (e.key === 'Enter') this.dlgDone(true); return; }
       if (this.gal && e.key === 'Escape') { this.gal = null; return; }
       if (e.key === 'Escape') { this.logoFilterOpen = false; if (this.showSettings) this.closeSettings(); } });
     window.postMessage({ logoStudio: 'check-logins' }, '*');  // 打开工作台就检测一次各平台登录状态
@@ -282,9 +289,9 @@ createApp({
     toggleDmain(u) { const i = this.dsel.main.indexOf(u); i >= 0 ? this.dsel.main.splice(i, 1) : this.dsel.main.push(u); },
     async directToQueue() {
       const again = this.dsel.skus.filter(n => this.directSetOf(n));
-      if (again.length && !confirm(`${again.join('、')} 已经在待上架，重新加入会用现在勾选的图替换。继续？`)) return;
+      if (again.length && !await this.ask(`${again.join('、')} 已经在待上架，重新加入会用现在勾选的图替换。继续？`)) return;
       const unm = this.isMarket ? this.dsel.skus.filter(n => !this.matchedKeys.includes(n)) : [];
-      if (unm.length && !confirm(`${unm.length} 个规格还没有匹配到 1688 同款：${unm.slice(0, 6).join('、')}${unm.length > 6 ? ' 等' : ''}\n\n直接加入待上架后，进货价需要在上架资料里手动填写。确定加入？`)) return;
+      if (unm.length && !await this.ask(`${unm.length} 个规格还没有匹配到 1688 同款：${unm.slice(0, 6).join('、')}${unm.length > 6 ? ' 等' : ''}\n\n直接加入待上架后，进货价需要在上架资料里手动填写。确定加入？`)) return;
       try {
         this.jobs.unshift(await api(`/api/products/${this.current.id}/to-queue`, { body: { skus: this.dsel.skus, main: this.dsel.main, include_detail: this.dsel.detail, force: unm.length > 0 } }));
         this.toast('正在加入待上架，进度在右下角');
@@ -319,8 +326,8 @@ createApp({
       const items = all.filter(p => !this.isMatching(p));
       if (!items.length) { this.toast('选中的商品都在匹配中，等匹配结束再加入待上架', true); return; }
       const unm = items.filter(p => ['ozon', 'wb'].includes(p.source) && !(p.match_state && p.match_state.matched));
-      if (!confirm(`把 ${items.length} 个商品的全部颜色加入待上架？` + (busy.length ? `\n（${busy.length} 个正在匹配的商品先跳过）` : ''))) return;
-      const force = unm.length > 0 && confirm(`其中 ${unm.length} 个 Ozon / WB 商品还没有匹配到 1688 同款。\n\n确定：也直接加入（进货价到上架资料里手动填写）\n取消：跳过这些商品`);
+      if (!await this.ask(`把 ${items.length} 个商品的全部颜色加入待上架？` + (busy.length ? `\n（${busy.length} 个正在匹配的商品先跳过）` : ''))) return;
+      const force = unm.length > 0 && await this.ask(`其中 ${unm.length} 个 Ozon / WB 商品还没有匹配到 1688 同款，要一起加入吗？\n加入后进货价需要在上架资料里手动填写。`, { title: '有商品还没匹配', ok: '也一起加入', cancel: '跳过这些商品' });
       for (const p of items) {
         if (unm.includes(p) && !force) continue;
         try { this.jobs.unshift(await api(`/api/products/${p.id}/to-queue`, { body: { skus: [], main: null, include_detail: false, force: unm.includes(p) } })); }
@@ -332,7 +339,7 @@ createApp({
       catch (e) { this.toast(e.message, true); }
     },
     async matchUnbind() {
-      if (!confirm('清除这个商品的全部匹配结果？之前删掉的无同款规格会恢复，进货价清空。')) return;
+      if (!await this.ask('清除这个商品的全部匹配结果？之前删掉的无同款规格会恢复，进货价清空。')) return;
       this.current = await api(`/api/products/${this.current.id}/match`, { method: 'DELETE' });
       this.loadProducts();
     },
@@ -343,8 +350,8 @@ createApp({
         setTimeout(this.refreshCurrent, 400);
       } catch (e) { this.toast(e.message, true); }
     },
-    rematch() {
-      if (!confirm('全部规格重新匹配？之前删掉的无同款规格会先恢复再重新核对（手动改判过的不动）。')) return;
+    async rematch() {
+      if (!await this.ask('全部规格重新匹配？之前删掉的无同款规格会先恢复再重新核对（手动改判过的不动）。')) return;
       this.autoMatch([this.current.id], true);
     },
     openPick(u) {
@@ -353,7 +360,7 @@ createApp({
     },
     async pickSet(offer) {
       const u = this.pick.unit;
-      if (!offer && !confirm(`把「${u.name}」设为无同款？这个规格会从商品里删除，不会进入待上架。`)) return;
+      if (!offer && !await this.ask(`把「${u.name}」设为无同款？这个规格会从商品里删除，不会进入待上架。`)) return;
       try {
         this.current = await api(`/api/products/${this.current.id}/match/unit`, { body: { unit: u.key, offer_id: offer, sku_name: offer ? this.pick.sku : null } });
         this.pick = null; this.toast(offer ? '已设为同款' : '已设为无同款'); this.loadProducts();
@@ -498,7 +505,7 @@ createApp({
       if (!id) return;
       const name = (this.logos.find(l => l.id === id) || {}).name;
       const n = st.images.filter(i => i.place || (i.logo && !i.base)).length;
-      if (!confirm(`用「${name}」生成一套新图？衣服底图全部沿用，只有 ${n} 张需要重新印胸口 logo，其余在本地处理。`)) return;
+      if (!await this.ask(`用「${name}」生成一套新图？衣服底图全部沿用，只有 ${n} 张需要重新印胸口 logo，其余在本地处理。`)) return;
       try {
         this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/swap`, { body: { logo_id: id } }));
         setTimeout(this.refreshCurrent, 600);
@@ -529,7 +536,7 @@ createApp({
     },
     async deleteSet(st) {
       const live = this.setLive(st);
-      if (!confirm(`删除「${st.sku}${st.logo_name ? ' / ' + st.logo_name : ''}」这套图？` + (live.length ? `\n\n这套图已经上架到：${live.join('、')}。删除只删本机图片，不影响 WB 上的商品，但以后就不能用它再上到其他店铺了。` : ''))) return;
+      if (!await this.ask(`删除「${st.sku}${st.logo_name ? ' / ' + st.logo_name : ''}」这套图？` + (live.length ? `\n\n这套图已经上架到：${live.join('、')}。删除只删本机图片，不影响 WB 上的商品，但以后就不能用它再上到其他店铺了。` : ''))) return;
       this.current = await api(`/api/products/${this.current.id}/sets/${st.id}`, { method: 'DELETE' });
       this.loadProducts();
     },
@@ -616,7 +623,7 @@ createApp({
       this.qSel = []; this.loadQueue(); this.loadProducts();  // 上架状态按店铺显示：切换后重新加载
     },
     async deleteShop(s) {
-      if (!confirm(`删除店铺「${s.name}」？只删除本机保存的令牌，不影响 WB 上的商品。`)) return;
+      if (!await this.ask(`删除店铺「${s.name}」？只删除本机保存的令牌，不影响 WB 上的商品。`)) return;
       await api(`/api/shops/${s.id}`, { method: 'DELETE' });
       this.loadShops();
     },
@@ -634,10 +641,10 @@ createApp({
       return { L, summary: r.summary, options: r.set_options, prices: r.prices, codes: r.codes, product: r.product, snap: this.editSig(L) };
     },
     editSig(L) {
-      return JSON.stringify(['subject_id', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock'].map(k => L[k]));
+      return JSON.stringify(['subject_id', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock', 'no_size'].map(k => L[k]));
     },
-    closeEditor() {
-      if (this.ed && this.ed.snap !== this.editSig(this.ed.L) && !confirm('关闭编辑？没点「保存」的修改会丢失。')) return;
+    async closeEditor() {
+      if (this.ed && this.ed.snap !== this.editSig(this.ed.L) && !await this.ask('关闭编辑？没点「保存」的修改会丢失。')) return;
       this.ed = null;
     },
     optImages(v) { const o = (this.ed.options[v.sku] || []).find(x => x.sid === v.sid); return (o && o.images && o.images.length) ? o.images : (o && o.cover ? [o.cover] : []); },
@@ -660,9 +667,9 @@ createApp({
       catch (e) { this.toast(e.message, true); }
       this.ed.busy = '';
     },
-    pickSubject(r) {
+    async pickSubject(r) {
       if (this.ed.L.subject_id === r.id) return;
-      if (this.ed.L.subject_id && this.ed.L.subject_id !== r.id && Object.keys(this.ed.L.charcs).length && !confirm('换类目会清空已经填写的属性，继续？')) return;
+      if (this.ed.L.subject_id && this.ed.L.subject_id !== r.id && Object.keys(this.ed.L.charcs).length && !await this.ask('换类目会清空已经填写的属性，继续？')) return;
       this.ed.L.charcs = {}; this.ed.L.tnved = '';
       this.ed.L.subject_id = r.id; this.ed.L.subject_name = r.name;
       this.loadSubjectData();
@@ -680,7 +687,7 @@ createApp({
     async saveListing(quiet) {
       const L = this.ed.L, s = this.ed.summary;
       const body = {};
-      for (const k of ['subject_id', 'subject_name', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock']) body[k] = L[k];
+      for (const k of ['subject_id', 'subject_name', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock', 'no_size']) body[k] = L[k];
       body.sizes = L.sizes.map(x => ({ ...x, cny_override: x.cny_override === '' ? null : x.cny_override }));
       try {
         const r = await api(`/api/listings/${s.pid}/${s.key}`, { body });
@@ -708,21 +715,21 @@ createApp({
       } catch (e) { this.toast(e.message, true); }
       if (this.ed) this.ed.busy = '';
     },
-    confirmUpload(n, title) {
-      return confirm(`确认上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？\n\n${title}\n\n这会在 WB 上真实创建 ${n} 个款式的商品卡，并上传图片、价格和库存。\n同一张卡重复点上架是安全的：程序会按供应商编码回查，只续传没完成的步骤，不会重复建卡。`);
+    async confirmUpload(n, title) {
+      return this.ask(`确认上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？\n\n${title}\n\n这会在 WB 上真实创建 ${n} 个款式的商品卡，并上传图片、价格和库存。\n同一张卡重复点上架是安全的：程序会按供应商编码回查，只续传没完成的步骤，不会重复建卡。`, { title: '确认上架到 WB', ok: '确认上架', danger: false });
     },
     async saveAndUpload() {
       const pf = await this.preflight();
       if (!pf) return;
       if (!pf.ok) { this.toast('预检没通过，请先处理红色的问题', true); return; }
-      if (!this.confirmUpload(this.ed.L.variants.filter(v => v.enabled).length, this.ed.L.title)) return;
+      if (!await this.confirmUpload(this.ed.L.variants.filter(v => v.enabled).length, this.ed.L.title)) return;
       await this.startUpload(this.ed.summary);
     },
     async uploadListing(l) {
       try {
         const pf = await api(`/api/listings/${l.pid}/${l.key}/preflight`, { body: {} });
         if (!pf.ok) { this.toast('预检没通过：' + pf.errors.slice(0, 3).join('；'), true); this.openEditor(l).then(() => { if (this.ed) this.ed.pf = pf; }); return; }
-        if (!this.confirmUpload(l.variants.filter(v => v.enabled).length, l.title || l.product_title)) return;
+        if (!await this.confirmUpload(l.variants.filter(v => v.enabled).length, l.title || l.product_title)) return;
         await this.startUpload(l);
       } catch (e) { this.toast(e.message, true); }
     },
@@ -740,16 +747,16 @@ createApp({
         const pf = await api(`/api/listings/${l.pid}/${l.key}/preflight`, { body: {} }).catch(e => ({ ok: false, errors: [e.message] }));
         if (!pf.ok) bad.push(`${(l.title || l.product_title).slice(0, 24)}：${pf.errors[0]}`);
       }
-      if (bad.length) { alert(`有 ${bad.length} 张卡预检没通过，先处理后再批量上架：\n\n` + bad.join('\n')); return; }
+      if (bad.length) { await this.tell(`有 ${bad.length} 张卡预检没通过，先处理后再批量上架：\n\n` + bad.join('\n')); return; }
       const n = items.reduce((k, l) => k + l.variants.filter(v => v.enabled).length, 0);
-      if (!confirm(`确认把 ${items.length} 张商品卡（共 ${n} 个款式）上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？会按顺序逐张上架。`)) return;
+      if (!await this.ask(`确认把 ${items.length} 张商品卡（共 ${n} 个款式）上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？会按顺序逐张上架。`)) return;
       try { this.jobs.unshift(await api('/api/listings/batch-upload', { body: { items: items.map(l => ({ pid: l.pid, key: l.key })) } })); this.toast('已开始批量上架'); }
       catch (e) { this.toast(e.message, true); }
     },
     selectedListings() { return this.listings.filter(l => this.qSel.includes(this.lkey(l))).map(l => ({ pid: l.pid, key: l.key })); },
     async batchAi() {
       if (!this.settings.listing_model && !this.settings.text_model) { this.toast('请先在「设置」里填写「上架资料模型」（如 gpt-6-sol）', true); return; }
-      if (!confirm(`对 ${this.qSel.length} 张商品卡做 AI 填写？\n没选类目的会自动匹配类目；标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码会被覆盖。\n每张卡约 2 次 AI 调用。`)) return;
+      if (!await this.ask(`对 ${this.qSel.length} 张商品卡做 AI 填写？\n没选类目的会自动匹配类目；标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码会被覆盖。\n每张卡约 2 次 AI 调用。`)) return;
       try { this.jobs.unshift(await api('/api/listings/batch-ai', { body: { items: this.selectedListings() } })); this.toast('已开始，进度在右下角'); }
       catch (e) { this.toast(e.message, true); }
     },
@@ -800,7 +807,7 @@ createApp({
       catch (e) { this.toast(e.message, true); }
     },
     async removeListing(l) {
-      if (!confirm('把这张卡移出待上架？套图会保留在商品页，可以再移回来。')) return;
+      if (!await this.ask('把这张卡移出待上架？套图会保留在商品页，可以再移回来。')) return;
       try { await api(`/api/listings/${l.pid}/${l.key}/remove`, { body: {} }); this.loadQueue(); this.loadProducts(); }
       catch (e) { this.toast(e.message, true); }
     },
@@ -816,7 +823,7 @@ createApp({
       const n = this.selected.length;
       // logo 和风格统一用右侧面板里选的（左右两处设置会互相打架，只保留右侧一处）
       const lg = this.genLogo ? (this.logoById(this.genLogo) || {}).name : '不印标';
-      if (!confirm(`对 ${n} 个商品批量生成套图\n\nlogo：${lg}\n风格：${this.styleOptions[this.genStyle] || this.genStyle}\n范围：${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}\n每套约 ${this.activeShots.length + 1} 次生图调用`)) return;
+      if (!await this.ask(`对 ${n} 个商品批量生成套图\n\nlogo：${lg}\n风格：${this.styleOptions[this.genStyle] || this.genStyle}\n范围：${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}\n每套约 ${this.activeShots.length + 1} 次生图调用`)) return;
       try { this.jobs.unshift(await api('/api/batch/generate', { body: { ids: this.selected, logo_id: this.genLogo || null, style: this.genStyle, sku_scope: this.batch.sku_scope } })); this.toast('已开始批量生成，进度在右下角任务中心'); }
       catch (e) { this.toast(e.message, true); }
     },
@@ -827,7 +834,7 @@ createApp({
       if (this.current) this.refreshCurrent();
     },
     async deleteSel() {
-      if (!confirm(`确定删除选中的 ${this.selected.length} 个商品（包括已生成的套图）？`)) return;
+      if (!await this.ask(`确定删除选中的 ${this.selected.length} 个商品（包括已生成的套图）？`)) return;
       await api('/api/products/delete', { body: { ids: this.selected } });
       if (this.current && this.selected.includes(this.current.id)) this.current = null;
       this.selected = [];
@@ -864,6 +871,31 @@ createApp({
     },
     async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
     async cancelJob(j) { j.status = 'cancelled'; await api(`/api/jobs/${j.id}/cancel`, { body: {} }); this.refreshCurrent && this.refreshCurrent(); },
+    // 自己的确认弹窗（不用浏览器自带的 confirm / alert）：返回 Promise<true/false>
+    ask(message, opts = {}) {
+      return new Promise(resolve => {
+        const danger = opts.danger ?? /删除|清除|移出|清空/.test(message);
+        this.dlg = { message, title: opts.title || (danger ? '确认操作' : '请确认'), ok: opts.ok || (danger ? '确定删除' : '确定'),
+                     cancel: opts.cancel ?? '取消', danger, resolve };
+      });
+    },
+    async tell(message, title = '提示') { return this.ask(message, { title, ok: '知道了', cancel: '', danger: false }); },
+    dlgDone(v) { const d = this.dlg; this.dlg = null; if (d) d.resolve(v); },
+    // 上架角标：当前店铺排第一，其余按名字
+    pubShops(l) {
+      return (l.shops || []).filter(x => x.status && x.status !== 'draft')
+        .sort((a, b) => (b.shop_id === this.shopCurrent) - (a.shop_id === this.shopCurrent) || String(a.shop).localeCompare(String(b.shop)));
+    },
+    qbTitle(l) {
+      const xs = this.pubShops(l), up = xs.filter(x => x.status === 'uploaded').length;
+      if (xs.length === 1) return this.statusName(xs[0].status);
+      return up === xs.length ? `已上架 ${up} 个店铺` : `已上架 ${up}/${xs.length} 个店铺`;
+    },
+    qbTone(l) {
+      const st = this.pubShops(l).map(x => x.status);
+      if (st.some(x => ['uploading', 'pending_stock', 'waiting'].includes(x))) return 'uploading';
+      return st.includes('uploaded') ? 'uploaded' : 'failed';   // 有店铺上架成功就是绿色，失败的店铺在下面单独标红
+    },
     hideJob(j) { this.hiddenJobs.push(j.id); },
     async clearJobs() {
       await api('/api/jobs/clear', { body: {} }).catch(() => {});
@@ -885,7 +917,7 @@ createApp({
     },
     async saveLogo(l, patch) { Object.assign(l, await api(`/api/logos/${l.id}`, { body: patch })); this.toast('已保存'); },
     async deleteLogo(l) {
-      if (!confirm(`删除 logo「${l.name}」？已生成的图不受影响。`)) return;
+      if (!await this.ask(`删除 logo「${l.name}」？已生成的图不受影响。`)) return;
       await api(`/api/logos/${l.id}`, { method: 'DELETE' });
       await this.loadLogos();
     },
@@ -929,4 +961,4 @@ createApp({
     },
     async delStyleRef(r) { this.settings.style_refs = await api(`/api/style-refs/${r}`, { method: 'DELETE' }); },
   },
-}).mount('#app');
+}).directive('focus', { mounted: el => setTimeout(() => el.focus(), 30) }).mount('#app');

@@ -485,10 +485,19 @@
           <div class="q-cover" @click="toggleQ(lkey(l))">
             <img :src="(l.variants.find(v => v.enabled && v.cover) || l.variants[0] || {}).cover">
             <i class="check" :class="{on: qSel.includes(lkey(l))}"></i>
-            <span class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
+            <!-- 上架角标：上到哪些店铺、每个店铺的状态（多店铺同时记录） -->
+            <div class="qb" v-if="pubShops(l).length" :class="{multi: pubShops(l).length > 1}">
+              <div class="qb-head" :class="qbTone(l)"><i></i>{{ qbTitle(l) }}</div>
+              <div class="qb-shop" v-for="x in pubShops(l).slice(0, 3)" :key="x.shop_id" :class="x.status"
+                   :title="x.shop + '：' + statusName(x.status) + (x.nm && x.nm.length ? '（nmID ' + x.nm.join('、') + '）' : '')">
+                <i></i><span>{{ x.shop }}</span><em v-if="x.shop_id === shopCurrent">当前</em>
+              </div>
+              <div class="qb-more" v-if="pubShops(l).length > 3">还有 {{ pubShops(l).length - 3 }} 个店铺</div>
+            </div>
+            <span v-else class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
             <span class="q-src" v-if="l.source && l.mode === 'direct'"><i class="src-ic"><span v-html="srcIcon(l.source)"></span><img v-if="iconOk(l.source)" :src="'/api/src-icon/' + l.source" @error="iconBad[l.source] = true" @load="$event.target.classList.add('ok')"></i>{{ sourceName(l.source) }}</span>
           </div>
-          <div class="q-vars">
+          <div class="q-vars" @wheel="$event.deltaY && ($event.currentTarget.scrollWidth > $event.currentTarget.clientWidth) && ($event.preventDefault(), $event.currentTarget.scrollLeft += $event.deltaY)">
             <div class="q-var" v-for="v in l.variants" :key="v.sku" :class="{off: !v.enabled}" :title="v.sku + (v.color ? ' → ' + v.color : '')">
               <img :src="v.cover"><span>{{ v.sku }}</span>
             </div>
@@ -512,9 +521,6 @@
               <div class="err-text" v-if="l.status==='failed' && l.error" :title="l.error">{{ l.error }}</div>
               <div class="wait-text" v-if="l.status==='waiting'">WB 限流中，{{ hhmm(l.retry_at) }} 后自动继续</div>
               <div class="faint" v-if="Object.keys(l.nm||{}).length">nmID：{{ Object.values(l.nm).join('、') }}</div>
-              <div class="meta" v-if="l.shops.filter(x => x.shop_id !== shopCurrent).length">
-                <span class="tag live" v-for="x in l.shops.filter(x => x.shop_id !== shopCurrent)" :key="x.shop_id">{{ x.shop }}：{{ statusName(x.status) }}</span>
-              </div>
             </div>
             <div class="row q-actions">
               <button class="btn sm primary grow" @click="openEditor(l)">{{ l.status==='draft' ? '填写上架资料' : '查看 / 编辑' }}</button>
@@ -709,15 +715,22 @@
         <!-- 尺码 + 价格 -->
         <section class="ed-sec two">
           <div>
-            <div class="sec-title">4. 尺码</div>
+            <div class="sec-title row between">
+              <span>4. 尺码</span>
+              <span class="switch" :class="{on: edNoSize}" @click="ed.L.no_size = !edNoSize" title="百货、摆件、家居等没有尺码的商品打开它"><i></i>无尺码商品</span>
+            </div>
+            <div class="nosize-box" v-if="edNoSize">
+              <b>按无尺码商品上架</b>
+              <span>WB 官方规则：不传卖家尺码和俄码，只给条码和价格。下面只需要填进货价（有多行时按最高的算）。</span>
+            </div>
             <table class="shot-table ed-table">
-              <thead><tr><th style="width:30px"></th><th>1688 尺码</th><th>卖家尺码</th><th>俄码 <span class="req">*</span></th><th title="1688 进货价，用来按公式算 WB 售价；不是售价">进货价 ¥（成本）</th></tr></thead>
+              <thead><tr><th style="width:30px"></th><th>1688 尺码</th><th v-if="!edNoSize">卖家尺码</th><th v-if="!edNoSize">俄码 <span class="req">*</span></th><th title="1688 进货价，用来按公式算 WB 售价；不是售价">进货价 ¥（成本）</th></tr></thead>
               <tbody>
                 <tr v-for="s in ed.L.sizes" :key="s.label" :class="{off: !s.enabled}">
                   <td><i class="check" :class="{on: s.enabled}" @click="s.enabled = !s.enabled" style="cursor:pointer"></i></td>
                   <td>{{ s.label }}<div class="faint" v-if="s.note && s.note !== '均码'" :style="{color: /请/.test(s.note) ? '#b45309' : ''}">{{ s.note }}</div></td>
-                  <td><input class="input sm" v-model="s.tech" maxlength="15"></td>
-                  <td><input class="input sm" v-model="s.wb" placeholder="如 48"></td>
+                  <td v-if="!edNoSize"><input class="input sm" v-model="s.tech" maxlength="15"></td>
+                  <td v-if="!edNoSize"><input class="input sm" v-model="s.wb" placeholder="如 48"></td>
                   <td><input class="input sm" type="number" step="0.01" v-model.number="s.cny_override" :placeholder="s.cny"></td>
                 </tr>
               </tbody>
@@ -1104,6 +1117,24 @@
       <span class="tc-badge" v-if="liveJobs.length">{{ liveJobs.length }}</span>
     </button>
   </div>
+
+  <!-- 确认弹窗（代替浏览器自带的 confirm / alert） -->
+  <transition name="dlg">
+  <div class="dlg-bg" v-if="dlg" @mousedown.self="dlg.cancel && dlgDone(false)">
+    <div class="dlg" :class="{danger: dlg.danger}">
+      <div class="dlg-ic">
+        <svg v-if="dlg.danger" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14"/></svg>
+        <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>
+      </div>
+      <h3>{{ dlg.title }}</h3>
+      <div class="dlg-msg">{{ dlg.message }}</div>
+      <div class="dlg-foot">
+        <button class="btn" v-if="dlg.cancel" @click="dlgDone(false)">{{ dlg.cancel }}</button>
+        <button class="btn primary" :class="{danger: dlg.danger}" @click="dlgDone(true)" v-focus>{{ dlg.ok }}</button>
+      </div>
+    </div>
+  </div>
+  </transition>
 
   <transition name="fade"><div class="toast" :class="{err: toastErr}" v-if="toastMsg">{{ toastMsg }}</div></transition>
 </div>

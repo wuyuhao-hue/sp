@@ -235,6 +235,10 @@ def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai", shop_id: str | No
 
 
 def one_size(L: dict) -> bool:
+    """无尺码商品（百货、摆件等）：WB 官方要求 sizes 里只放一个不带 techSize / wbSize 的对象，只给条码和价格。
+    用户在编辑页勾了「无尺码商品」，或者只有一个没填卖家尺码的均码，都按无尺码上架。"""
+    if L.get("no_size"):
+        return True
     sizes = [s for s in L["sizes"] if s.get("enabled")]
     return len(sizes) == 1 and not sizes[0].get("tech")
 
@@ -457,13 +461,13 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
         if not single and not s.get("wb"):
             errors.append(f"尺码「{s['label']}」没有俄码，请手动填写")
     for s in sizes:
-        if re.search(r"[\u4e00-\u9fff]", s.get("tech") or ""):
+        if not single and re.search(r"[\u4e00-\u9fff]", s.get("tech") or ""):
             errors.append(f"尺码「{s['label']}」的卖家尺码「{s['tech']}」含中文，请改成字母或数字（例如 XL、2XL、48）")
         if not (s.get("cny_override") or s.get("cny")):
             errors.append(f"尺码「{s['label']}」没有采购价" + ("（Ozon / WB 采集的商品请先在商品页绑定 1688 货源，或在这里手动填进货价）"
                                                        if p.get("source") in ("ozon", "wb") else ""))
     techs = [s.get("tech") for s in sizes]
-    if len(set(techs)) < len(techs):
+    if not single and len(set(techs)) < len(techs):
         errors.append("有重复的卖家尺码")
     pk = L["package"]
     for k, nm in (("length", "长"), ("width", "宽"), ("height", "高")):
