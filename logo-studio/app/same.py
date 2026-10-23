@@ -21,6 +21,9 @@ from . import ai
 MAX_SIDE = 1024
 MIN_SIDE = 480          # 1688 SKU 小图放大一点，特征点才够
 N_FEATURES = 3500
+# 快速档：候选排序 / 详情闸门的预筛用。计算量约为完整档的 1/4，同一张照片缩放后照样能对上几百个点
+QUICK_SIDE = 640
+QUICK_FEATURES = 1500
 LOWE = 0.75
 REPROJ = 4.0
 
@@ -29,21 +32,24 @@ _cache: OrderedDict[str, tuple] = OrderedDict()
 _tl = threading.local()
 
 
-def _detector():
+def _detector(quick: bool = False):
     """每个线程一个 SIFT（OpenCV 计算时不占 Python 全局锁，多线程能真正并行）。"""
-    d = getattr(_tl, "sift", None)
+    name = "sift_q" if quick else "sift"
+    d = getattr(_tl, name, None)
     if d is None:
-        d = _tl.sift = cv2.SIFT_create(nfeatures=N_FEATURES)
+        d = cv2.SIFT_create(nfeatures=QUICK_FEATURES if quick else N_FEATURES)
+        setattr(_tl, name, d)
     return d
 
 
-def _prepare(src: str) -> tuple:
+def _prepare(src: str, quick: bool = False) -> tuple:
+    max_side = QUICK_SIDE if quick else MAX_SIDE
     im = ai.load_image(src, MAX_SIDE).convert("RGB")
     bgr = cv2.cvtColor(np.asarray(im), cv2.COLOR_RGB2BGR)
     h, w = bgr.shape[:2]
     s = max(h, w)
-    if s > MAX_SIDE:
-        f = MAX_SIDE / s
+    if s > max_side:
+        f = max_side / s
     elif s < MIN_SIDE:
         f = MIN_SIDE / s
     else:
@@ -51,22 +57,23 @@ def _prepare(src: str) -> tuple:
     if f != 1.0:
         bgr = cv2.resize(bgr, (round(w * f), round(h * f)), interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_CUBIC)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    kp, desc = _detector().detectAndCompute(gray, None)
+    kp, desc = _detector(quick).detectAndCompute(gray, None)
     pts = np.float32([k.pt for k in kp]) if kp else np.zeros((0, 2), np.float32)
     return pts, desc, bgr
 
 
-def features(src: str) -> tuple:
+def features(src: str, quick: bool = False) -> tuple:
     """同一张图只提取一次特征（按地址缓存）。"""
+    key = ("q:" if quick else "") + src
     with _lock:
-        hit = _cache.get(src)
+        hit = _cache.get(key)
         if hit is not None:
-            _cache.move_to_end(src)
+            _cache.move_to_end(key)
             return hit
-    f = _prepare(src)
+    f = _prepare(src, quick)
     with _lock:
-        _cache[src] = f
-        while len(_cache) > 400:
+        _cache[key] = f
+        while len(_cache) > 900:
             _cache.popitem(last=False)
     return f
 
@@ -109,10 +116,10 @@ def _color_delta(qbgr, cbgr, H, inl_pts) -> float | None:
         return None
 
 
-def verify(q_src: str, c_src: str, color: bool = True) -> dict:
-    """查询图 vs 候选图。返回 inliers/ratio/coverage/color_de 和是否通过（geo / ok）。"""
-    qp, qd, qbgr = features(q_src)
-    cp, cd, cbgr = features(c_src)
+def verify(q_src: str, c_src: str, color: bool = True, quick: bool = False) -> dict:
+    """查询图 vs 候选图。返回 inliers/ratio/coverage/color_de 和是否通过（geo / ok）。quick：快速档（候选排序、预筛）。"""
+    qp, qd, qbgr = features(q_src, quick)
+    cp, cd, cbgr = features(c_src, quick)
     out = {"inliers": 0, "good": 0, "ratio": 0.0, "coverage": 0.0, "color_de": None, "geo": False, "ok": False}
     if qd is None or cd is None or len(qd) < 8 or len(cd) < 8:
         return out

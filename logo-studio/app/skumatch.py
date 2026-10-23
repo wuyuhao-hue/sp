@@ -136,16 +136,17 @@ def query_b64(src: str) -> str:
 
 
 WORKERS = 8
+LOOKAHEAD = 2          # 以图搜最多提前派几个：采集助手搜下一个颜色时，工作台同时给上一个颜色的候选排序，两边都不空等
 
 
-def _prefetch(srcs: list[str]) -> None:
+def _prefetch(srcs: list[str], quick: bool = False) -> None:
     """并行下载图片并提取特征（之后的比对直接用缓存）。"""
     srcs = [s for s in dict.fromkeys(srcs) if s]
     if not srcs:
         return
     def f(s):
         try:
-            same.features(s)
+            same.features(s, quick)
         except Exception:  # noqa: BLE001
             pass
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
@@ -153,15 +154,16 @@ def _prefetch(srcs: list[str]) -> None:
 
 
 def rank_candidates(unit: dict, cands: list[dict]) -> list[dict]:
-    """卡片级（候选商品主图）只看几何：卡片图可能是同款的另一个颜色，颜色在详情闸门里再核。"""
-    _prefetch(unit["images"])
+    """卡片级（候选商品主图）只看几何：卡片图可能是同款的另一个颜色，颜色在详情闸门里再核。
+    只用来决定先打开哪几个 1688 商品，用快速档（真正判同款的是详情闸门的完整档）。"""
+    _prefetch(unit["images"], quick=True)
 
     def one(i_c):
         i, c = i_c
         best = {"inliers": 0, "ok": False}
         for q in unit["images"]:
             try:
-                r = same.verify(q, c["image"], color=False)
+                r = same.verify(q, c["image"], color=False, quick=True)
             except Exception:  # noqa: BLE001  图读不到：这个候选只能靠 AiPrice 排名
                 continue
             if (r["ok"], r["inliers"]) > (best.get("ok", False), best["inliers"]):
@@ -229,7 +231,12 @@ def gate(unit: dict, offer: dict) -> dict | None:
             r = None
             for t in targets:
                 try:
-                    x = same.verify(q, t, color=True)
+                    # 预筛：快速档连几个点都对不上的，肯定不是同一张照片，不用再算完整档
+                    pre = same.verify(q, t, color=False, quick=True)
+                    if pre["inliers"] < 8 and not pre["geo"]:
+                        x = {**pre, "ok": False}
+                    else:
+                        x = same.verify(q, t, color=True)
                 except Exception:  # noqa: BLE001
                     continue
                 if r is None or (x["ok"], x["inliers"]) > (r["ok"], r["inliers"]):
@@ -344,7 +351,8 @@ def _save(pid: str, units: list, offers: dict, wait, job=None) -> dict:
         if wait is None:
             apply_results(x)
     p = store.update_product(pid, fn)
-    if wait is None and job is not None and p:
+    if wait is None and job is not None and p and not any(u["status"] in ("pending", "searching", "verifying")
+                                                          for u in p.get("units") or []):
         c = summary(p)
         name = (p.get("title") or pid)[:24]
         job.note(f"{name}：{c['matched']} 个规格找到同款，{c['none']} 个无同款（已删除）" +
@@ -352,45 +360,66 @@ def _save(pid: str, units: list, offers: dict, wait, job=None) -> dict:
     return p
 
 
+def _gate_units(units: list, offers: dict, job) -> None:
+    """待核对的单元拿已读过的 1688 商品逐个核对（各单元之间并行）。"""
+    todo = [u for u in units if u["status"] in ("pending", "verifying")]
+    for u in todo:
+        u["status"] = "pending"
+
+    def one(u):
+        for oid, off in offers.items():
+            if oid in u["tried"]:
+                continue
+            u["tried"].append(oid)
+            r = gate(u, off)
+            if r:
+                u.update(status="matched", result=r, error="")
+                job.note(f"✓ {u['name']} → 1688「{r['sku_name'] or r['title'][:16]}」{('¥%g' % r['price']) if r.get('price') else '（没读到价格）'}"
+                         f"（{r['evidence']['support']}/{r['evidence']['of']} 张图对上）")
+                return
+    todo = [u for u in todo if any(o not in u["tried"] for o in offers)]
+    if len(todo) <= 1:
+        for u in todo:
+            one(u)
+        return
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(one, todo))
+
+
 def advance(pid: str, job, enqueue) -> None:
-    """推进一个商品：先用已读过的 1688 商品核对，再决定下一个采集助手任务；都结束就写回结果。"""
+    """推进一个商品：先用已读过的 1688 商品核对，再决定下一批采集助手任务；都结束就写回结果。
+    以图搜可以提前派 LOOKAHEAD 个（不用等上一个颜色核对完）；打开 1688 商品同一时间只有一个（match_wait），
+    因为每读到一个 1688 商品，所有还没结果的颜色都要拿它核对一遍。"""
     with _lock(pid):
         p = store.get_product(pid)
-        if not p or p.get("match_wait"):
+        if not p:
             return
         units, offers = p.get("units") or [], p.get("match_offers") or {}
-        for u in units:
-            if u["status"] not in ("pending", "verifying"):
-                continue
-            u["status"] = "pending"
-            for oid, off in offers.items():
-                if oid in u["tried"]:
-                    continue
-                u["tried"].append(oid)
-                r = gate(u, off)
-                if r:
-                    u.update(status="matched", result=r, error="")
-                    job.note(f"✓ {u['name']} → 1688「{r['sku_name'] or r['title'][:16]}」{('¥%g' % r['price']) if r.get('price') else '（没读到价格）'}"
-                             f"（{r['evidence']['support']}/{r['evidence']['of']} 张图对上）")
-                    break
-        wait = None
+        wait = p.get("match_wait")
+        if wait and wait.get("kind") != "offer":   # 旧版本留下的以图搜等待：现在以图搜不占用等待位
+            wait = None
+        if not wait:
+            _gate_units(units, offers, job)
+        searching = sum(1 for u in units if u["status"] == "searching")
         for u in units:
             if u["status"] != "pending":
                 continue
             if u["cands"] is None:
                 if not u["images"]:
                     u.update(status="error", error="这个规格没有图片，无法以图搜")
-                    continue
-                u["status"] = "searching"
-                wait = {"kind": "imgsearch", "unit": u["key"], "t": time.time()}
-                enqueue("imgsearch", pid=pid, unit=u["key"], image=u["images"][0], image_b64=query_b64(u["images"][0]))
-                break
+                elif searching < LOOKAHEAD:
+                    u["status"] = "searching"
+                    searching += 1
+                    enqueue("imgsearch", pid=pid, unit=u["key"], image=u["images"][0], image_b64=query_b64(u["images"][0]))
+                continue
+            if wait:
+                continue
             plan = [o for o in fetch_plan(u) if o not in u["tried"] and o not in u.get("failed", [])]
             if plan:
                 u["status"] = "verifying"
                 wait = {"kind": "offer", "unit": u["key"], "offer": plan[0], "t": time.time()}
                 enqueue("offer", offer_id=plan[0], url=f"https://detail.1688.com/offer/{plan[0]}.html", match_for=pid)
-                break
+                continue
             if u.get("failed"):
                 u.update(status="error", error="1688 商品页打不开：" + "、".join(u["failed"]))
             else:
@@ -400,27 +429,32 @@ def advance(pid: str, job, enqueue) -> None:
 
 
 def on_candidates(pid: str, unit_key: str, data: dict, job, enqueue) -> None:
+    p = store.get_product(pid)
+    u0 = next((x for x in (p or {}).get("units") or [] if x["key"] == unit_key), None)
+    if not p or u0 is None:
+        return
+    cands = [c for c in data.get("candidates") or [] if c.get("offer_id")]  # 图片懒加载读不到也保留（详情闸门才是证据）
+    ranked = rank_candidates(u0, cands) if cands else None   # 排序在锁外做：不挡住同一商品其他结果的处理
     with _lock(pid):
         p = store.get_product(pid)
         if not p:
             return
         units = p.get("units") or []
         u = next((x for x in units if x["key"] == unit_key), None)
-        if u is not None:
-            cands = [c for c in data.get("candidates") or [] if c.get("offer_id")]  # 图片懒加载读不到也保留（详情闸门才是证据）
+        if u is not None and u["status"] == "searching":
             if not cands:
                 # 真实商品照在 AiPrice / 1688 以图搜几乎不可能一个结果都没有：0 个候选按技术失败处理（多半没登录、被拦或页面改版），
                 # 不判无同款、不删规格；原始页面已存进运行日志的 debug 里
                 u.update(status="error", cands=None, error="以图搜没有返回任何候选（AiPrice 可能没登录 / 被拦 / 页面改版）"
                          + (f"：{str(data['note'])[:100]}" if data.get("note") else "") + "。点「继续匹配」重试，或把运行日志发给开发者")
             else:
-                u["cands"] = rank_candidates(u, cands)
+                u["cands"] = ranked
                 from . import runlog
                 runlog.log("找同款", f"{pid} {u['name']} 候选排序", top=[(c["offer_id"], c["card_ok"], c["card_inliers"]) for c in u["cands"][:8]])
                 u["status"] = "pending"
                 ok = sum(1 for c in u["cands"] if c["card_ok"])
                 job.note(f"{u['name']}：以图搜到 {len(cands)} 个候选，{ok} 个图片对得上")
-        _save(pid, units, p.get("match_offers") or {}, None)
+        _save(pid, units, p.get("match_offers") or {}, p.get("match_wait"))
     advance(pid, job, enqueue)
 
 
@@ -448,7 +482,8 @@ def on_fail(pid: str, task: dict, error: str, job, enqueue) -> None:
         if not p:
             return
         units = p.get("units") or []
-        key = (p.get("match_wait") or {}).get("unit") or task.get("unit")
+        is_search = task["kind"] == "imgsearch"
+        key = task.get("unit") if is_search else ((p.get("match_wait") or {}).get("unit") or task.get("unit"))
         u = next((x for x in units if x["key"] == key), None)
         retry = False
         if u is not None:
@@ -456,18 +491,18 @@ def on_fail(pid: str, task: dict, error: str, job, enqueue) -> None:
             retry = u["attempts"] <= MAX_RETRY
             if retry:
                 job.note(f"{u['name']}：{error[:80]}，自动重试")
-            elif task["kind"] == "imgsearch":
+            elif is_search:
                 u.update(status="error", error=f"以图搜失败：{error[:120]}")
             else:
                 u.setdefault("failed", []).append(task.get("offer_id"))
                 u["status"] = "pending"
         wait = p.get("match_wait")
         if retry:
-            if task["kind"] == "imgsearch":
+            if is_search:
                 enqueue("imgsearch", pid=pid, unit=key, image=task["image"], image_b64=task.get("image_b64") or query_b64(task["image"]))
             else:
                 enqueue("offer", offer_id=task["offer_id"], url=task["url"], match_for=pid)
-        else:
+        elif not is_search:   # 以图搜失败不占用「打开 1688」的等待位
             wait = None
         _save(pid, units, p.get("match_offers") or {}, wait)
     if not retry:

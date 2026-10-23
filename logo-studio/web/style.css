@@ -690,3 +690,40 @@ a.btn { text-decoration: none; }
 .collect-btn svg { flex-shrink: 0; width: 16px; height: 16px; }
 .collect-btn .collect-ics { flex-shrink: 0; }
 .sku-card .unm-tag { left: auto; right: 8px; }
+
+/* v2.17 商品卡：统一三行（标题两行 / 来源·SKU·价格 / 状态），每张卡高度一致 */
+.pcard { align-items: stretch; min-height: 96px; }
+.pcard > img { width: 64px; height: 80px; align-self: center; }
+.pc-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.pcard .t { min-height: calc(13px * 1.35 * 2); font-weight: 500; }
+.pc-row { display: flex; align-items: center; gap: 6px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.pc-row .price { margin-left: auto; font-weight: 700; }
+.pc-sku { font-size: 11px; color: var(--muted); }
+.pc-st { min-height: 20px; }
+.pc-st .tag { font-size: 11px; }
+.tag.mute { color: var(--faint); background: transparent; border-style: dashed; }
+
+/* v2.17 设置抽屉 */
+.drawer-bg { position: fixed; inset: 0; z-index: 60; background: rgba(43, 37, 99, .28); backdrop-filter: blur(2px); display: flex; justify-content: flex-end; }
+.drawer { width: min(820px, 94vw); height: 100%; background: var(--bg); box-shadow: var(--shadow-lg); display: flex; flex-direction: column; border-radius: 18px 0 0 18px; overflow: hidden; }
+.dw-head { display: flex; align-items: center; gap: 10px; padding: 18px 22px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.dw-head h2 { margin: 0; font-size: 18px; }
+.dw-main { flex: 1; display: flex; min-height: 0; }
+.dw-nav { width: 176px; flex: none; padding: 14px 10px; display: flex; flex-direction: column; gap: 4px; background: var(--panel-2); border-right: 1px solid var(--line); }
+.dw-nav button { display: flex; align-items: center; gap: 10px; height: 42px; padding: 0 12px; border: 0; border-radius: 10px; background: transparent; color: var(--muted); font-size: 14px; cursor: pointer; text-align: left; transition: .15s; }
+.dw-nav button svg { width: 18px; height: 18px; flex: none; }
+.dw-nav button:hover { background: #fff; color: var(--text); }
+.dw-nav button.on { background: #fff; color: var(--accent); font-weight: 600; box-shadow: var(--shadow); }
+.dw-body { flex: 1; padding: 22px 26px 30px; overflow-y: auto; }
+.dw-sec { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; animation: dwIn .25s var(--ease); }
+.dw-sec h3 { margin: 0 0 16px; font-size: 16px; }
+.dw-desc { margin: -10px 0 14px; }
+.dw-foot { display: flex; align-items: center; gap: 10px; padding: 14px 22px; background: var(--panel); border-top: 1px solid var(--line); }
+@keyframes dwIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.dw-enter-active, .dw-leave-active { transition: opacity .25s; }
+.dw-enter-active .drawer, .dw-leave-active .drawer { transition: transform .3s var(--ease); }
+.dw-enter-from, .dw-leave-to { opacity: 0; }
+.dw-enter-from .drawer, .dw-leave-to .drawer { transform: translateX(100%); }
+@media (max-width: 700px) { .dw-nav { width: 64px; } .dw-nav button { font-size: 0; justify-content: center; } }
+.dw-head .spacer, .dw-foot .spacer { flex: 1; }
+.batchbar .btn.block { width: 100%; margin-left: 0; margin-right: 0; }

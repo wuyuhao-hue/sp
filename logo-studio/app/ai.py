@@ -128,6 +128,18 @@ def list_models() -> list[str]:
 
 
 # ---------------- 图片读取 ----------------
+_img_pool = None
+
+
+def _img_client() -> httpx.Client:
+    """读图共用一个连接池：同一个图床不用每张图都重新握手（找同款一次要读几十张图，省下的时间很可观）。"""
+    global _img_pool
+    if _img_pool is None:
+        _img_pool = httpx.Client(timeout=40, follow_redirects=True,
+                               limits=httpx.Limits(max_connections=32, max_keepalive_connections=16))
+    return _img_pool
+
+
 def load_image(src: str, max_side: int = 1280) -> Image.Image:
     """src 可以是网址，或商品目录下的本地文件（local:<pid>/<相对路径>）。内存里缓存，不落盘。"""
     with _cache_lock:
@@ -141,7 +153,7 @@ def load_image(src: str, max_side: int = 1280) -> Image.Image:
         else:
             ref = "https://www.ozon.ru/" if "ozone.ru" in src or "ozon." in src else \
                 "https://mobile.yangkeduo.com/" if "pddpic" in src or "yangkeduo" in src else "https://detail.1688.com/"
-            r = httpx.get(src, headers={"User-Agent": UA, "Referer": ref}, timeout=40, follow_redirects=True)
+            r = _img_client().get(src, headers={"User-Agent": UA, "Referer": ref})
             if r.status_code != 200:
                 raise RuntimeError(f"图片读取失败（{r.status_code}）：{src}")
             data = r.content

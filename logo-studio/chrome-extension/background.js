@@ -99,8 +99,11 @@ async function navigate(tabId, url) {
   await sleep(rand(1200, 2200));
 }
 
+let abortNow = false;  // 用户在工作台点了取消：当前任务立刻中止
+
 async function exec(tabId, func, args = [], ms = 150000) {
   // 页面里的脚本最多等 ms：页面卡住时报错交回，不会让采集助手一直卡在一个任务上、后面的任务都排不到
+  if (abortNow) throw new Error('已取消');
   let timer;
   const run = chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func, args });
   const limit = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('页面没有响应（超过 ' + Math.round(ms / 1000) + ' 秒）')), ms); });
@@ -820,8 +823,8 @@ async function pageOzonShop(maxPages) {
     for (const m of txt.matchAll(/\/product\/[\w%-]*?-?(\d{6,})\//g)) if (!ids.includes(m[1])) { ids.push(m[1]); added++; }
     if (!added) break;
     path = j.nextPage || '';
-    if (!path) {   // 没给下一页地址：自己拼 page=N+1
-      const u = new URL(location.pathname, location.origin);
+    if (!path) {   // 没给下一页地址：自己拼 page=N+1（保留搜索词等参数）
+      const u = new URL(location.href);
       u.searchParams.set('page', String(pages + 1));
       path = u.pathname + u.search;
     }
@@ -862,6 +865,60 @@ async function doShop(task, delay) {
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids } });
 }
 
+// ---------------- 搜索结果页 / 类目页：翻页读出商品编号 ----------------
+const LIST_RE = {
+  '1688': /(?:offer\/|offerId["'=:\s]+"?|offer_id=)(\d{8,15})/g,
+  wb: /\/catalog\/(\d{5,})\/detail\.aspx/g,
+  pdd: /goods_id["'=:\s]+"?(\d{6,})/g,
+};
+
+async function pageScrollList(rounds) {
+  // 一直滚到底，直到页面不再变长（懒加载的商品都出来），最多 rounds 轮
+  let last = 0, same = 0;
+  for (let i = 0; i < rounds && same < 3; i++) {
+    window.scrollTo(0, document.body.scrollHeight);
+    await new Promise(r => setTimeout(r, 700 + Math.random() * 500));
+    const h = document.body.scrollHeight;
+    same = h === last ? same + 1 : 0;
+    last = h;
+  }
+  return Array.from(document.querySelectorAll('a[href]')).map(a => a.href).join('\n') + '\n' + document.documentElement.outerHTML;
+}
+
+async function doSearch(task, delay) {
+  const { win, tab } = await workerTab();
+  const url0 = task.url.trim().startsWith('http') ? task.url.trim() : 'https://' + task.url.trim();
+  const maxPages = Math.max(1, Number(task.max_pages) || 3);
+  if (task.platform === 'ozon') {   // Ozon 搜索 / 类目页和店铺页一样，走页面自己的接口翻页
+    await navigate(tab, url0);
+    await waitUnblocked(win, tab);
+    const r = await exec(tab, pageOzonShop, [maxPages], 240000);
+    elog('Ozon 搜索页商品列表', { url: url0, pages: r.pages, count: r.ids.length });
+    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids } });
+    return;
+  }
+  const re = LIST_RE[task.platform];
+  const ids = [];
+  const grab = html => { let n = 0; for (const m of (html || '').matchAll(re)) if (!ids.includes(m[1])) { ids.push(m[1]); n++; } return n; };
+  if (task.platform === 'pdd') {    // 拼多多手机版搜索是无限下拉：多滚几轮
+    await navigate(tab, url0);
+    await waitUnblocked(win, tab);
+    grab(await exec(tab, pageScrollList, [maxPages * 6], 300000));
+  } else {
+    const key = task.platform === 'wb' ? 'page' : 'beginPage';
+    for (let page = 1; page <= maxPages; page++) {
+      const u = new URL(url0);
+      if (page > 1) u.searchParams.set(key, String(page));
+      await navigate(tab, u.toString());
+      await waitUnblocked(win, tab);
+      if (!grab(await exec(tab, pageScrollList, [12], 120000))) break;
+      if (page < maxPages) await sleep(rand(delay, delay * 2) * 1000);
+    }
+  }
+  elog('搜索页商品列表', { platform: task.platform, url: url0, count: ids.length });
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids } });
+}
+
 async function doTabs(task) {
   const tabs = await chrome.tabs.query({ url: ['*://detail.1688.com/offer/*', '*://mobile.yangkeduo.com/goods*', '*://*.ozon.ru/product/*',
                                                '*://*.wildberries.ru/catalog/*'] });
@@ -895,8 +952,15 @@ async function loop() {
       }
       idle = 0;
       const task = r.task, delay = Math.max(Number(r.delay) || 3, 1);
-      // 处理任务期间每 15 秒报到一次：工作台知道采集助手还在忙，不会误报「没连接」
-      const beat = setInterval(() => post('/api/ext/status', { status: '', message: '' }).catch(() => {}), 15000);
+      abortNow = false;
+      // 处理任务期间每 3 秒报到一次：工作台知道采集助手还在忙；用户点了取消时，工作台在回复里让这个任务立刻中止
+      const beat = setInterval(() => post('/api/ext/status', { status: '', message: '' }).then(x => {
+        if (!abortNow && x && Array.isArray(x.abort) && x.abort.includes(task.id)) {
+          abortNow = true;
+          elog('工作台已取消这个任务，立即中止', { kind: task.kind, id: task.id });
+          closeWorker();  // 关掉采集标签页：页面里正在跑的读取立刻停下
+        }
+      }).catch(() => {}), 3000);
       try {
         if (task.kind === 'offer') {
           await doOffer(task);
@@ -912,6 +976,7 @@ async function loop() {
           doLogin(task.platform);   // 不等它（登录可能要好几分钟），登录窗口自己检测、自己关
           await post('/api/ext/result', { task_id: task.id, ok: true, data: { already } });
         } else if (task.kind === 'shop') await doShop(task, delay);
+        else if (task.kind === 'search') await doSearch(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
         else throw new Error('采集助手不认识这个任务（' + task.kind + '），请更新采集助手');
       } catch (e) {

@@ -27,7 +27,7 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, dAll: false, matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, dAll: false, showSettings: false, setSec: 'ai', setSnap: '', matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -57,7 +57,7 @@ createApp({
       return !!(this.ext.connected && this.ext.version && v && v !== this.ext.version);
     },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 9, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 10, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -95,8 +95,8 @@ createApp({
       return this.loginItems.filter(it => !it.ok);
     },
     stageNames() {
-      return this.workMode === 'direct' ? { all: '全部', new: '未加入', queued: '待上架', live: '已上架' }
-        : { all: '全部', new: '未生成', generated: '已生成', queued: '待上架', live: '已上架' };
+      return this.workMode === 'direct' ? { all: '全部', new: '未加入', queued: '已加入', live: '已上架' }
+        : { all: '全部', new: '未生成', generated: '已生成', queued: '已加入', live: '已上架' };
     },
     isMarket() { return !!this.current && ['ozon', 'wb'].includes(this.current.source); },
     units() { return (this.current && this.current.units) || []; },
@@ -175,14 +175,14 @@ createApp({
       }
     },
     'needLogin.length'(n, o) { if (o > 0 && n === 0) { this.showLogin = false; this.toast('需要的平台都已登录 ✓'); } },
-    tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } if (t === 'settings') this.loadAiCalls(); },
+    tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll(), this.loadShops().catch(() => {})]);
     if (this.filtered.length) this.openProduct(this.filtered[0].id);
     setInterval(this.poll, 1500);
     document.addEventListener('mousedown', e => { if (this.logoFilterOpen && !e.target.closest('.lf-wrap')) this.logoFilterOpen = false; });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') this.logoFilterOpen = false; });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { this.logoFilterOpen = false; if (this.showSettings) this.closeSettings(); } });
     window.postMessage({ logoStudio: 'check-logins' }, '*');  // 打开工作台就检测一次各平台登录状态
   },
   methods: {
@@ -203,7 +203,7 @@ createApp({
     styleName(k) { return this.styleOptions[k] || k; },
     canLogo(t) { return this.canLogoTypes.includes(t); },
     setsOf(name) { return ((this.current && this.current.sets) || []).filter(s => s.sku === name); },
-    jobStatus(j) { return { running: `${j.done}/${j.total || '?'}`, done: '完成', failed: '失败', pending: '排队中' }[j.status]; },
+    jobStatus(j) { return { running: `${j.done}/${j.total || '?'}`, done: '完成', failed: '失败', pending: '排队中', cancelled: '已取消' }[j.status]; },
 
     async loadProducts() { this.products = await api('/api/products'); },
     async loadLogos(selectNewest = false) {
@@ -286,10 +286,36 @@ createApp({
         this.toast('正在加入待上架，进度在右下角');
       } catch (e) { this.toast(e.message, true); }
     },
+    pcBadges(p) {
+      // 商品卡第二行：只放最重要的状态（最多 2 个），每张卡高度一致
+      const b = [], m = p.match_state;
+      if (p.running) b.push({ t: '生成中', c: 'warn' });
+      if (m && m.state === 'running') b.push({ t: '匹配中…', c: 'warn' });
+      if ((p.live_shops || []).length) b.push({ t: `已上架 ${p.live_shops.length} 店`, c: 'live', title: p.live_shops.map(this.shopName).join('、') });
+      else if (p.queued) b.push({ t: `${p.queued} 个已加入`, c: 'ok' });
+      if (m && m.state === 'done' && m.matched) b.push({ t: `同款 ${m.matched} 色`, c: 'ok', title: m.none + ' 个规格无同款已删除' });
+      else if (m && m.state === 'done' && !m.matched && !m.running) b.push({ t: '无同款', c: 'warn' });
+      else if (m && m.state === 'none') b.push({ t: '未匹配 1688', c: 'warn' });
+      if (p.set_count && !p.queued) b.push({ t: `${p.set_count} 套图`, c: 'accent' });
+      if (!b.length) b.push({ t: p.mode === 'direct' ? '未加入' : '未生成', c: 'mute' });
+      return b.slice(0, 2);
+    },
+    isMatching(p) { return !!(p && p.match_state && p.match_state.state === 'running'); },
+    async batchMatch() {
+      const sel = this.selected.map(id => this.products.find(p => p.id === id)).filter(p => p && ['ozon', 'wb'].includes(p.source));
+      const go = sel.filter(p => !this.isMatching(p));
+      if (!go.length) { this.toast(sel.length ? '选中的商品都在匹配中' : '选中的商品里没有 Ozon / WB 商品', true); return; }
+      const skip = sel.length - go.length, other = this.selected.length - sel.length;
+      if (skip || other) this.toast([skip ? `${skip} 个正在匹配，不受影响` : '', other ? `${other} 个是 1688 / 拼多多商品，不用匹配` : ''].filter(Boolean).join('；'));
+      await this.autoMatch(go.map(p => p.id));
+    },
     async batchDirectQueue() {
-      const items = this.selected.map(id => this.products.find(p => p.id === id)).filter(p => p && p.mode === 'direct');
+      const all = this.selected.map(id => this.products.find(p => p.id === id)).filter(p => p && p.mode === 'direct');
+      const busy = all.filter(p => this.isMatching(p));
+      const items = all.filter(p => !this.isMatching(p));
+      if (!items.length) { this.toast('选中的商品都在匹配中，等匹配结束再加入待上架', true); return; }
       const unm = items.filter(p => ['ozon', 'wb'].includes(p.source) && !(p.match_state && p.match_state.matched));
-      if (!confirm(`把 ${items.length} 个商品的全部颜色加入待上架？`)) return;
+      if (!confirm(`把 ${items.length} 个商品的全部颜色加入待上架？` + (busy.length ? `\n（${busy.length} 个正在匹配的商品先跳过）` : ''))) return;
       const force = unm.length > 0 && confirm(`其中 ${unm.length} 个 Ozon / WB 商品还没有匹配到 1688 同款。\n\n确定：也直接加入（进货价到上架资料里手动填写）\n取消：跳过这些商品`);
       for (const p of items) {
         if (unm.includes(p) && !force) continue;
@@ -343,7 +369,9 @@ createApp({
       // 现在在做哪一步、做了多久：慢的时候也能看出来没卡住
       const w = (this.current && this.current.match_wait) || {}, c = this.mCount;
       const done = c.matched + c.none + c.error, sec = w.t ? Math.max(0, Math.round(Date.now() / 1000 - w.t)) : 0;
-      const step = w.kind === 'imgsearch' ? `正在以图搜「${w.unit}」` : w.kind === 'offer' ? `正在打开 1688 商品 ${w.offer} 核对「${w.unit}」` : '正在本地核对图片';
+      const srch = this.units.filter(u => u.status === 'searching').map(u => u.name);
+      const step = w.kind === 'offer' ? `正在打开 1688 商品 ${w.offer} 核对「${w.unit}」` + (srch.length ? `，同时以图搜「${srch[0]}」` : '')
+        : srch.length ? `正在以图搜「${srch.join('」「')}」` : '正在本地核对图片';
       return `${step}… ${sec ? sec + ' 秒 · ' : ''}已完成 ${done}/${this.units.length} 个规格`;
     },
     matchStateName(m) {
@@ -440,7 +468,7 @@ createApp({
 
     // ---------- 生成 ----------
     async generate() {
-      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.tab = 'settings'; return; }
+      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.openSettings('ai'); return; }
       this.generating = true;
       try {
         this.jobs.unshift(await api(`/api/products/${this.current.id}/generate`, { body: { skus: this.skuSel, logo_id: this.genLogo, style: this.genStyle } }));
@@ -767,7 +795,7 @@ createApp({
 
     // ---------- 商品 ----------
     async batchGenerate() {
-      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.tab = 'settings'; return; }
+      if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.openSettings('ai'); return; }
       const n = this.selected.length;
       if (!confirm(`对 ${n} 个商品批量生成套图（${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}，每套约 ${this.activeShots.length + 1} 次生图调用）？`)) return;
       try { this.jobs.unshift(await api('/api/batch/generate', { body: { ids: this.selected, ...this.batch } })); this.toast('已开始批量生成，进度在右下角'); }
@@ -816,7 +844,7 @@ createApp({
       } catch (e) { this.toast(e.message, true); }
     },
     async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
-    async cancelJob(j) { await api(`/api/jobs/${j.id}/cancel`, { body: {} }); },
+    async cancelJob(j) { j.status = 'cancelled'; await api(`/api/jobs/${j.id}/cancel`, { body: {} }); this.refreshCurrent && this.refreshCurrent(); },
     hideJob(j) { this.hiddenJobs.push(j.id); },
     async openFolder(path) { await api('/api/open-folder', { body: { path } }).catch(e => this.toast(e.message, true)); },
 
@@ -839,6 +867,16 @@ createApp({
     },
 
     // ---------- 设置 ----------
+    openSettings(sec) {
+      if (sec) this.setSec = sec;
+      this.setSnap = JSON.stringify(this.settings);
+      this.showSettings = true;
+      this.loadAiCalls && this.loadAiCalls();
+    },
+    async closeSettings() {
+      this.showSettings = false;
+      if (JSON.stringify(this.settings) !== this.setSnap) await this.saveSettings();  // 改过就自动保存
+    },
     async saveSettings() {
       const s = await api('/api/settings', { body: this.settings });
       this.settings = s.settings;

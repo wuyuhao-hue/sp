@@ -73,6 +73,12 @@ def _summary(p: dict) -> dict:
     }
 
 
+def _matching(p: dict) -> bool:
+    """找同款进行中（有任务在采集助手那里，或还有规格在搜 / 在核对）。"""
+    return bool((p.get("match_wait") or {}).get("kind")) or any(
+        u.get("status") in ("pending", "searching", "verifying") for u in p.get("units") or [])
+
+
 def _match_state(p: dict) -> dict | None:
     """Ozon/WB 商品找 1688 同款的进度：{state: none 没匹配 / running 匹配中 / done 已完成, matched, none, error, total}。"""
     if p.get("source") not in sources.MARKET:
@@ -384,6 +390,8 @@ def direct_to_queue(pid: str, skus: list[str] = Body(default_factory=list), main
     p = _product_or_404(pid)
     if (p.get("mode") or "logo") != "direct":
         raise HTTPException(400, "这个商品在「生图上架」板块里，请生成套图后移入待上架")
+    if p.get("source") in sources.MARKET and _matching(p):
+        raise HTTPException(409, "这个商品正在匹配 1688 同款，等匹配结束再加入待上架")
     if p.get("source") in sources.MARKET and not force and not any(u["status"] == "matched" for u in p.get("units") or []):
         raise HTTPException(409, "还没有找到 1688 同款的规格")
     job = jobs.Job("direct", f"加入待上架：{(p.get('title') or '')[:20]}")
@@ -408,10 +416,16 @@ def match_bind(pid: str, url: str = Body(..., embed=True)):
 @app.post("/api/products/auto-match")
 def auto_match(ids: list[str] = Body(..., embed=True), rematch: bool = Body(False, embed=True)):
     """Ozon / WB 商品逐规格找 1688 同款（以图搜 + 本地图片核验 + 1688 规格闸门，不用 AI）。"""
-    pids = [i for i in ids if (store.get_product(i) or {}).get("source") in sources.MARKET]
-    if not pids:
+    prods = [p for p in (store.get_product(i) for i in ids) if p and p.get("source") in sources.MARKET]
+    if not prods:
         raise HTTPException(400, "选中的商品里没有 Ozon / WB 商品（1688、拼多多商品本身就有人民币价）")
-    return extbridge.start_sku_match(pids, rematch).to_dict()
+    pids = [p["id"] for p in prods if not _matching(p)]  # 正在匹配的不受影响，也不重复开始
+    if not pids:
+        raise HTTPException(400, "选中的商品都在匹配中")
+    job = extbridge.start_sku_match(pids, rematch)
+    if len(pids) < len(prods):
+        job.note(f"{len(prods) - len(pids)} 个商品正在匹配中，不重复开始")
+    return job.to_dict()
 
 
 @app.post("/api/products/{pid}/match/unit")
@@ -420,7 +434,7 @@ def match_unit(pid: str, unit: str = Body(...), offer_id: str | None = Body(None
     from . import skumatch
 
     p = _product_or_404(pid)
-    if (p.get("match_wait") or {}).get("kind"):
+    if _matching(p):
         raise HTTPException(400, "这个商品还在匹配中，请等它结束再改")
     try:
         return skumatch.manual_set(pid, unit, offer_id, sku_name)
@@ -989,7 +1003,7 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     s = store.get_settings()
     # 拼多多 / Ozon / WB 链接只有采集助手能采
     if s.get("scrape_mode") == "extension" or s.get("work_mode") == "direct" or sources.parse_links(links) \
-            or any("ozon." in x for x in shop_lines):
+            or any("ozon." in x for x in shop_lines) or sources.search_links(links + "\n" + shops):
         return extbridge.start_job(link_lines, shop_lines, max_pages).to_dict()
     job = jobs.Job("scrape", f"采集 {len(link_lines)} 个链接 / {len(shop_lines)} 个店铺")
     browser.submit(run_scrape, link_lines, shop_lines, max_pages, job)
@@ -1153,7 +1167,7 @@ def ext_result(task_id: str = Body(...), ok: bool = Body(True), data: dict = Bod
 @app.post("/api/ext/status")
 def ext_status(status: str = Body(""), message: str = Body("")):
     extbridge.set_status(status, message)
-    return {"ok": True}
+    return {"ok": True, "abort": extbridge.abort_ids()}
 
 
 @app.post("/api/ext/collect")
@@ -1174,7 +1188,7 @@ def open_browser():
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel(job_id: str):
     j = jobs.get(job_id)
-    if j:
+    if j and not extbridge.cancel_job(j):
         j.cancelled = True
         j.note("已取消：正在生成的会做完，还没开始的不再生成")
     return {"ok": True}

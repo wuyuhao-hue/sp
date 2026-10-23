@@ -17,12 +17,13 @@ from .scraper import extract_offer_ids, save_offer
 _lock = threading.Lock()
 _queue: list[dict] = []          # 待领取的任务
 _active: dict[str, dict] = {}    # 已被扩展领走、还没交回的任务
+_served: dict[str, float] = {}   # 每个任务组上次派出任务的时间：几个任务组轮流派（整店采集和找同款同时进行时谁也不饿死）
 _seq = 0
 _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
-NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 6, 0), "page:ozon": (1, 6, 0), "imgsearch": (1, 8, 0), "shop:ozon": (1, 9, 0),
+NEED_VERSION = {"search": (1, 10, 0), "page": (1, 3, 0), "page:wb": (1, 6, 0), "page:ozon": (1, 6, 0), "imgsearch": (1, 8, 0), "shop:ozon": (1, 9, 0),
                 "login": (1, 9, 0)}  # 各类任务需要的采集助手版本
 UPDATE_HINT = ("打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面。"
                "如果刷新后版本号没变，说明加载的不是这次更新的文件夹：点「移除」，再「加载已解压的扩展程序」选 AI套图工作台/logo-studio/chrome-extension")
@@ -40,8 +41,13 @@ def _new_task(job: jobs.Job, kind: str, **kw) -> dict:
     global _seq
     _seq += 1
     t = {"id": f"t{_seq}", "job_id": job.id, "kind": kind, **kw}
+    job.ext = True
     _queue.append(t)
     return t
+
+
+PAGE_URL = {"ozon": "https://www.ozon.ru/product/{}/", "wb": "https://www.wildberries.ru/catalog/{}/detail.aspx",
+            "pdd": "https://mobile.yangkeduo.com/goods.html?goods_id={}"}
 
 
 def _mode() -> str:
@@ -55,10 +61,18 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
     job.mode = _mode()  # 在哪个模式下发起的采集，商品就进哪个模式
     ids: list[str] = []
     others: list[dict] = []
+    searches: list[dict] = []
+    for text in links + shops:  # 搜索页 / 类目页：粘在哪个框里都认
+        searches += [x for x in sources.search_links(text) if x not in searches]
+    shops = [s for s in shops if not sources.search_links(s)]
     for text in links:
+        if sources.search_links(text) and not sources.parse_links(text) and not re.search(r"detail\.1688\.com/offer/", text):
+            continue
         ids += [i for i in extract_offer_ids(text) if i not in ids]
         others += [x for x in sources.parse_links(text) if x not in others]
     with _lock:
+        for x in searches:  # 搜索结果页：先翻页读出商品编号，再逐个采集
+            _new_task(job, "search", url=x["url"], platform=x["platform"], max_pages=max_pages)
         for s in shops:  # Ozon 店铺（ozon.ru/seller/…）和 1688 店铺分开处理
             _new_task(job, "shop", url=s, max_pages=max_pages, platform="ozon" if "ozon." in s else "1688")
         for x in others:  # 拼多多 / Ozon / WB：一律进「采集上架」。必须先排进队列，再处理 1688（否则只有拼多多/Ozon 链接时任务会被提前结束）
@@ -66,7 +80,7 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
             _new_task(job, "page", platform=x["platform"], item_id=x["id"], url=x["url"])
         _enqueue_offers(job, ids)
     _watch(job)
-    if not ids and not shops and not others:
+    if not ids and not shops and not others and not searches:
         job.fail("没有识别到商品链接")
     elif not connected():
         job.note("等待 Chrome 采集助手连接…（请确认已安装扩展，并打开过一次本页面）")
@@ -74,22 +88,74 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
 
 
 def _watch(job: jobs.Job, wait: float = 45) -> None:
-    """发出去的任务 45 秒都没人领：多半是 Chrome 没开 / 采集助手被停用，告诉用户，而不是一直没动静。"""
+    """发出去的任务 45 秒都没人领：采集助手在忙别的任务就说「排队中」；真的没连上才提示检查 Chrome。"""
     def check():
         time.sleep(wait)
         with _lock:
             waiting = any(t["job_id"] == job.id for t in _queue)
+            busy_with = next((t for t in _active.values()), None)
         if not waiting or job.status != "running":
             return
-        with _lock:
-            busy_with = next((t for t in _active.values()), None)
-        if busy_with and connected():  # 采集助手在忙前面的任务（一次只开一个采集窗口，按顺序来）
-            what = {"page": "商品页", "offer": "1688 商品", "imgsearch": "以图搜", "shop": "店铺"}.get(busy_with["kind"], "任务")
-            job.note(f"排队中：采集助手正在处理前面的{what}，做完会接着处理这里")
+        if connected() and (busy_with or time.time() - state.get("last_taken", 0) < wait):
+            # 采集助手在线、一直在干活（一次只开一个采集标签页，按顺序来）
+            what = {"page": "商品页", "offer": "1688 商品", "imgsearch": "以图搜", "shop": "店铺", "search": "搜索页"}.get(
+                (busy_with or {}).get("kind"), "任务")
+            job.note(f"排队中：采集助手正在处理前面的{what}，会轮流处理")
+        elif connected():
+            job.note("采集助手在线，正在唤醒它来领任务…（如果一直没动静，刷新一下工作台页面）")
         else:
             job.note("采集助手 45 秒都没有来领任务：请确认 Chrome 开着、采集助手已启用（chrome://extensions），"
                      "并且在 Chrome 里打开过一次工作台页面")
     threading.Thread(target=check, daemon=True).start()
+
+
+def _pick() -> int:
+    """轮流派：优先派最久没轮到的任务组的第一个任务。"""
+    best, key = 0, None
+    seen = set()
+    for i, t in enumerate(_queue):
+        if t["job_id"] in seen:
+            continue
+        seen.add(t["job_id"])
+        k = _served.get(t["job_id"], 0)
+        if key is None or k < key:
+            best, key = i, k
+    return best
+
+
+def cancel_job(job: jobs.Job) -> bool:
+    """立即取消：排队的任务全部丢弃，正在做的通知采集助手中止，交回来的结果也不要了。返回是否是采集助手的任务组。"""
+    if not getattr(job, "ext", False):
+        return False
+    with _lock:
+        job.cancelled = True
+        dropped = [t for t in _queue if t["job_id"] == job.id]
+        _queue[:] = [t for t in _queue if t["job_id"] != job.id]
+        running = [t for t in _active.values() if t["job_id"] == job.id]
+        if job.status == "running":
+            job.status = "cancelled"
+            job.note(f"已取消：丢弃 {len(dropped)} 个排队中的任务" + ("，正在打开的页面已中止" if running else ""))
+    pids = {t.get("pid") or t.get("match_for") for t in dropped + running} | set(getattr(job, "pids", []) or [])
+    if getattr(job, "is_match", False):
+        from . import skumatch
+        for pid in filter(None, pids):
+            try:
+                store.update_product(pid, skumatch.reset_stale)
+            except Exception:  # noqa: BLE001
+                pass
+    runlog.log("任务", f"{job.title} | 用户取消", job=job.id, dropped=len(dropped), running=len(running))
+    return True
+
+
+def abort_ids() -> list[str]:
+    """采集助手正在做、但所属任务组已被取消的任务：采集助手报到时告诉它立刻中止。"""
+    with _lock:
+        out = []
+        for tid, t in _active.items():
+            j = jobs.get(t["job_id"])
+            if not j or j.cancelled:
+                out.append(tid)
+        return out
 
 
 def queue_login(platform: str) -> jobs.Job:
@@ -154,7 +220,7 @@ def next_task(version: str = "") -> dict | None:
                     j.done += 1 if t["kind"] == "offer" else 0
                     _maybe_finish(j)
         while _queue:
-            t = _queue.pop(0)
+            t = _queue.pop(_pick())
             j = jobs.get(t["job_id"])
             if not j or j.cancelled or j.status != "running":
                 if j and j.status == "running":
@@ -178,6 +244,7 @@ def next_task(version: str = "") -> dict | None:
                 continue
             t["taken"] = time.time()
             _active[t["id"]] = t
+            _served[j.id] = state["last_taken"] = t["taken"]
             runlog.log("采集助手", f"派发 {t['kind']}", ext=state["version"],
                        **{k: v for k, v in t.items() if k in ("id", "job_id", "platform", "item_id", "offer_id", "url", "pid", "unit", "image", "match_for")})
             if t["kind"] == "offer":
@@ -273,6 +340,9 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
         job = jobs.get(t["job_id"])
         if not job:
             return
+        if job.cancelled:  # 用户已取消：结果直接丢弃，不保存
+            runlog.log("采集助手", "任务组已取消，丢弃交回的结果", id=task_id)
+            return
         if not ok:
             if t.get("sku"):  # 找同款的任务失败：自动重试 / 标记失败可重试，不算无同款
                 from . import skumatch
@@ -290,19 +360,20 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             job.note("已弹出登录窗口：登录成功后会自动关闭" if not data.get("already") else "已经是登录状态，不用再登录")
             _maybe_finish(job)
             return
-        if t["kind"] == "shop":
-            ids = [i for i in data.get("ids", []) if isinstance(i, str)]
-            job.note(f"店铺共发现 {len(ids)} 个商品")
-            if t.get("platform") == "ozon":
-                new = [i for i in ids if not store.get_product(sources.pid_for("ozon", i, getattr(job, "mode", "direct")))]
+        if t["kind"] in ("shop", "search"):
+            ids = list(dict.fromkeys(str(i) for i in data.get("ids", []) if isinstance(i, (str, int))))
+            job.note(f"{'店铺' if t['kind'] == 'shop' else '搜索页'}共发现 {len(ids)} 个商品")
+            pf = t.get("platform") or "1688"
+            if pf == "1688":
+                _enqueue_offers(job, ids, skip_existing=True)
+            else:
+                new = [i for i in ids if not store.get_product(sources.pid_for(pf, i, getattr(job, "mode", "direct")))]
                 if len(new) < len(ids):
                     job.note(f"{len(ids) - len(new)} 个已采集过，跳过")
                 for i in new:
                     job.total += 1
-                    _new_task(job, "page", platform="ozon", item_id=i, url=f"https://www.ozon.ru/product/{i}/")
+                    _new_task(job, "page", platform=pf, item_id=i, url=PAGE_URL[pf].format(i))
                 _maybe_finish(job)
-            else:
-                _enqueue_offers(job, ids, skip_existing=True)
             return
         if t.get("sku"):
             from . import skumatch
@@ -377,6 +448,7 @@ def start_sku_match(pids: list[str], rematch: bool = False, link: dict | None = 
     job.status = "running"
     job.is_match = True
     job.inflight = 0
+    job.pids = list(pids)
     enq = _sku_enqueue(job)
     for pid in pids:
         if link:

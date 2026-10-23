@@ -70,7 +70,20 @@ def candidates(p: dict, subjects: list[dict]) -> list[dict]:
         for s in subjects:
             if s.get("subjectName", "").lower().startswith(st.lower()) and s not in hits:
                 hits.append(s)
-    if not hits:  # 没有品类词：给服装大类下的全部类目
+    if not hits:  # 没有服装品类词（鞋、百货等）：用俄文标题 / 来源类目的词干去全部类目里找相近的
+        text = " ".join([p.get("category_source") or "", (p.get("ai") or {}).get("title_ru") or "",
+                         (p.get("ai") or {}).get("big_word_ru") or "", title]).lower()
+        words = {w[:5] for w in re.findall(r"[а-яё]{4,}", text)}
+        if words:
+            scored = []
+            for s in subjects:
+                sw = {w[:5] for w in re.findall(r"[а-яё]{4,}", (s.get("subjectName", "") + " " + (s.get("parentName") or "")).lower())}
+                n = len(words & sw)
+                if n:
+                    scored.append((n, s))
+            scored.sort(key=lambda x: -x[0])
+            hits = [s for _, s in scored]
+    if not hits:  # 还是没有：给服装大类下的全部类目
         hits = [s for s in subjects if "одежда" in (s.get("parentName") or "").lower()]
     return hits[:150]
 

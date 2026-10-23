@@ -26,7 +26,7 @@
     </div>
     <div class="spacer"></div>
  <span class="pill warn-pill" v-if="pageStale" @click="reloadPage" style="cursor:pointer" title="点一下刷新">⚠ 采集助手已更新，请按 F5 刷新本页面</span>
-    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.9.0（登录、Ozon 店铺、找同款需要）</span>
+    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.10.0</span>
     <div class="login-wrap" v-if="needLogin.length" @mouseleave="showLogin=false">
       <button class="pill login-pill" @click="showLogin=!showLogin"><i class="dot warn"></i>需要登录 {{ needLogin.length }} 个平台</button>
       <transition name="pop">
@@ -44,11 +44,11 @@
         </div>
       </transition>
     </div>
-    <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
+    <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="openSettings()"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
     <a class="btn sm ghost" href="/api/logs/export" download title="出问题时导出运行日志发给开发者">导出日志</a>
-    <button class="icon-btn" :class="{on: tab==='settings'}" @click="tab='settings'" title="设置（两个板块共用：中转站、店铺令牌、模型…）">
+    <button class="icon-btn" :class="{on: showSettings}" @click="openSettings()" title="设置（两个板块共用：中转站、店铺令牌、模型…）">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
     </button>
   </header>
@@ -56,7 +56,7 @@
   <div class="subbar" :class="workMode">
     <nav class="subnav">
       <button :class="{on: tab==='products'}" @click="tab='products'">商品</button>
-      <button :class="{on: tab==='queue'}" @click="tab='queue'">待上架<span class="count" v-if="queueCount">{{ queueCount }}</span></button>
+      <button :class="{on: tab==='queue'}" @click="tab='queue'" title="待上架和已上架的商品卡：填资料、预检、上架">上架<span class="count" v-if="queueCount" title="待上架">{{ queueCount }}</span></button>
       <button v-if="workMode==='logo'" :class="{on: tab==='logos'}" @click="tab='logos'">Logo 库</button>
     </nav>
   </div>
@@ -119,25 +119,21 @@
         <div v-for="p in filtered" :key="p.id" class="pcard" :class="{on: current && current.id===p.id}" @click="openProduct(p.id)">
           <i class="check" :class="{on: selected.includes(p.id)}" @click.stop="toggleSel(p.id)"></i>
           <img :src="imgSrc(p.thumb || '')" loading="lazy">
-          <div class="grow">
-            <div class="t">{{ p.title || '（无标题）' }}</div>
-            <div class="meta">
+          <div class="pc-body">
+            <div class="t" :title="p.title">{{ p.title || '（无标题）' }}</div>
+            <div class="pc-row">
               <span class="tag src"><i class="src-ic sm"><span v-html="srcIcon(p.source)"></span><img v-if="iconOk(p.source)" :src="'/api/src-icon/' + p.source" @error="iconBad[p.source] = true" @load="$event.target.classList.add('ok')"></i>{{ sourceName(p.source) }}</span>
+              <span class="pc-sku">{{ p.sku_count }} SKU</span>
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
               <span class="price rub" v-else-if="p.market_price_rub">{{ Math.round(p.market_price_rub) }} ₽</span>
-              <span class="tag warn" v-if="matchStateName(p.match_state)">{{ matchStateName(p.match_state) }}</span>
-              <span class="tag ok" v-if="p.match_state && p.match_state.state === 'done' && p.match_state.matched" :title="p.match_state.none + ' 个规格无同款已删除'">同款 {{ p.match_state.matched }} 个规格</span>
-              <span class="tag">{{ p.sku_count }} SKU</span>
-              <span class="tag accent" v-if="p.set_count">{{ p.set_count }} 套图</span>
-              <span class="tag ok" v-if="p.queued">{{ p.queued }} 待上架</span>
-              <span class="tag live" v-if="(p.live_shops || []).length" :title="p.live_shops.map(shopName).join('、')">已上架 {{ p.live_shops.length }} 店</span>
-              <span class="tag warn" v-if="p.running">生成中</span>
+            </div>
+            <div class="pc-row pc-st">
+              <span v-for="b in pcBadges(p)" :key="b.t" class="tag" :class="b.c" :title="b.title || ''">{{ b.t }}</span>
             </div>
           </div>
         </div>
         <div v-if="!products.length" class="empty" style="padding:40px 10px">
-          <div class="faint" v-if="workMode==='direct'">还没有商品<br>点上面的「采集」，或在 1688 / WB / 拼多多 / Ozon 商品页点「采集到工作台」</div>
-          <div class="faint" v-else>还没有商品<br>点「采集 1688」或「导入图片」开始</div>
+          <div class="faint">还没有商品</div>
         </div>
       </div>
       <div class="batchbar" v-if="selected.length">
@@ -145,7 +141,8 @@
           <span class="grow"><b>已选 {{ selected.length }} 个商品</b></span>
           <button class="btn sm ghost danger" @click="deleteSel">删除</button>
         </div>
-        <button class="btn primary block" v-if="workMode==='direct'" @click="batchDirectQueue">全部颜色加入待上架（原图）</button>
+        <button class="btn primary block" v-if="workMode==='direct'" @click="batchDirectQueue">移入待上架</button>
+        <button class="btn block" v-if="selectedMarket.length" @click="batchMatch">全部进入匹配（{{ selectedMarket.length }}）</button>
         <template v-if="workMode!=='direct'">
         <div class="row">
           <select class="input sm grow" v-model="batch.logo_id"><option :value="null">不印标</option><option v-for="l in logos" :key="l.id" :value="l.id">{{ l.name }}</option></select>
@@ -340,7 +337,7 @@
 
       <div class="block" v-if="isMarket">
         <div class="row">
-          <button class="btn primary" :disabled="!dsel.skus.length" @click="directToQueue">把选中的 {{ dsel.skus.length }} 个规格加入待上架</button>
+          <button class="btn primary" :disabled="!dsel.skus.length || matchRunning" @click="directToQueue">{{ matchRunning ? "正在匹配，结束后才能加入" : "把选中的 " + dsel.skus.length + " 个规格加入待上架" }}</button>
         </div>
       </div>
       <div class="block" v-else>
@@ -384,7 +381,7 @@
           <div class="style-grid">
             <div v-for="(n, k) in styleOptions" :key="k" class="style-chip" :class="['st-' + k, {on: genStyle === k}]" @click="genStyle = k">{{ n }}</div>
           </div>
-          <h3 style="margin-top:16px">推荐模板 1 <button class="btn sm ghost" @click="tab='settings'">修改</button></h3>
+          <h3 style="margin-top:16px">推荐模板 1 <button class="btn sm ghost" @click="openSettings()">修改</button></h3>
           <ol class="shot-list">
             <li v-for="(sh, i) in activeShots" :key="i">{{ shotName(sh.type) }}<span class="tag accent" v-if="sh.logo && genLogo && canLogo(sh.type)">印标</span></li>
             <li v-if="settings.size_chart_auto">尺码表<span class="tag">本地生成</span><span class="faint" v-if="!sizeTableText">（需先填尺码表）</span></li>
@@ -435,7 +432,7 @@
   <main class="page" v-if="tab==='queue'">
     <div class="page-inner" style="max-width:1440px">
       <div class="row between" style="align-items:flex-start">
-        <div><h1>待上架</h1></div>
+        <div><h1>上架</h1></div>
         <div class="row">
           <span class="faint">店铺</span>
           <select class="input" style="width:180px" :value="shopCurrent" @change="setCurrentShop($event.target.value)" v-if="shops.length">
@@ -839,31 +836,28 @@
   </main>
 
   <!-- ================= 设置 ================= -->
-  <main class="page" v-if="tab==='settings'">
-    <div class="page-inner" style="max-width:860px">
-      <h1>设置</h1>
-      <div class="note log-note">
-        <b>运行日志</b>：程序会把每一步（采集、找同款、AI 填写、上架、WB 接口、报错）记在 <code>data/logs</code>，令牌和密钥自动打码。
-        遇到问题点「导出运行日志」，把下载的 zip 发给开发者即可定位。
-        <a class="btn sm primary" href="/api/logs/export" download>导出运行日志</a>
-      </div>
+  <transition name="dw">
+  <div class="drawer-bg" v-if="showSettings" @mousedown.self="closeSettings">
+    <aside class="drawer">
+      <div class="dw-head"><h2>设置</h2><span class="faint">两个板块共用</span><span class="spacer"></span><button class="btn sm ghost dw-x" @click="closeSettings" title="收起">✕</button></div>
+      <div class="dw-main">
+        <nav class="dw-nav">
+          <button :class="{on: setSec==='ai'}" @click="setSec='ai'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>AI 中转站</button>
+          <button :class="{on: setSec==='listing'}" @click="setSec='listing'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v16H4zM8 9h8M8 13h8M8 17h5"/></svg>上架资料模型</button>
+          <button :class="{on: setSec==='tpl'}" @click="setSec='tpl'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/></svg>套图模板</button>
+          <button :class="{on: setSec==='ref'}" @click="setSec='ref'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v14H4zM8 13l3-3 5 5M14 10h.01"/></svg>风格参考图</button>
+          <button :class="{on: setSec==='scrape'}" @click="setSec='scrape'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>采集</button>
+          <button :class="{on: setSec==='log'}" @click="setSec='log'"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3h9l4 4v14H6zM9 12h6M9 16h6"/></svg>运行日志</button>
+        </nav>
+        <div class="dw-body scroll">
+          <section class="dw-sec" v-show="setSec==='ai'">
+            <h3>AI 中转站</h3>
 
-      <div class="card">
-        <div class="set-title">AI 中转站</div>
         <div class="form-grid">
           <div class="field full"><label>接口地址（OpenAI 格式，以 /v1 结尾）</label><input class="input" v-model="settings.api_base" placeholder="https://www.xpivot.top/v1"></div>
           <div class="field"><label>令牌（API Key）</label><input class="input" v-model="settings.api_key" placeholder="sk-..."></div>
           <div class="field"><label>生图模型</label><input class="input" v-model="settings.image_model" list="model-list" placeholder="gpt-image-2"></div>
           <div class="field"><label>商品理解模型（可选，需要能看图）</label><input class="input" v-model="settings.text_model" list="model-list" placeholder="如 gpt-4o，留空则不使用"></div>
-          <div class="full sub-block">
-            <div class="set-sub">WB 上架资料模型（待上架里的 AI 填写：类目、标题、说明、属性、包装尺寸重量、海关编码）</div>
-            <div class="form-grid tight">
-              <div class="field"><label>模型</label><input class="input" v-model="settings.listing_model" placeholder="gpt-6-sol"></div>
-              <div class="field"><label>令牌（中转站里这个模型所在分组的令牌；留空则用上面的生图令牌）</label><input class="input" v-model="settings.listing_api_key" placeholder="sk-..."></div>
-              <div class="field full"><label>接口地址（留空则和上面相同）</label><input class="input" v-model="settings.listing_api_base" :placeholder="settings.api_base || 'https://www.xpivot.top/v1'"></div>
-              <div class="full row"><button class="btn" @click="testListing">测试上架资料模型</button><span class="faint">{{ listingTestMsg }}</span></div>
-            </div>
-          </div>
           <div class="field"><label>调用方式</label>
             <select class="input" v-model="settings.image_api">
               <option value="auto">自动适配（推荐）</option><option value="edits">图片编辑接口 /images/edits</option><option value="chat">对话接口 /chat/completions</option>
@@ -882,7 +876,6 @@
           <div class="full note" v-if="aiCalls">
             <div class="row between"><span><b>今天请求中转站 {{ aiCalls.today.total }} 次</b>：生图 {{ aiCalls.today.image }} 次（成功 {{ aiCalls.today.image_ok }}）、文字 {{ aiCalls.today.text }} 次<template v-if="aiCalls.today.failed">、失败/超时 {{ aiCalls.today.failed }} 次</template></span>
               <span class="row"><button class="btn sm" @click="loadAiCalls">刷新</button><button class="btn sm" @click="showCalls = !showCalls">{{ showCalls ? '收起' : '最近记录' }}</button></span></div>
-            <div class="faint" style="margin-top:4px">每次发给中转站的请求都记在 data/ai_calls.jsonl。正常情况下一套 6 张图 = 6 次生图 + 每张印标图 1 次胸口印标（推荐模板只有首图印标，共 7 次），商品第一次生成时另加 1 次文字理解。程序不会在中转站出错/超时后自动重发生图。</div>
             <table class="shot-table" v-if="showCalls" style="margin-top:8px">
               <tr><th>时间</th><th>类型</th><th>接口</th><th>结果</th><th>耗时</th></tr>
               <tr v-for="(r, i) in aiCalls.recent" :key="i"><td>{{ r.t.slice(5) }}</td><td>{{ {image: '生图', text: '文字', other: '其他'}[r.kind] }}</td><td>{{ r.path }}</td>
@@ -891,10 +884,20 @@
           </div>
           <datalist id="model-list"><option v-for="m in models" :key="m" :value="m"></option></datalist>
         </div>
-      </div>
+          </section>
+          <section class="dw-sec" v-show="setSec==='listing'">
+            <h3>上架资料模型</h3>
+            <div class="faint dw-desc">待上架里的 AI 填写：类目、标题、说明、属性、包装尺寸重量、海关编码</div>
+            <div class="form-grid">
+              <div class="field"><label>模型</label><input class="input" v-model="settings.listing_model" placeholder="gpt-6-sol"></div>
+              <div class="field"><label>令牌（中转站里这个模型所在分组的令牌；留空则用上面的生图令牌）</label><input class="input" v-model="settings.listing_api_key" placeholder="sk-..."></div>
+              <div class="field full"><label>接口地址（留空则和上面相同）</label><input class="input" v-model="settings.listing_api_base" :placeholder="settings.api_base || 'https://www.xpivot.top/v1'"></div>
+              <div class="full row"><button class="btn" @click="testListing">测试上架资料模型</button><span class="faint">{{ listingTestMsg }}</span></div>
+            </div>
+          </section>
+          <section class="dw-sec" v-show="setSec==='tpl'">
+            <h3>套图模板</h3>
 
-      <div class="card" style="margin-top:16px">
-        <div class="set-title">套图模板（推荐模板 1）</div>
         <div class="form-grid">
           <div class="field"><label>每套张数</label>
             <select class="input" v-model.number="settings.shot_count"><option v-for="n in [5,6,7,8]" :key="n" :value="n">{{ n }} 张</option></select></div>
@@ -919,7 +922,7 @@
               </tr>
             </table>
             <div class="row between" style="margin-top:8px">
-              <span class="faint">「胸口印 logo」打开的位置会在左胸印上你的 logo。换 logo 时衣服底图沿用，只重做胸口那一小块。背面、特写、拼图看不到完整胸口，开关是灰的。灰色的行超出了张数，不会生成。</span>
+              <span class="faint">灰色的行超出了张数，不会生成</span>
               <button class="btn sm" @click="resetShots">恢复推荐模板 1</button>
             </div>
             <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:14px">
@@ -936,22 +939,22 @@
             </div>
           </div>
         </div>
-      </div>
+          </section>
+          <section class="dw-sec" v-show="setSec==='ref'">
+            <h3>风格参考图</h3>
 
-      <div class="card" style="margin-top:16px">
-        <div class="set-title">风格参考图（可选）</div>
         <div class="form-grid">
-          <div class="full note">上传 1～2 张你喜欢的 WB 商品图截图（比如你想参考的那两个商品），生成首图时会作为风格参考一起发给 AI：只学它的拍摄风格、排版和卖点样式，不会照抄商品。</div>
+          <div class="full faint">1～2 张你喜欢的 WB 商品图，生成首图时只参考它的风格和排版</div>
           <div class="full style-refs">
             <div v-for="r in settings.style_refs" :key="r" class="style-ref"><img :src="'/data/style_refs/' + r"><button class="x" @click="delStyleRef(r)">✕</button></div>
             <div class="style-ref add" v-if="(settings.style_refs||[]).length < 2" @click="$refs.styleInput.click()">＋ 上传</div>
             <input ref="styleInput" type="file" accept="image/*" hidden @change="addStyleRef">
           </div>
         </div>
-      </div>
+          </section>
+          <section class="dw-sec" v-show="setSec==='scrape'">
+            <h3>采集</h3>
 
-      <div class="card" style="margin-top:16px">
-        <div class="set-title">采集</div>
         <div class="form-grid">
           <div class="field"><label>采集方式</label>
             <select class="input" v-model="settings.scrape_mode"><option value="extension">Chrome 扩展：在你自己的 Chrome 里采集（推荐）</option><option value="browser">独立浏览器窗口（备用）</option></select></div>
@@ -959,10 +962,18 @@
           <div class="field" v-if="settings.scrape_mode !== 'extension'"><label>独立窗口使用的浏览器</label>
             <select class="input" v-model="settings.browser"><option value="chrome">Chrome</option><option value="edge">Edge</option></select></div>
         </div>
+          </section>
+          <section class="dw-sec" v-show="setSec==='log'">
+            <h3>运行日志</h3>
+            <div class="note">每一步（采集、找同款、AI 填写、上架、WB 接口、报错）都记在 <code>data/logs</code>，令牌和密钥自动打码。遇到问题导出后发给开发者。</div>
+            <a class="btn primary" style="margin-top:12px" href="/api/logs/export" download>导出运行日志</a>
+          </section>
+        </div>
       </div>
-      <div class="row" style="margin-top:18px;justify-content:flex-end"><button class="btn primary" @click="saveSettings">保存设置</button></div>
-    </div>
-  </main>
+      <div class="dw-foot"><span class="faint">点抽屉外面收起时会自动保存</span><span class="spacer"></span><button class="btn" @click="closeSettings">收起</button><button class="btn primary" @click="saveSettings">保存</button></div>
+    </aside>
+  </div>
+  </transition>
 
   <!-- 改判一个规格 -->
   <div class="modal-bg" v-if="pick" @mousedown.self="pick=null">

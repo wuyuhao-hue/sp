@@ -43,6 +43,32 @@ def parse_links(text: str) -> list[dict]:
     return out
 
 
+SEARCH_PAT = [
+    ("ozon", re.compile(r"ozon\.(?:ru|by|kz)/(?:search|category|brand|highlight|collection)/", re.I)),
+    ("wb", re.compile(r"wildberries\.(?:ru|by|kz)/(?:catalog/0/search\.aspx|catalog/[a-z][\w/-]*|brands/|seller/)", re.I)),
+    ("1688", re.compile(r"//(?:s\.1688\.com|search\.1688\.com)/|1688\.com/(?:selloffer|offer_search|chanpin)", re.I)),
+    ("pdd", re.compile(r"(?:yangkeduo|pinduoduo)\.com/[^\s]*search", re.I)),
+]
+URL_IN_TEXT = re.compile(r"https?://[^\s\"'<>，。、]+", re.I)
+
+
+def search_platform(url: str) -> str | None:
+    """搜索结果页 / 类目页 / 品牌页 / WB 卖家页：返回平台；商品页、其他链接返回 None。"""
+    if WB_URL.search(url) or OZON_URL.search(url) or PDD_URL.search(url) or re.search(r"detail\.1688\.com/offer/", url):
+        return None
+    return next((p for p, pat in SEARCH_PAT if pat.search(url)), None)
+
+
+def search_links(text: str) -> list[dict]:
+    out = []
+    for m in URL_IN_TEXT.finditer(text or ""):
+        u = m.group(0).rstrip(").,;")
+        p = search_platform(u)
+        if p and not any(x["url"] == u for x in out):
+            out.append({"platform": p, "url": u})
+    return out
+
+
 def _dump(name: str, raw) -> str:
     f = store.DEBUG / f"{name}-{time.strftime('%m%d-%H%M%S')}.json"
     f.write_text(json.dumps(raw, ensure_ascii=False, indent=1)[:20_000_000], "utf-8")
