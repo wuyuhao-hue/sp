@@ -43,6 +43,12 @@ def export_sets(items: list[dict], job) -> None:
             if im.get("file") and (pdir / im["file"]).exists():
                 n += 1
                 shutil.copy(pdir / im["file"], folder / f"{n:02d}.jpg")
+            elif im.get("url"):  # 采集上架的原图地址：导出时才下载
+                from .scraper import download_image
+                got = download_image(im["url"], "")
+                if got is not None:
+                    n += 1
+                    got.convert("RGB").save(folder / f"{n:02d}.jpg", quality=93)
         info = p.get("ai") or {}
         sizes = p.get("sizes") or [""]
         for size in sizes:

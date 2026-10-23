@@ -52,8 +52,8 @@ def _set(p: dict, sid: str) -> dict:
 def _thumb(p: dict) -> str | None:
     for st in reversed(p.get("sets") or []):
         for im in st["images"]:
-            if im.get("file"):
-                return f"/data/products/{p['id']}/{im['file']}?v={im.get('v', 0)}"
+            if im.get("file") or im.get("url"):
+                return store.img_url(p["id"], im)
     skus = studio.sku_list(p)
     return skus[0]["image"] if skus else None
 
@@ -690,8 +690,8 @@ def _listing_summary(p: dict, L: dict, shop_id: str | None = None) -> dict:
     vs = []
     for v in L["variants"]:
         st = sets.get(v["sid"]) or {}
-        cover = next((i for i in st.get("images", []) if i.get("file")), None)
-        vs.append({**v, "cover": f"/data/products/{p['id']}/{cover['file']}?v={cover.get('v', 0)}" if cover else ""})
+        cover = next((i for i in st.get("images", []) if i.get("file") or i.get("url")), None)
+        vs.append({**v, "cover": store.img_url(p["id"], cover) if cover else ""})
     return {"pid": p["id"], "key": L["key"], "product_title": p.get("title", ""), "offer_id": p.get("offer_id"),
             "source": p.get("source"), "mode": p.get("mode") or "logo",
             "title": L.get("title", ""), "logo_name": L.get("logo_name", ""), "subject_name": L.get("subject_name", ""),
@@ -736,9 +736,9 @@ def listing_get(pid: str, key: str):
     sets = [s for s in p.get("sets") or [] if s.get("queued") and wb_listing.set_key(s) == key]
     options = {}
     for st in sets:
-        cover = next((i for i in st.get("images", []) if i.get("file")), None)
+        cover = next((i for i in st.get("images", []) if i.get("file") or i.get("url")), None)
         options.setdefault(st["sku"], []).append({"sid": st["id"], "style": st.get("style"), "created": st["created"],
-                                                  "cover": f"/data/products/{pid}/{cover['file']}" if cover else ""})
+                                                  "cover": store.img_url(pid, cover) if cover else ""})
     prices = {v["sku"]: wb_listing.variant_price(p, L, v) for v in L["variants"]}
     sid = _current_shop()
     codes = {v["sku"]: wb_listing.vendor_code(p, L, v, prefix, sid) for v in L["variants"]}
@@ -955,14 +955,23 @@ def listings_batch_upload(items: list[dict] = Body(..., embed=True), shop: str |
     job = jobs.Job("wb", f"批量上架 {len(items)} 张商品卡")
 
     def run(j):
-        for k, it in enumerate(items):
+        # 同时上架 3 张商品卡（每张卡内部各颜色的图片也是并行的）；所有请求共用按 WB 官方额度设置的限流器，并发再多也不会超额
+        from concurrent.futures import ThreadPoolExecutor
+        import threading
+        lock = threading.Lock()
+
+        def one(k_it):
+            k, it = k_it
             if j.cancelled:
-                break
+                return
             j.note(f"[{k + 1}/{len(items)}] 开始上架")
             sub = jobs.Job("wb", "批量上架子任务", register=False)
             wb_upload.upload(it["pid"], it["key"], sid, sub)
+            with lock:
+                j.done += 1
             j.note(f"[{k + 1}/{len(items)}] " + (sub.log[-1] if sub.log else ""))
-            j.done += 1
+        with ThreadPoolExecutor(max_workers=int(os.environ.get("WB_CARD_WORKERS", "3"))) as ex:
+            list(ex.map(one, enumerate(items)))
         j.finish(f"批量上架结束：{j.done}/{len(items)}")
     job.total = len(items)
     jobs.run_in_thread(job, run)
@@ -1006,6 +1015,14 @@ def ext_logins(status: dict = Body(..., embed=True)):
     extbridge.state["logins"] = new
     extbridge.state["last_seen"] = time.time()
     return {"ok": True}
+
+
+@app.post("/api/login/{platform}")
+def login_open(platform: str):
+    """「去登录」：除了页面直接通知采集助手，也通过任务队列再发一次（页面里的连接失效时也能弹出登录窗口）。"""
+    if platform not in ("1688", "pdd", "aiprice"):
+        raise HTTPException(404, "没有这个平台")
+    return extbridge.queue_login(platform).to_dict()
 
 
 @app.post("/api/login-skip")

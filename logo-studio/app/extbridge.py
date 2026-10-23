@@ -22,7 +22,8 @@ _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
-NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 6, 0), "page:ozon": (1, 6, 0), "imgsearch": (1, 8, 0)}  # 各类任务需要的采集助手版本
+NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 6, 0), "page:ozon": (1, 6, 0), "imgsearch": (1, 8, 0), "shop:ozon": (1, 9, 0),
+                "login": (1, 9, 0)}  # 各类任务需要的采集助手版本
 UPDATE_HINT = ("打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面。"
                "如果刷新后版本号没变，说明加载的不是这次更新的文件夹：点「移除」，再「加载已解压的扩展程序」选 AI套图工作台/logo-studio/chrome-extension")
 
@@ -58,8 +59,8 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
         ids += [i for i in extract_offer_ids(text) if i not in ids]
         others += [x for x in sources.parse_links(text) if x not in others]
     with _lock:
-        for s in shops:
-            _new_task(job, "shop", url=s, max_pages=max_pages)
+        for s in shops:  # Ozon 店铺（ozon.ru/seller/…）和 1688 店铺分开处理
+            _new_task(job, "shop", url=s, max_pages=max_pages, platform="ozon" if "ozon." in s else "1688")
         for x in others:  # 拼多多 / Ozon / WB：一律进「采集上架」。必须先排进队列，再处理 1688（否则只有拼多多/Ozon 链接时任务会被提前结束）
             job.total += 1
             _new_task(job, "page", platform=x["platform"], item_id=x["id"], url=x["url"])
@@ -91,6 +92,18 @@ def _watch(job: jobs.Job, wait: float = 45) -> None:
     threading.Thread(target=check, daemon=True).start()
 
 
+def queue_login(platform: str) -> jobs.Job:
+    name = {"1688": "1688", "pdd": "拼多多", "aiprice": "AiPrice"}[platform]
+    job = jobs.Job("scrape", f"打开 {name} 登录窗口")
+    job.status = "running"
+    job.is_login = True
+    with _lock:
+        job.total = 1
+        _new_task(job, "login", platform=platform)
+    _watch(job)
+    return job
+
+
 def start_tabs_job() -> jobs.Job:
     job = jobs.Job("scrape", "采集 Chrome 中已打开的商品页")
     job.status = "running"
@@ -113,8 +126,10 @@ def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False) 
 def _maybe_finish(job: jobs.Job) -> None:
     pending = any(t["job_id"] == job.id for t in _queue) or any(t["job_id"] == job.id for t in _active.values())
     if not pending and job.status == "running" and getattr(job, "inflight", 0) == 0:
-        if getattr(job, "is_match", False):
-            job.finish("货源绑定完成")
+        if getattr(job, "is_login", False):
+            job.finish("完成")
+        elif getattr(job, "is_match", False):
+            job.finish("找同款完成")
         else:
             job.finish(f"采集完成：新增 {len(job.results)} 个" + (f"（共 {job.total} 个）" if job.total else ""))
 
@@ -269,10 +284,24 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
                 job.done += 1
             _maybe_finish(job)
             return
+        if t["kind"] == "login":
+            job.done += 1
+            job.note("已弹出登录窗口：登录成功后会自动关闭" if not data.get("already") else "已经是登录状态，不用再登录")
+            _maybe_finish(job)
+            return
         if t["kind"] == "shop":
             ids = [i for i in data.get("ids", []) if isinstance(i, str)]
             job.note(f"店铺共发现 {len(ids)} 个商品")
-            _enqueue_offers(job, ids, skip_existing=True)
+            if t.get("platform") == "ozon":
+                new = [i for i in ids if not store.get_product(f"ozon-{i}")]
+                if len(new) < len(ids):
+                    job.note(f"{len(ids) - len(new)} 个已采集过，跳过")
+                for i in new:
+                    job.total += 1
+                    _new_task(job, "page", platform="ozon", item_id=i, url=f"https://www.ozon.ru/product/{i}/")
+                _maybe_finish(job)
+            else:
+                _enqueue_offers(job, ids, skip_existing=True)
             return
         if t.get("sku"):
             from . import skumatch

@@ -256,6 +256,11 @@ class WBClient:
                          headers={"X-Nm-Id": str(nm_id), "X-Photo-Number": str(number)},
                          files={"uploadfile": (f"{number}.jpg", data, "image/jpeg")}, timeout=90, retries=3)
 
+    def media_save(self, nm_id: int, urls: list[str]) -> dict:
+        """按图片地址上传：WB 自己去下载这些图（整组替换这个款式的图片，顺序即图片顺序）。"""
+        return self._req("POST", f"{CONTENT}/content/v3/media/save", "media", json={"nmId": nm_id, "data": urls},
+                         timeout=60, retries=3)
+
     # ---------- 价格 ----------
     def set_prices(self, rows: list[dict]) -> dict:
         return self._req("POST", f"{PRICES}/api/v2/upload/task", "prices", json={"data": rows}, timeout=60, retries=4)

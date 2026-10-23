@@ -148,10 +148,14 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
 
         variants = [v for v in L["variants"] if v.get("enabled")]
         codes = {LS.vendor_code(p, L, v, prefix, shop_id): v for v in variants}
-        _stage(pid, key, shop_id, job, "准备本地图片", 6)
-        media = {}
+        _stage(pid, key, shop_id, job, "准备图片", 6)
+        media, by_url = {}, {}
         for vc, v in codes.items():
             st = next(x for x in p["sets"] if x["id"] == v["sid"])
+            urls = [im["url"] for im in st.get("images") or [] if im.get("url") and not im.get("file")][:20]
+            if urls and len(urls) == len([im for im in st.get("images") or [] if im.get("url") or im.get("file")]):
+                by_url[vc] = urls          # 采集上架的原图地址：WB 直接按地址取图，不用先下载再一张张传
+                continue
             media[vc] = _images(p, st)
             if not media[vc]:
                 raise WBError(0, f"款式「{v['sku']}」没有可读的本地图片")
@@ -207,8 +211,19 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
         nm = {vc: c["nmID"] for vc, c in existing.items()}
         _update(pid, key, shop_id, lambda P: P.update(nm=nm))
 
+        if by_url:
+            failed = _media_by_url(cli, {vc: nm[vc] for vc in by_url}, by_url, existing, pid, key, shop_id, job, codes)
+            for vc in failed:  # WB 没取到的：退回下载后一张张上传
+                st = next(x for x in p["sets"] if x["id"] == codes[vc]["sid"])
+                media[vc] = _download_urls(by_url[vc])
+                if not media[vc]:
+                    raise WBError(0, f"款式「{codes[vc]['sku']}」的图片 WB 取不到、本地也下载不了")
         _stage(pid, key, shop_id, job, "上传图片", 38)
         done = dict(LS.pub(store.get_product(pid)["listings"][key], shop_id).get("media_done") or {})
+        for vc in by_url:
+            if vc in media:  # 按地址没取到、改为逐张上传的：从第 1 张开始覆盖
+                done[vc] = 0
+                existing.setdefault(vc, {})["photos"] = []
         # 断点以 WB 上实际的图片数为准：本地记的「已传」不一定真的到了卡上（WB 异步处理图片），
         # 从实际张数 +1 接着传，序号才连续（序号跳号 WB 会回 validation error）
         for vc in media:
@@ -291,6 +306,61 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
         _stage(pid, key, shop_id, job, f"✗ {msg[:300]}", 0)
         if job:
             job.fail(msg[:300])
+
+
+URL_WAIT = float(os.environ.get("WB_URL_WAIT", "60"))  # 按地址上传后，最多等 WB 取图多少秒
+
+
+def _media_by_url(cli, nms: dict, by_url: dict, existing: dict, pid, key, shop_id, job, codes) -> list[str]:
+    """按图片地址上传（每个款式 1 个请求），再核对 WB 上实际的图片数。返回 WB 没取到图的款式（退回逐张上传）。"""
+    todo = []
+    for vc, urls in by_url.items():
+        have = len((existing.get(vc) or {}).get("photos") or [])
+        if have >= len(urls):
+            continue  # 之前已经传好了
+        try:
+            cli.media_save(nms[vc], urls)
+            todo.append(vc)
+        except RateLimited:
+            raise
+        except WBError as e:
+            if job:
+                job.note(f"{codes[vc]['sku']}：按地址上传被拒（{str(e)[:80]}），改为逐张上传")
+            return list(by_url)
+    _stage(pid, key, shop_id, job, f"已提交 {len(todo)} 个款式的图片地址，等 WB 取图", 50)
+    t0 = time.time()
+    left = set(todo)
+    while left and time.time() - t0 < URL_WAIT:
+        time.sleep(min(5, max(0.3, URL_WAIT / 12)))
+        for vc in list(left):
+            got = len(((cli.find_cards(vc) or [{}])[0]).get("photos") or [])
+            if got >= len(by_url[vc]):
+                left.discard(vc)
+                if job:
+                    job.note(f"✓ {codes[vc]['sku']}：WB 已取到 {got} 张图")
+        _update(pid, key, shop_id, lambda P: P.update(progress={"stage": f"WB 取图中 {len(todo) - len(left)}/{len(todo)}",
+                                                               "pct": 50 + int(30 * (len(todo) - len(left)) / max(1, len(todo)))}))
+    if left and job:
+        job.note("WB 没取到这些款式的图：" + "、".join(codes[vc]["sku"] for vc in left) + "，改为下载后逐张上传")
+    return list(left)
+
+
+def _download_urls(urls: list[str]) -> list[bytes]:
+    from ..scraper import download_image
+
+    out = []
+    for u in urls:
+        im = download_image(u, "")
+        if im is None:
+            continue
+        im = im.convert("RGB")
+        if im.width < 700 or im.height < 900:
+            s = max(700 / im.width, 900 / im.height)
+            im = im.resize((round(im.width * s), round(im.height * s)), Image.LANCZOS)
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=92)
+        out.append(buf.getvalue())
+    return out
 
 
 def upload_media(cli, nms: dict[str, int], media: dict[str, list[bytes]], done: dict[str, int], progress) -> None:

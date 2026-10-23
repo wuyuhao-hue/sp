@@ -44,12 +44,17 @@ def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_det
             job.fail("没有找到 1688 同款的规格，不能加入待上架（先在商品页点「找 1688 同款」）")
             return
     job.total = len(skus)
+    by_url = p.get("source") in MARKET  # Ozon / WB 原图都是大图（≥ 900 高）：不下载，上架时让 WB 直接按地址取图，快很多
     for sku in skus:
         urls = _images_for(p, sku, main, include_detail)
         sid = store.new_id()
-        d = store.product_dir(pid) / "sets" / sid
-        d.mkdir(parents=True, exist_ok=True)
         images = []
+        if by_url:
+            images = [{"type": "source", "url": u, "file": None, "v": int(time.time() * 1000), "status": "done", "src": u}
+                      for u in urls]
+            urls = []
+        else:
+            (store.product_dir(pid) / "sets" / sid).mkdir(parents=True, exist_ok=True)
         for i, u in enumerate(urls):
             im = download_image(u, referer)
             if im is None:
@@ -71,5 +76,5 @@ def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_det
                                                                 and s.get("queued"))] + [st]
         store.update_product(pid, fn)
         job.done += 1
-        job.note(f"✓ {sku['name']}：{len(images)} 张图已加入待上架")
+        job.note(f"✓ {sku['name']}：{len(images)} 张图已加入待上架" + ("（原图地址，上架时 WB 直接取图）" if by_url else ""))
     job.finish(f"已加入待上架：{job.done} 个颜色")

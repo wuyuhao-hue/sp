@@ -482,7 +482,7 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
     color_required = any(c.get("required") and c["name"].strip().lower() == "цвет" for c in charc_meta or [])
     for v in variants:
         st = next((x for x in p.get("sets") or [] if x["id"] == v["sid"]), None)
-        imgs = [i for i in (st or {}).get("images", []) if i.get("file") and (pdir / i["file"]).exists()]
+        imgs = [i for i in (st or {}).get("images", []) if store.img_ok(p["id"], i)]
         if not imgs:
             errors.append(f"款式「{v['sku']}」没有可用的图片")
         if not v.get("color"):

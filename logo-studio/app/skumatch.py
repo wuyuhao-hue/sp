@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from . import same, store
 from .scraper import parse_offer
@@ -134,10 +135,29 @@ def query_b64(src: str) -> str:
         return ""
 
 
+WORKERS = 8
+
+
+def _prefetch(srcs: list[str]) -> None:
+    """并行下载图片并提取特征（之后的比对直接用缓存）。"""
+    srcs = [s for s in dict.fromkeys(srcs) if s]
+    if not srcs:
+        return
+    def f(s):
+        try:
+            same.features(s)
+        except Exception:  # noqa: BLE001
+            pass
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        list(ex.map(f, srcs))
+
+
 def rank_candidates(unit: dict, cands: list[dict]) -> list[dict]:
     """卡片级（候选商品主图）只看几何：卡片图可能是同款的另一个颜色，颜色在详情闸门里再核。"""
-    out = []
-    for i, c in enumerate(cands[:20]):
+    _prefetch(unit["images"])
+
+    def one(i_c):
+        i, c = i_c
         best = {"inliers": 0, "ok": False}
         for q in unit["images"]:
             try:
@@ -146,7 +166,9 @@ def rank_candidates(unit: dict, cands: list[dict]) -> list[dict]:
                 continue
             if (r["ok"], r["inliers"]) > (best.get("ok", False), best["inliers"]):
                 best = r
-        out.append({**c, "rank": i, "card_ok": bool(best.get("ok")), "card_inliers": best["inliers"]})
+        return {**c, "rank": i, "card_ok": bool(best.get("ok")), "card_inliers": best["inliers"]}
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:   # 20 个候选并行下载、并行比对
+        out = list(ex.map(one, enumerate(cands[:20])))
     out.sort(key=lambda c: (not c["card_ok"], -c["card_inliers"], c["rank"]))
     return out
 
@@ -192,6 +214,9 @@ def gate(unit: dict, offer: dict) -> dict | None:
     best, why = None, []
     card_ok = any(c["offer_id"] == offer["offer_id"] and c.get("card_ok") for c in unit.get("cands") or [])
     nq = len(unit["images"])
+    _prefetch(unit["images"] + [t for col in offer["colors"] if col.get("image") and not
+                                (col.get("name") and label_conflict(unit["name"], col["name"]))
+                                for t in (col.get("gallery") or [col["image"]])])
     for col in offer["colors"]:
         if not col.get("image"):
             continue

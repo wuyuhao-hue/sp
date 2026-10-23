@@ -51,8 +51,13 @@ createApp({
       return all.filter(s => !this.skuView || s.sku === this.skuView).sort((a, b) => b.created - a.created);
     },
     workMode() { return this.settings.work_mode || 'logo'; },
+    pageStale() {
+      // 采集助手更新过，但本页面还是旧连接（Chrome 不会给已经打开的页面换新脚本）：需要按 F5 刷新
+      const v = document.documentElement.getAttribute('data-logo-studio-ext');
+      return !!(this.ext.connected && this.ext.version && v && v !== this.ext.version);
+    },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 8, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 9, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -368,10 +373,12 @@ createApp({
     },
     sourceName(s) { return { '1688': '1688', wb: 'WB', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
     iconOk(s) { return ['1688', 'pdd', 'ozon', 'wb', 'aiprice'].includes(s) && !this.iconBad[s]; },
+    reloadPage() { window.location.reload(); },
     startLogin(k) {
       this.loginBusy[k] = true;
       window.postMessage({ logoStudio: 'login', platform: k }, '*');
-      this.toast('已弹出登录窗口：登录成功后会自动关闭');
+      api(`/api/login/${k}`, { body: {} }).catch(() => {});   // 再通过工作台转一次，页面和采集助手的连接断了也能弹出来
+      this.toast('正在弹出登录窗口（最多十几秒）：登录成功后会自动关闭');
       setTimeout(() => { this.loginBusy[k] = false; }, 15 * 60 * 1000);
     },
     async skipLogin(k) {

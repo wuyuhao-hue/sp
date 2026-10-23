@@ -264,3 +264,20 @@ def delete_logo(lid: str) -> None:
     import shutil
 
     shutil.rmtree(logo_dir(lid), ignore_errors=True)
+
+
+# ---------- 套图里的图片：本地文件，或货源原图地址（采集上架的 Ozon / WB 原图不下载，上架时让 WB 直接按地址取图） ----------
+def img_ok(pid: str, im: dict) -> bool:
+    return bool(im.get("url")) or bool(im.get("file") and (product_dir(pid) / im["file"]).exists())
+
+
+def img_url(pid: str, im: dict) -> str:
+    """界面上显示用的地址。"""
+    if im.get("file"):
+        return f"/data/products/{pid}/{im['file']}?v={im.get('v', 0)}"
+    return im.get("url") or ""
+
+
+def img_src(pid: str, im: dict) -> str:
+    """程序读取用的地址（ai.load_image 认识 local: 前缀和网址）。"""
+    return f"local:{pid}/{im['file']}" if im.get("file") else (im.get("url") or "")

@@ -284,10 +284,16 @@ async function pageOzon() {
       } catch (e) { /* 换一种写法 */ }
     }
   };
-  for (let round = 0; round < 60; round++) {
+  let noGain = 0;
+  for (let round = 0; round < 80; round++) {
     const toProbe = [...known.keys()].filter(k => !probed.has(k)).slice(0, 4);
-    if (toProbe.length && diag.modal < 40) { await Promise.allSettled(toProbe.map(probe)); continue; }
-    const toFetch = [...known.keys()].filter(k => !pages.has(k)).slice(0, 6);
+    if (toProbe.length && diag.modal < 40 && noGain < 3) {   // 连续 3 批弹窗都没发现新规格：集合已经稳定，不再探测（省时间）
+      const before = known.size;
+      await Promise.allSettled(toProbe.map(probe));
+      noGain = known.size > before ? 0 : noGain + 1;
+      continue;
+    }
+    const toFetch = [...known.keys()].filter(k => !pages.has(k)).slice(0, 10);
     if (!toFetch.length || pages.size >= 400) break;
     await Promise.allSettled(toFetch.map(async sku => {
       try {
@@ -296,7 +302,7 @@ async function pageOzon() {
         aspectsOf(j);
       } catch (e) { pages.set(sku, null); diag.failed++; }
     }));
-    await sleep(300 + Math.random() * 400);
+    await sleep(150 + Math.random() * 250);
   }
   diag.discovered = known.size;
   try {   // 给开发者排查漏规格：入口页规格区的原始数据 + 第一次弹窗返回（都很小）
@@ -796,8 +802,44 @@ function debugSave(name, html) {
     body: JSON.stringify({ name, html: String(html || '').slice(0, 400000) }) }).catch(() => {});
 }
 
+// Ozon 店铺（ozon.ru/seller/…）：按 Ozon 自己的页面数据接口一页页读商品编号
+async function pageOzonShop(maxPages) {
+  const get = async path => {
+    const r = await fetch('/api/entrypoint-api.bx/page/json/v2?url=' + encodeURIComponent(path), { credentials: 'include' });
+    if (!r.ok) throw new Error('Ozon 接口返回 ' + r.status);
+    return r.json();
+  };
+  const ids = [];
+  let path = location.pathname + location.search, pages = 0;
+  while (path && pages < maxPages) {
+    pages++;
+    let j;
+    try { j = await get(path); } catch (e) { break; }
+    const txt = JSON.stringify(j.widgetStates || {});
+    let added = 0;
+    for (const m of txt.matchAll(/\/product\/[\w%-]*?-?(\d{6,})\//g)) if (!ids.includes(m[1])) { ids.push(m[1]); added++; }
+    if (!added) break;
+    path = j.nextPage || '';
+    if (!path) {   // 没给下一页地址：自己拼 page=N+1
+      const u = new URL(location.pathname, location.origin);
+      u.searchParams.set('page', String(pages + 1));
+      path = u.pathname + u.search;
+    }
+    await new Promise(r => setTimeout(r, 400 + Math.random() * 600));
+  }
+  return { ids, pages };
+}
+
 async function doShop(task, delay) {
   const { win, tab } = await workerTab();
+  if (task.platform === 'ozon' || /ozon\./.test(task.url)) {
+    await navigate(tab, task.url.trim().startsWith('http') ? task.url.trim() : 'https://' + task.url.trim());
+    await waitUnblocked(win, tab);
+    const r = await exec(tab, pageOzonShop, [task.max_pages || 5], 240000);
+    elog('Ozon 店铺商品列表', { url: task.url, pages: r.pages, count: r.ids.length });
+    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids } });
+    return;
+  }
   let base = task.url.trim();
   if (!base.startsWith('http')) base = 'https://' + base;
   const origin = base.match(/^https?:\/\/[^/]+/)[0];
@@ -865,6 +907,10 @@ async function loop() {
         } else if (task.kind === 'imgsearch') {
           await doImgSearch(task);
           await sleep(rand(400, 1000)); // AiPrice 是接口请求，不用像翻 1688 页面那样停很久
+        } else if (task.kind === 'login') {
+          const already = LOGINS[task.platform] ? await isLogged(task.platform) : false;
+          doLogin(task.platform);   // 不等它（登录可能要好几分钟），登录窗口自己检测、自己关
+          await post('/api/ext/result', { task_id: task.id, ok: true, data: { already } });
         } else if (task.kind === 'shop') await doShop(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
         else throw new Error('采集助手不认识这个任务（' + task.kind + '），请更新采集助手');
@@ -902,6 +948,7 @@ async function reportLogins() {
 }
 let loginOpen = {};
 async function doLogin(p) {
+  elog('收到登录请求', { platform: p, open: !!loginOpen[p] });
   if (!LOGINS[p] || loginOpen[p]) return;
   if (await isLogged(p)) { await reportLogins(); return; }
   loginOpen[p] = true;

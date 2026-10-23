@@ -13,18 +13,20 @@
   <!-- 顶栏 -->
   <header class="topbar">
     <div class="brand"><div class="brand-mark"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20.4 14.5 16 10 4 20"/><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/></svg></div>AI 套图工作台</div>
-    <nav class="nav">
-      <button :class="{on: tab==='products'}" @click="tab='products'">商品</button>
-      <button :class="{on: tab==='queue'}" @click="tab='queue'">待上架<span class="count" v-if="queueCount">{{ queueCount }}</span></button>
-      <button :class="{on: tab==='logos'}" @click="tab='logos'">Logo 库</button>
-      <button :class="{on: tab==='settings'}" @click="tab='settings'">设置</button>
-    </nav>
-    <div class="mode-switch" title="采集印标：AI 生成套图并印你的 logo；采集上架：1688 / WB / 拼多多 / Ozon 采集后用原图直接上架">
-      <button :class="{on: workMode==='logo'}" @click="setMode('logo')"><i class="dot-m"></i>采集印标</button>
-      <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
+    <!-- 大板块：采集印标 / 采集上架（两个板块的商品、待上架互相独立） -->
+    <div class="boards">
+      <button class="board" :class="{on: workMode==='logo'}" @click="setMode('logo')">
+        <span class="board-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.5 5 5.5.8-4 3.9.9 5.5L12 15.6 7.1 18.2l.9-5.5-4-3.9 5.5-.8z"/></svg></span>
+        <span class="board-t"><b>采集印标</b><small>1688 采集 · AI 套图印 logo</small></span>
+      </button>
+      <button class="board" :class="{on: workMode==='direct'}" @click="setMode('direct')">
+        <span class="board-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m16 15 3 3 3-3M19 18V10"/></svg></span>
+        <span class="board-t"><b>采集上架</b><small>1688 / WB / 拼多多 / Ozon 原图上架</small></span>
+      </button>
     </div>
     <div class="spacer"></div>
-    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.8.0（登录检测、WB / Ozon 采集、找同款需要）</span>
+ <span class="pill warn-pill" v-if="pageStale" @click="reloadPage" style="cursor:pointer" title="点一下刷新">⚠ 采集助手已更新，请按 F5 刷新本页面</span>
+    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.9.0（登录、Ozon 店铺、找同款需要）</span>
     <div class="login-wrap" v-if="needLogin.length" @mouseleave="showLogin=false">
       <button class="pill login-pill" @click="showLogin=!showLogin"><i class="dot warn"></i>需要登录 {{ needLogin.length }} 个平台</button>
       <transition name="pop">
@@ -46,7 +48,20 @@
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
     <a class="btn sm ghost" href="/api/logs/export" download title="出问题时导出运行日志发给开发者">导出日志</a>
+    <button class="icon-btn" :class="{on: tab==='settings'}" @click="tab='settings'" title="设置（两个板块共用：中转站、店铺令牌、模型…）">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
   </header>
+  <!-- 板块内的页面 -->
+  <div class="subbar" :class="workMode">
+    <nav class="subnav">
+      <button :class="{on: tab==='products'}" @click="tab='products'">商品</button>
+      <button :class="{on: tab==='queue'}" @click="tab='queue'">待上架<span class="count" v-if="queueCount">{{ queueCount }}</span></button>
+      <button v-if="workMode==='logo'" :class="{on: tab==='logos'}" @click="tab='logos'">Logo 库</button>
+    </nav>
+    <span class="subbar-tip">{{ workMode === 'logo' ? '采集 1688 商品 → AI 生成整套图并印上你的 logo → 待上架 → 上架 WB' : '采集 1688 / WB / 拼多多 / Ozon → Ozon、WB 找 1688 同款 → 待上架（原图）→ 上架 WB' }}</span>
+    <span class="subbar-set" v-if="tab==='settings'">设置（两个板块共用）</span>
+  </div>
 
   <!-- ================= 商品 ================= -->
   <main class="workspace" :class="{direct: workMode==='direct'}" v-if="tab==='products'">

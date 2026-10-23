@@ -240,8 +240,8 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
             src = sku_img.get(v["sku"]) or (st_by.get(v["sid"]) or {}).get("sku_image")
             if not src:
                 st = st_by.get(v["sid"]) or {}
-                f = next((im["file"] for im in st.get("images") or [] if im.get("file")), None)
-                src = f"local:{p['id']}/{f}" if f else ""
+                im0 = next((im for im in st.get("images") or [] if im.get("file") or im.get("url")), None)
+                src = store.img_src(p["id"], im0) if im0 else ""
             try:
                 vcontent.append({"type": "image_url", "image_url": {"url": _img_b64(src)}})
             except Exception:  # noqa: BLE001

@@ -26,14 +26,15 @@ REPROJ = 4.0
 
 _lock = threading.Lock()
 _cache: OrderedDict[str, tuple] = OrderedDict()
-_sift = None
+_tl = threading.local()
 
 
 def _detector():
-    global _sift
-    if _sift is None:
-        _sift = cv2.SIFT_create(nfeatures=N_FEATURES)
-    return _sift
+    """每个线程一个 SIFT（OpenCV 计算时不占 Python 全局锁，多线程能真正并行）。"""
+    d = getattr(_tl, "sift", None)
+    if d is None:
+        d = _tl.sift = cv2.SIFT_create(nfeatures=N_FEATURES)
+    return d
 
 
 def _prepare(src: str) -> tuple:
@@ -50,8 +51,7 @@ def _prepare(src: str) -> tuple:
     if f != 1.0:
         bgr = cv2.resize(bgr, (round(w * f), round(h * f)), interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_CUBIC)
     gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-    with _lock:
-        kp, desc = _detector().detectAndCompute(gray, None)
+    kp, desc = _detector().detectAndCompute(gray, None)
     pts = np.float32([k.pt for k in kp]) if kp else np.zeros((0, 2), np.float32)
     return pts, desc, bgr
 
