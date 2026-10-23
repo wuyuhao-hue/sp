@@ -186,7 +186,7 @@ SWAP_PROMPT = (
 )
 
 LANG_NAME = {"ru": "Russian", "cn": "Chinese", "en": "English"}
-MAX_MARKER_TRIES = 2
+MAX_MARKER_TRIES = 1  # 占位块没放好时不再整张重生成，直接改用 AI 画 logo（每张印标图最多 2 次生图）
 
 pool = ThreadPoolExecutor(max_workers=8)
 
@@ -409,8 +409,8 @@ def _ai_image(p: dict, st: dict, img: dict, logo: dict | None, job) -> dict:
                 mask = mk.pop("mask")
                 return {"base": remove_marker(out, mask), "marked": out, "place": mk, "note": ""}
             if job:
-                job.note(f"{st['sku']}：AI 没放好 logo 占位块，重试…")
-        note = "AI 两次都没放好占位块，这张的 logo 由 AI 直接绘制，可能和原图有差异"
+                job.note(f"{st['sku']}：AI 没放好 logo 占位块，改为让 AI 直接画 logo（多 1 次生图）")
+        note = "AI 没放好 logo 占位块，这张的 logo 由 AI 直接绘制，可能和原图有差异"
     use_logo = logo if want_logo else None
     if use_logo:
         refs.append(_logo_image(use_logo))
@@ -424,6 +424,7 @@ def _gen_one(pid: str, sid: str, idx: int, job) -> None:
     st = next(x for x in p["sets"] if x["id"] == sid)
     img = dict(st["images"][idx])
     logo = store.get_logo(st["logo_id"]) if st.get("logo_id") else None
+    ai.bind_job(job)
     _update_image(pid, sid, idx, status="running", error="")
     try:
         d = store.product_dir(pid)
@@ -494,6 +495,13 @@ def _finish(tasks: list[tuple[str, str, int]], job) -> None:
     failed = sum(1 for pid, sid, i in tasks
                  if next(x for x in store.get_product(pid)["sets"] if x["id"] == sid)["images"][i]["status"] == "failed")
     job.finish(f"完成：成功 {len(tasks) - failed} 张" + (f"，失败 {failed} 张（可单张重试）" if failed else ""))
+    job.note(calls_text(job))
+
+
+def calls_text(job) -> str:
+    c = job.calls
+    return (f"本次共请求中转站 {c['total']} 次：生图 {c.get('image', 0)} 次、文字 {c.get('text', 0)} 次"
+            + (f"（其中失败/超时 {c['failed']} 次）" if c["failed"] else ""))
 
 
 def generate(pid: str, sku_names: list[str], logo_id: str | None, job, style: str | None = None,
@@ -567,8 +575,9 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job, style: st
         ocr_thread = threading.Thread(target=ocr, daemon=True)
         ocr_thread.start()
 
+    ai.bind_job(job)
     if s.get("text_model") and not (p.get("ai") or {}).get("description_en"):
-        job.note("AI 正在理解商品…")
+        job.note("AI 正在理解商品（1 次文字请求）…")
         try:
             info = ensure_analysis(store.get_product(pid))
             store.update_product(pid, lambda x: x.setdefault("ai", {}).update(
@@ -576,7 +585,10 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job, style: st
             fill_defaults(pid)
         except Exception as e:  # noqa: BLE001
             job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
-    job.note(f"开始生成 {len(ai_tasks)} 张 AI 图…")
+    n_logo = sum(1 for pid_, sid_, i in ai_tasks
+                 for st_ in [next(x for x in store.get_product(pid_)["sets"] if x["id"] == sid_)] if st_["images"][i]["logo"])
+    job.note(f"开始生成 {len(ai_tasks)} 张 AI 图：预计生图请求 {len(ai_tasks) + n_logo} 次"
+             f"（{len(ai_tasks)} 张底图 + {n_logo} 次胸口印标）")
     _run(ai_tasks, job, finish=False)
     if ocr_thread:
         ocr_thread.join()

@@ -9,6 +9,7 @@ import io
 import json
 import re
 import threading
+import time
 from collections import OrderedDict
 
 import httpx
@@ -16,6 +17,77 @@ from PIL import Image
 
 from . import store
 from .scraper import UA
+
+# ---------------- 请求记账 ----------------
+# 每一次发给中转站的请求都记一笔：data/ai_calls.jsonl（时间、用途、接口、状态、耗时），并计入当前任务。
+LEDGER = store.DATA / "ai_calls.jsonl"
+_tl = threading.local()
+_ledger_lock = threading.Lock()
+
+
+def bind_job(job) -> None:
+    """当前线程发出的中转站请求计入这个任务（job.calls）。"""
+    _tl.job = job
+
+
+def _kind(request: httpx.Request) -> str:
+    path = request.url.path
+    if path.endswith("/images/edits") or path.endswith("/images/generations"):
+        return "image"
+    if path.endswith("/chat/completions"):
+        s = store.get_settings()
+        try:
+            model = json.loads(request.content or b"{}").get("model")
+        except ValueError:
+            model = None
+        return "image" if model and model == s.get("image_model") and model != s.get("text_model") else "text"
+    return "other"
+
+
+def _record(request: httpx.Request, status, ms: int) -> None:
+    kind = _kind(request)
+    row = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, "path": request.url.path, "status": status, "ms": ms}
+    with _ledger_lock:
+        with open(LEDGER, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    job = getattr(_tl, "job", None)
+    if job is not None:
+        c = job.calls
+        c["total"] += 1
+        c[kind] = c.get(kind, 0) + 1
+        if status != 200 and status != 201:
+            c["failed"] += 1
+
+
+class _LoggedClient(httpx.Client):
+    def send(self, request, **kw):
+        t0 = time.time()
+        try:
+            r = super().send(request, **kw)
+        except httpx.TimeoutException as e:
+            _record(request, "timeout", int((time.time() - t0) * 1000))
+            raise RuntimeError(f"中转站 {int(time.time() - t0)} 秒没有返回（超时）。这次请求可能仍被中转站计费，"
+                               "程序不会自动重发，需要时请手动重试这张") from e
+        except httpx.TransportError as e:
+            _record(request, "network", int((time.time() - t0) * 1000))
+            raise RuntimeError(f"连接中转站失败：{type(e).__name__}") from e
+        _record(request, r.status_code, int((time.time() - t0) * 1000))
+        return r
+
+
+def calls_summary(limit: int = 40) -> dict:
+    today = time.strftime("%Y-%m-%d")
+    rows = []
+    if LEDGER.exists():
+        with open(LEDGER, encoding="utf-8") as f:
+            rows = [json.loads(x) for x in f.readlines()[-5000:] if x.strip()]
+    td = [r for r in rows if r["t"].startswith(today)]
+    return {"today": {"total": len(td), "image": sum(r["kind"] == "image" for r in td),
+                      "image_ok": sum(r["kind"] == "image" and r["status"] == 200 for r in td),
+                      "text": sum(r["kind"] == "text" for r in td),
+                      "failed": sum(r["status"] not in (200, 201) for r in td)},
+            "recent": rows[-limit:][::-1]}
+
 
 _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_lock = threading.Lock()
@@ -25,7 +97,7 @@ def _client(timeout: float = 300) -> httpx.Client:
     s = store.get_settings()
     if not s.get("api_base") or not s.get("api_key"):
         raise RuntimeError("请先在「设置」里填写中转站地址和令牌")
-    return httpx.Client(base_url=s["api_base"].rstrip("/"), timeout=timeout,
+    return _LoggedClient(base_url=s["api_base"].rstrip("/"), timeout=timeout,
                         headers={"Authorization": f"Bearer {s['api_key']}"})
 
 
@@ -101,32 +173,50 @@ def _fetch_result(raw_url_or_b64: str) -> bytes:
     return r.content
 
 
+FORMAT_ERRORS = (400, 404, 405, 415, 422)  # 参数/格式不对：中转站直接拒绝，不会生成图片，也不计费
+
+
 def _via_edits(c: httpx.Client, s: dict, images: list[Image.Image], prompt: str, size: str | None = None,
                fidelity: bool = False) -> bytes:
-    """标准图片编辑接口：multipart 上传多张参考图。"""
+    """标准图片编辑接口：multipart 上传多张参考图。
+
+    只有中转站「直接拒绝参数」（400 等，不会生图、不计费）时才换参数再发；探测结果记进设置（image_caps），
+    以后每次直接用能用的参数，不再重复试。5xx / 超时 / 网络错误一律不重发——这种情况中转站可能已经在生图
+    并计费，自动重发就会多扣一次。"""
+    caps = dict(s.get("image_caps") or {})
     data = {"model": s["image_model"], "prompt": prompt, "n": "1"}
-    if size or s.get("image_size"):
+    if (size or s.get("image_size")) and caps.get("size", True):
         data["size"] = size or s["image_size"]
-    if fidelity:
+    if fidelity and caps.get("fidelity", True):
         data["input_fidelity"] = "high"  # 尽量保留输入图细节（logo、文字）
     if s.get("image_quality"):
         data["quality"] = s["image_quality"]
     blobs = [(f"ref{i}.png", _png(im), "image/png") for i, im in enumerate(images)]
+    fields = [caps["field"]] if caps.get("field") else ["image[]", "image"]  # 官方多图字段是 image[]；部分中转站只认 image
     r = None
-    for field in ("image[]", "image"):  # 官方多图字段是 image[]；部分中转站只认 image
-        for attempt in range(3):
+    for field in fields:
+        for _ in range(3):
             r = c.post("/images/edits", data=data, files=[(field, b) for b in blobs])
-            if r.status_code == 400 and "input_fidelity" in r.text and "input_fidelity" in data:
-                data.pop("input_fidelity")  # 中转站不支持这个参数
+            low = r.text.lower() if r.status_code == 400 else ""
+            if "input_fidelity" in low and "input_fidelity" in data:
+                data.pop("input_fidelity")  # 中转站不支持这个参数：以后都不带
+                caps["fidelity"] = False
                 continue
-            if r.status_code == 400 and "size" in r.text.lower() and "size" in data and attempt < 2:
+            if "size" in low and "size" in data:
                 data.pop("size")  # 不支持竖版尺寸：用默认尺寸，之后裁成 3:4
+                caps["size"] = False
                 continue
             break
-        if r.status_code < 400 or r.status_code in (401, 403, 429):
-            break
+        if r.status_code not in FORMAT_ERRORS:
+            break  # 成功，或者是不能重发的错误（5xx、401、429…）
+    if r.status_code < 400:
+        caps["field"] = field
+    if caps != (s.get("image_caps") or {}):
+        store.save_settings({"image_caps": caps})
     if r.status_code >= 400:
-        raise _error(r)
+        err = _error(r)
+        err.status = r.status_code
+        raise err
     item = (r.json().get("data") or [{}])[0]
     if item.get("b64_json"):
         return base64.b64decode(item["b64_json"])
@@ -164,27 +254,34 @@ def _via_chat(c: httpx.Client, s: dict, images: list[Image.Image], prompt: str) 
 
 
 def edit_images(images: list[Image.Image], prompt: str, size: str | None = None, fidelity: bool = False) -> Image.Image:
-    """多张参考图 + 文字要求 → 一张新图。自动适配中转站支持的方式，并记住能用的那种。"""
+    """多张参考图 + 文字要求 → 一张新图。
+
+    第一次使用时自动判断中转站支持「图片编辑接口」还是「对话接口」，记住以后只用那一种。
+    只有图片编辑接口「不存在/不支持」（404/405/415 或格式错误）时才改用对话接口；
+    中转站出错（5xx）、超时、限流时不换接口重发，避免一张图被生成、计费两次。"""
     s = store.get_settings()
     mode = s.get("image_api") or "auto"
-    order = {"edits": ["edits"], "chat": ["chat"]}.get(mode, [s.get("image_api_detected") or "edits"])
-    if mode == "auto":
-        order += [m for m in ("edits", "chat") if m not in order]
-    errors = []
+    if mode == "chat" or (mode == "auto" and s.get("image_api_detected") == "chat"):
+        with _client() as c:
+            raw = _via_chat(c, s, images, prompt)
+        return Image.open(io.BytesIO(raw)).convert("RGB")
     with _client() as c:
-        for m in order:
+        try:
+            raw = _via_edits(c, s, images, prompt, size, fidelity)
+        except RuntimeError as e:
+            status = getattr(e, "status", None)
+            can_switch = mode == "auto" and not s.get("image_api_detected") and status in (404, 405, 415)
+            if not can_switch:
+                raise
             try:
-                raw = _via_edits(c, s, images, prompt, size, fidelity) if m == "edits" else _via_chat(c, s, images, prompt)
-            except RuntimeError as e:
-                errors.append(f"[{'图片编辑接口' if m == 'edits' else '对话接口'}] {e}")
-                # 鉴权/余额/限流问题换接口也没用
-                if any(code in str(e) for code in ("401", "403", "429", "余额", "quota")):
-                    break
-                continue
-            if mode == "auto" and s.get("image_api_detected") != m:
-                store.save_settings({"image_api_detected": m})
+                raw = _via_chat(c, s, images, prompt)
+            except RuntimeError as e2:
+                raise RuntimeError(f"[图片编辑接口] {e}；[对话接口] {e2}") from e2
+            store.save_settings({"image_api_detected": "chat"})
             return Image.open(io.BytesIO(raw)).convert("RGB")
-    raise RuntimeError("；".join(errors))
+    if mode == "auto" and s.get("image_api_detected") != "edits":
+        store.save_settings({"image_api_detected": "edits"})
+    return Image.open(io.BytesIO(raw)).convert("RGB")
 
 
 def to_wb(im: Image.Image) -> Image.Image:

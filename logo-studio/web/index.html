@@ -625,6 +625,16 @@
             </select></div>
           <div class="field"><label>同时生成几张</label><input class="input" type="number" min="1" max="8" v-model.number="settings.concurrency"></div>
           <div class="full row"><button class="btn" @click="testApi">测试连接</button><span class="faint">{{ testMsg }}</span></div>
+          <div class="full note" v-if="aiCalls">
+            <div class="row between"><span><b>今天请求中转站 {{ aiCalls.today.total }} 次</b>：生图 {{ aiCalls.today.image }} 次（成功 {{ aiCalls.today.image_ok }}）、文字 {{ aiCalls.today.text }} 次<template v-if="aiCalls.today.failed">、失败/超时 {{ aiCalls.today.failed }} 次</template></span>
+              <span class="row"><button class="btn sm" @click="loadAiCalls">刷新</button><button class="btn sm" @click="showCalls = !showCalls">{{ showCalls ? '收起' : '最近记录' }}</button></span></div>
+            <div class="faint" style="margin-top:4px">每次发给中转站的请求都记在 data/ai_calls.jsonl。正常情况下一套 6 张图 = 6 次生图 + 每张印标图 1 次胸口印标（推荐模板只有首图印标，共 7 次），商品第一次生成时另加 1 次文字理解。程序不会在中转站出错/超时后自动重发生图。</div>
+            <table class="shot-table" v-if="showCalls" style="margin-top:8px">
+              <tr><th>时间</th><th>类型</th><th>接口</th><th>结果</th><th>耗时</th></tr>
+              <tr v-for="(r, i) in aiCalls.recent" :key="i"><td>{{ r.t.slice(5) }}</td><td>{{ {image: '生图', text: '文字', other: '其他'}[r.kind] }}</td><td>{{ r.path }}</td>
+                <td :class="r.status === 200 ? 'ok-text' : 'err-inline'">{{ r.status === 200 ? '成功' : r.status }}</td><td>{{ (r.ms / 1000).toFixed(1) }}s</td></tr>
+            </table>
+          </div>
           <datalist id="model-list"><option v-for="m in models" :key="m" :value="m"></option></datalist>
         </div>
       </div>
@@ -759,6 +769,7 @@
       </div>
       <div class="bar" v-if="j.total"><i :style="{width: (100*j.done/j.total)+'%'}"></i></div>
       <div class="log"><div v-for="(l, k) in j.log.slice(-5)" :key="k">{{ l }}</div></div>
+      <div class="faint" style="margin-top:4px" v-if="j.calls && j.calls.total">已请求中转站 {{ j.calls.total }} 次（生图 {{ j.calls.image || 0 }}<template v-if="j.calls.text">、文字 {{ j.calls.text }}</template><template v-if="j.calls.failed">，失败 {{ j.calls.failed }}</template>）</div>
       <div class="row" style="margin-top:8px" v-if="j.kind==='export' && j.status==='done'"><button class="btn sm" @click="openFolder(j.results[0])">打开文件夹</button></div>
     </div>
   </div>

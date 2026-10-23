@@ -38,6 +38,17 @@ def _logo_layer(logo_meta: dict, width: int, tone: str = "dark") -> Image.Image:
     return im.resize((width, h), Image.LANCZOS)
 
 
+def _contrast_tone(base: Image.Image, box: tuple[int, int, int, int]) -> str:
+    """按 logo 下面背景的实际亮度选黑/白（WCAG 对比度更高的那个）：亮背景用黑，暗背景用白。"""
+    import numpy as np
+
+    a = np.asarray(base.convert("RGB").crop(box), dtype=np.float32) / 255
+    lin = np.where(a <= 0.04045, a / 12.92, ((a + 0.055) / 1.055) ** 2.4)
+    lum = float((lin @ np.array([0.2126, 0.7152, 0.0722])).mean())
+    black, white = (lum + 0.05) / 0.05, 1.05 / (lum + 0.05)
+    return "dark" if black >= white else "light"
+
+
 def _swatch(src: str, d: int) -> Image.Image | None:
     """从 SKU 图中间偏上（一般是衣服胸口）取一块，做成圆形色块。"""
     try:
@@ -81,9 +92,12 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
     if kind in ("full", "full_back"):
         y = int(H * 0.035)
         if opts.get("overlay_logo", True) and logo_meta:
-            lg = _logo_layer(logo_meta, int(W * 0.40), th["logo"])
+            lg = _logo_layer(logo_meta, int(W * 0.40), "dark")
             if lg.height > H * 0.13:
                 lg = lg.resize((round(lg.width * H * 0.13 / lg.height), int(H * 0.13)), Image.LANCZOS)
+            tone = _contrast_tone(base, (int(W * 0.05), y, int(W * 0.05) + lg.width, y + lg.height))
+            if tone == "light":
+                lg = _logo_layer(logo_meta, lg.width, "light")
             top.alpha_composite(lg, (int(W * 0.05), y))
             y += lg.height + int(H * 0.03)
         pts = selling_points(product)

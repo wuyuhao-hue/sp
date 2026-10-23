@@ -111,6 +111,7 @@ DEFAULT_SETTINGS = {
     "image_quality": "",       # 留空则不传，由中转站决定；可填 standard / hd / low / medium / high
     "image_api": "auto",       # auto 自动适配 / edits 图片编辑接口 / chat 对话接口
     "image_api_detected": "",
+    "image_caps": {},          # 中转站图片接口能力（自动探测后记住）：field / size / fidelity
     "image_size": "1024x1536",
     "concurrency": 3,
     "shot_count": 6,
@@ -177,7 +178,10 @@ def get_settings() -> dict:
 def save_settings(patch: dict) -> dict:
     with _lock:
         s = get_settings()
+        changed = any(k in patch and patch[k] != s.get(k) for k in ("api_base", "image_model", "image_api"))
         s.update({k: v for k, v in patch.items() if k in DEFAULT_SETTINGS})
+        if changed:  # 换了中转站/模型：重新探测接口能力
+            s["image_caps"], s["image_api_detected"] = {}, ""
         _write(SETTINGS_FILE, s)
         return s
 

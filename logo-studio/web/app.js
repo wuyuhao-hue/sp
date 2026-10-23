@@ -26,7 +26,7 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, dir: { colors: [], countries: [] },
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -103,7 +103,7 @@ createApp({
     },
   },
   watch: {
-    tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } },
+    tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } if (t === 'settings') this.loadAiCalls(); },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll()]);
@@ -598,6 +598,7 @@ createApp({
       this.testMsg = r.message;
       this.models = r.models || [];
     },
+    async loadAiCalls() { this.aiCalls = await api('/api/ai-calls').catch(() => null); },
     async addStyleRef(e) {
       const f = e.target.files[0];
       if (!f) return;

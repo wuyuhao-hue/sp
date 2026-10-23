@@ -20,6 +20,7 @@ class Job:
         self.log: list[str] = []
         self.results: list[str] = []
         self.cancelled = False
+        self.calls = {"total": 0, "image": 0, "text": 0, "failed": 0}  # 本任务发给中转站的请求数
         self.created = time.time()
         if register:  # 批量任务里的子任务不单独显示
             with _lock:
@@ -40,7 +41,7 @@ class Job:
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in
-                ("id", "kind", "title", "status", "total", "done", "log", "results", "created")}
+                ("id", "kind", "title", "status", "total", "done", "log", "results", "created", "calls")}
 
 
 def run_in_thread(job: Job, fn, *args) -> Job:

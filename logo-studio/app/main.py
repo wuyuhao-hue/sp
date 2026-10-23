@@ -997,6 +997,11 @@ def save_settings(patch: dict = Body(...)):
     return state()
 
 
+@app.get("/api/ai-calls")
+def ai_calls():
+    return ai.calls_summary()
+
+
 @app.post("/api/settings/test")
 def test_settings():
     s = store.get_settings()

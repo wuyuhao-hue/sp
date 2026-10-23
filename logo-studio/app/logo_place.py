@@ -25,7 +25,8 @@ COLOR_TEXT = {
 CROP_PROMPT = (
     "Image 1 is a close-up of a garment with a solid magenta placeholder rectangle on it. Image 2 is a brand logo. "
     "Replace the magenta rectangle with the logo from image 2 so that it looks like {style} on this exact fabric, filling "
-    "the rectangle's position, size and angle, following the fabric's folds, texture, lighting and shadows. "
+    "the rectangle's position and size, perfectly level (horizontal, not rotated), with the fabric's texture, lighting and "
+    "shadows. "
     "Reproduce the logo EXACTLY: identical shape, letters, spelling, spacing, proportions and colors as in image 2 — it "
     "must be crisp and clearly readable, not faded or washed out. Only the logo graphic itself: no label, patch, box, "
     "frame, outline or background shape around it{patch}. Remove every trace of magenta. Everything outside the rectangle "
@@ -39,11 +40,32 @@ def marker_prompt(aspect: float) -> str:
     return (
         "LOGO PLACEHOLDER: on the wearer's left chest (the right side of the image when the garment faces the viewer), "
         "where a premium brand chest logo would sit, place a flat rectangle filled with one solid pure magenta color "
-        f"(#FF00FF), about 9.5 cm wide and {9.5 / max(aspect, 0.2):.1f} cm tall (width:height = {aspect:.2f}:1), lying on the "
-        "fabric and following its angle and perspective. It is only a placeholder that will be replaced later: no text, no "
+        f"(#FF00FF), about 9.5 cm wide and {9.5 / max(aspect, 0.2):.1f} cm tall (width:height = {aspect:.2f}:1), lying flat on "
+        "the chest panel and PERFECTLY LEVEL: its top and bottom edges horizontal, parallel to the hem — never tilted to "
+        "follow quilting, seams or stripes. Keep it clear of the zipper/placket and pockets. It is only a placeholder that will be replaced later: no text, no "
         "pattern, no gradient, no border inside it, and do not use magenta anywhere else in the image. Exactly one "
         "placeholder; nothing on the back or sleeves."
     )
+
+
+LEVEL_TOL = 3.0  # 胸标应该是水平的：占位块倾斜超过 3° 视为 AI 跟着绗缝/条纹画歪了，按水平处理
+
+
+def level_angle(a: float) -> float:
+    return a if abs(a) <= LEVEL_TOL else 0.0
+
+
+def straighten_marker(im: Image.Image) -> Image.Image:
+    """占位块被画歪时：先用面料补掉歪的占位块，再在同一中心画一块同样大小的水平占位块。"""
+    m = find_marker(im)
+    if not m or abs(m["angle"]) <= LEVEL_TOL:
+        return im
+    W, H = im.size
+    out = remove_marker(im, m["mask"])
+    cx, cy, w, h = m["x"] * W, m["y"] * H, m["w"] * W, m["h"] * H
+    a = np.asarray(out).copy()
+    cv2.rectangle(a, (int(cx - w / 2), int(cy - h / 2)), (int(cx + w / 2), int(cy + h / 2)), MARKER_RGB, -1)
+    return Image.fromarray(a)
 
 
 def region_luminance(rgb: np.ndarray, x: float, y: float, w: float) -> float:
@@ -111,7 +133,7 @@ def apply_logo(base: Image.Image, place: dict, logo_meta: dict) -> Image.Image:
     mode = logo_meta.get("color_mode") or "auto"
     variant = pick_variant(logo, None, None, mode, region_luminance(rgb, place["x"], place["y"], w))
     style = {"embroidery": "embroidery"}.get(logo_meta.get("style"), "print")
-    return compose(base, variant, place["x"], place["y"], w, angle=-place.get("angle", 0.0), style=style)
+    return compose(base, variant, place["x"], place["y"], w, angle=-level_angle(place.get("angle", 0.0)), style=style)
 
 
 def crop_box(place: dict, W: int, H: int) -> tuple[int, int, int, int]:
@@ -130,7 +152,7 @@ def ai_crop_logo(marked: Image.Image, place: dict, logo_meta: dict) -> Image.Ima
 
     W, H = marked.size
     box = crop_box(place, W, H)
-    crop = marked.crop(box)
+    crop = straighten_marker(marked.crop(box))  # AI 画歪的占位块先摆正，再交给 AI 印标
     side = box[2] - box[0]
     logo = Image.open(store.logo_dir(logo_meta["id"]) / logo_meta["logo"]).convert("RGBA")
     # 先按胸口面料的深浅决定 logo 颜色（黑或白），保证看得清
