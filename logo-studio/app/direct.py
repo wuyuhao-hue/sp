@@ -8,7 +8,7 @@ import time
 
 from . import jobs, store
 from .scraper import download_image
-from .sources import REFERER
+from .sources import MARKET, REFERER
 from .studio import sku_list
 
 MAX_IMAGES = 15
@@ -32,6 +32,17 @@ def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_det
     referer = REFERER.get(p.get("source") or "1688", "")
     main = list(main if main is not None else (p.get("main_images") or []))
     skus = [k for k in sku_list(p) if not sku_names or k["name"] in sku_names]
+    if p.get("source") in MARKET:
+        # Ozon / WB：每个颜色只用它自己的图库（混入共享主图会串色）；只有找到 1688 同款的规格才能上架
+        main = []
+        ok = {u["key"] for u in p.get("units") or [] if u["status"] == "matched"}
+        skipped = [k["name"] for k in skus if k["name"] not in ok and not (k["name"] == "默认" and "默认" in ok)]
+        if skipped:
+            job.note(f"跳过 {len(skipped)} 个还没找到 1688 同款的规格：{'、'.join(skipped[:6])}")
+        skus = [k for k in skus if k["name"] not in skipped]
+        if not skus:
+            job.fail("没有找到 1688 同款的规格，不能加入待上架（先在商品页点「找 1688 同款」）")
+            return
     job.total = len(skus)
     for sku in skus:
         urls = _images_for(p, sku, main, include_detail)

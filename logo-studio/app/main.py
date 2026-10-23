@@ -73,14 +73,15 @@ def _summary(p: dict) -> dict:
     }
 
 
-def _match_state(p: dict) -> str:
-    """Ozon/WB 商品的 1688 货源状态：none 没绑 / candidates 有候选待选 / auto 自动绑定待确认 / bound 已确认。"""
+def _match_state(p: dict) -> dict | None:
+    """Ozon/WB 商品找 1688 同款的进度：{state: none 没匹配 / running 匹配中 / done 已完成, matched, none, error, total}。"""
     if p.get("source") not in sources.MARKET:
-        return ""
-    m = p.get("match")
-    if m:
-        return "bound" if m.get("confirmed") else ("auto" if m.get("auto") else "unconfirmed")
-    return "candidates" if p.get("match_candidates") else "none"
+        return None
+    from . import skumatch
+
+    c = skumatch.summary(p)
+    state = "none" if not c["total"] else "running" if c["running"] else "done"
+    return {"state": state, **c}
 
 
 def _lifecycle(p: dict) -> dict:
@@ -382,6 +383,8 @@ def direct_to_queue(pid: str, skus: list[str] = Body(default_factory=list), main
     p = _product_or_404(pid)
     if (p.get("mode") or "logo") != "direct":
         raise HTTPException(400, "这个商品在「采集印标」模式里，请生成套图后移入待上架")
+    if p.get("source") in sources.MARKET and not any(u["status"] == "matched" for u in p.get("units") or []):
+        raise HTTPException(400, "还没有找到 1688 同款的规格：Ozon / WB 商品要先「找 1688 同款」，只有匹配成功的规格能加入待上架")
     job = jobs.Job("direct", f"加入待上架：{(p.get('title') or '')[:20]}")
     jobs.run_in_thread(job, direct.to_queue, pid, skus, main, include_detail)
     return job.to_dict()
@@ -389,58 +392,50 @@ def direct_to_queue(pid: str, skus: list[str] = Body(default_factory=list), main
 
 @app.post("/api/products/{pid}/match")
 def match_bind(pid: str, url: str = Body(..., embed=True)):
-    """Ozon 商品绑定 1688 货源。"""
-    from . import match
-
-    _product_or_404(pid)
-    oid = match.offer_id_from(url)
-    if not oid:
-        raise HTTPException(400, "没认出 1688 商品链接（形如 https://detail.1688.com/offer/123456789012.html）")
-    return extbridge.enqueue_match(pid, oid).to_dict()
-
-
-@app.post("/api/products/{pid}/match/pick")
-def match_pick(pid: str, offer_id: str = Body(..., embed=True)):
-    """从自动找到的候选里选一个绑定。"""
-    _product_or_404(pid)
-    if not re.fullmatch(r"\d{8,15}", offer_id or ""):
-        raise HTTPException(400, "候选编号不对")
-    return extbridge.enqueue_match(pid, offer_id).to_dict()
-
-
-@app.post("/api/products/auto-match")
-def auto_match(ids: list[str] = Body(..., embed=True)):
-    """Ozon / WB 商品自动找 1688 同款（以图搜 + AI 比对，把握够就自动绑定）。"""
-    pids = [i for i in ids if (store.get_product(i) or {}).get("source") in sources.MARKET]
-    if not pids:
-        raise HTTPException(400, "选中的商品里没有 Ozon / WB 商品（1688、拼多多商品本身就有人民币价）")
-    return extbridge.start_auto_match(pids).to_dict()
-
-
-@app.post("/api/products/{pid}/match/check")
-def match_check(pid: str):
+    """手动给一个 1688 链接：还没匹配上的规格都用它核对一次（同样过图片 + 颜色 + 库存闸门，不用 AI）。"""
     from . import match
 
     p = _product_or_404(pid)
-    if not p.get("match"):
-        raise HTTPException(400, "还没绑定 1688 货源")
+    if p.get("source") not in sources.MARKET:
+        raise HTTPException(400, "只有 Ozon / WB 采集的商品需要找 1688 同款")
+    oid = match.offer_id_from(url)
+    if not oid:
+        raise HTTPException(400, "没认出 1688 商品链接（形如 https://detail.1688.com/offer/123456789012.html）")
+    return extbridge.start_sku_match([pid], link={pid: oid}).to_dict()
+
+
+@app.post("/api/products/auto-match")
+def auto_match(ids: list[str] = Body(..., embed=True), rematch: bool = Body(False, embed=True)):
+    """Ozon / WB 商品逐规格找 1688 同款（以图搜 + 本地图片核验 + 1688 规格闸门，不用 AI）。"""
+    pids = [i for i in ids if (store.get_product(i) or {}).get("source") in sources.MARKET]
+    if not pids:
+        raise HTTPException(400, "选中的商品里没有 Ozon / WB 商品（1688、拼多多商品本身就有人民币价）")
+    return extbridge.start_sku_match(pids, rematch).to_dict()
+
+
+@app.post("/api/products/{pid}/match/unit")
+def match_unit(pid: str, unit: str = Body(...), offer_id: str | None = Body(None), sku_name: str | None = Body(None)):
+    """手动改判一个规格：指定 1688 规格（从已读过的 1688 商品里选），或 offer_id 为空 = 设为无同款（删除这个规格）。"""
+    from . import skumatch
+
+    p = _product_or_404(pid)
+    if (p.get("match_wait") or {}).get("kind"):
+        raise HTTPException(400, "这个商品还在匹配中，请等它结束再改")
     try:
-        v = match.ai_check(p, p["match"])
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, f"AI 核对失败：{e}") from e
-    return store.update_product(pid, lambda x: x["match"].update(ai=v))
-
-
-@app.post("/api/products/{pid}/match/confirm")
-def match_confirm(pid: str, confirmed: bool = Body(True, embed=True)):
-    _product_or_404(pid)
-    return store.update_product(pid, lambda x: x.get("match", {}).update(confirmed=confirmed))
+        return skumatch.manual_set(pid, unit, offer_id, sku_name)
+    except (ValueError, StopIteration) as e:
+        raise HTTPException(400, str(e) or "没有这个规格") from e
 
 
 @app.delete("/api/products/{pid}/match")
 def match_unbind(pid: str):
+    """清除匹配结果：删掉的规格全部恢复，进货价清空。"""
+    from . import skumatch
+
     def fn(x):
-        x.pop("match", None)
+        skumatch.restore_removed(x)
+        for k in ("match", "units", "match_offers", "match_wait", "match_candidates", "match_auto"):
+            x.pop(k, None)
         x["price_min"] = x["price_max"] = None
         for s in x.get("skus") or []:
             s["price"] = None
@@ -1002,7 +997,8 @@ def scrape_tabs():
 # ---------------- Chrome 扩展「采集助手」 ----------------
 @app.get("/api/ext/task")
 def ext_task(v: str = ""):
-    return {"task": extbridge.next_task(v), "delay": float(store.get_settings()["scrape_delay"])}
+    t = extbridge.next_task(v)
+    return {"task": t, "delay": float(store.get_settings()["scrape_delay"]), "busy": bool(t) or extbridge.busy()}
 
 
 @app.post("/api/ext/result")
@@ -1213,6 +1209,19 @@ def _resume_wb():
 
     try:
         _u.resume_pending()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@app.on_event("startup")
+def _reset_stale_match():
+    """程序重启时还没做完的找同款：标回「未匹配」，点「继续匹配」接着做（已出结果的规格不动）。"""
+    from . import skumatch
+
+    try:
+        for p in store.list_products():
+            if p.get("match_wait") or any(u.get("status") in ("pending", "searching", "verifying") for u in p.get("units") or []):
+                store.update_product(p["id"], skumatch.reset_stale)
     except Exception:  # noqa: BLE001
         pass
 

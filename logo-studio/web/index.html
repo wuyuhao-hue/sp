@@ -24,7 +24,7 @@
       <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
     </div>
     <div class="spacer"></div>
-    <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.4.0（WB / 拼多多 / Ozon / 自动找同款需要）</span>
+    <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.5.0（Ozon 完整规格、找同款需要）</span>
     <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
@@ -72,6 +72,7 @@
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
               <span class="price rub" v-else-if="p.market_price_rub">{{ Math.round(p.market_price_rub) }} ₽</span>
               <span class="tag warn" v-if="matchStateName(p.match_state)">{{ matchStateName(p.match_state) }}</span>
+              <span class="tag ok" v-if="p.match_state && p.match_state.state === 'done' && p.match_state.matched" :title="p.match_state.none + ' 个规格无同款已删除'">同款 {{ p.match_state.matched }} 个规格</span>
               <span class="tag">{{ p.sku_count }} SKU</span>
               <span class="tag accent" v-if="p.set_count">{{ p.set_count }} 套图</span>
               <span class="tag ok" v-if="p.queued">{{ p.queued }} 待上架</span>
@@ -90,7 +91,7 @@
           <span class="faint grow">已选 {{ selected.length }} 个商品{{ workMode==='direct' ? '' : '，批量生成：' }}</span>
           <button class="btn sm ghost danger" @click="deleteSel">删除</button>
         </div>
-        <button class="btn block" v-if="workMode==='direct' && selectedMarket.length" @click="autoMatch(selectedMarket)" title="Ozon / WB 商品用主图以图搜 1688，AI 比对后把握够就自动绑定货源">自动找 1688 同款（{{ selectedMarket.length }} 个 Ozon/WB 商品）</button>
+        <button class="btn block" v-if="workMode==='direct' && selectedMarket.length" @click="autoMatch(selectedMarket)" title="Ozon / WB 商品逐规格以图搜 1688，本地图片核验 + 1688 规格核对（不用 AI）">找 1688 同款（{{ selectedMarket.length }} 个 Ozon/WB 商品）</button>
         <button class="btn primary block" v-if="workMode==='direct'" @click="batchDirectQueue">全部颜色加入待上架（原图）</button>
         <template v-if="workMode!=='direct'">
         <div class="row">
@@ -199,67 +200,91 @@
         </div>
       </div>
 
-      <div class="block match-card" v-if="current.source==='ozon' || current.source==='wb'">
-        <div class="block-head"><b>1688 货源</b><span class="faint">{{ sourceName(current.source) }} 卢布价只是市场参考，WB 定价按 1688 进货价（人民币）算</span></div>
-        <div v-if="current.match" class="match-row">
-          <img :src="imgSrc(current.match.image)" @click="zoom(imgSrc(current.match.image))">
-          <div class="grow">
-            <div class="t">{{ current.match.title }}</div>
-            <div class="row" style="margin-top:6px">
-              <span class="price">¥{{ fmtPrice(current.match.price_min, current.match.price_max) }}</span>
-              <span class="tag ok" v-if="current.match.confirmed">已确认同款</span>
-              <span class="tag warn" v-else-if="current.match.auto">自动绑定，请确认</span>
-              <template v-else-if="current.match.ai">
-                <span class="tag" :class="current.match.ai.same ? 'ok' : 'warn'">AI：{{ current.match.ai.same ? '同款' : '可能不是同款' }}（{{ Math.round((current.match.ai.confidence||0)*100) }}%）</span>
-              </template>
-              <a :href="current.match.url" target="_blank">打开 1688</a>
-            </div>
-            <div class="faint" v-if="current.match.ai" style="margin-top:4px">{{ current.match.ai.reason }}</div>
-          </div>
-          <div class="col-btns">
-            <button class="btn sm primary" v-if="!current.match.confirmed" @click="matchConfirm(true)">确认是同款</button>
-            <button class="btn sm" @click="matchCheck">AI 重新核对</button>
-            <button class="btn sm ghost danger" @click="matchUnbind">解除绑定</button>
-          </div>
+      <div class="block mt-card" v-if="isMarket">
+        <div class="block-head">
+          <b>1688 同款匹配</b>
+          <span class="faint">逐个规格以图搜 → 本地图片核验 → 核对 1688 这个规格真的在售，全程不用 AI</span>
+          <span class="spacer"></span>
+          <button class="btn primary" v-if="!matchRunning && (!units.length || mCount.todo || mCount.error)" @click="autoMatch([current.id])">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            {{ units.length && (mCount.matched || mCount.none) ? '继续匹配剩下的规格' : '找 1688 同款' }}</button>
+          <button class="btn" v-if="!matchRunning && units.length && !mCount.todo" @click="rematch">全部重新匹配</button>
+          <span class="mt-running" v-if="matchRunning"><i class="spin"></i>匹配中…</span>
         </div>
-        <div v-else>
-          <div class="row" style="margin-bottom:10px">
-            <button class="btn primary" @click="autoMatch([current.id])">自动找 1688 同款</button>
-            <span class="faint" v-if="current.match_auto">上次：{{ current.match_auto.reason || '' }}<template v-if="current.match_auto.best"> · 把握 {{ Math.round((current.match_auto.confidence||0)*100) }}%</template></span>
-            <span class="faint" v-else>用主图以图搜 1688，AI 看图比对，把握 ≥ 60% 自动绑定；不够就把候选列出来让你选</span>
-          </div>
-          <div class="row">
-            <input class="input grow" v-model="matchUrl" placeholder="粘贴 1688 同款商品链接，例如 https://detail.1688.com/offer/123456789012.html">
-            <button class="btn primary" :disabled="!matchUrl" @click="matchBind">绑定并读取价格</button>
-          </div>
-          <div class="row" style="margin-top:8px">
-            <button class="btn sm" @click="imageSearch">在 1688 以图搜同款（新标签页）</button>
-            <span class="faint">找到同款后复制它的链接粘贴到上面。绑定后会自动读取价格，并用 AI 看图核对是不是同款。</span>
-          </div>
+        <div class="mt-stats" v-if="units.length">
+          <button v-for="f in mFilters" :key="f.k" :class="['mt-stat', f.k, {on: mFilter === f.k}]" @click="mFilter = f.k">
+            <b>{{ f.n }}</b><span>{{ f.label }}</span></button>
         </div>
-        <div class="cand-wrap" v-if="(current.match_candidates || []).length && !(current.match && current.match.confirmed)">
-          <div class="faint" style="margin:12px 0 6px">以图搜到的 1688 候选（{{ current.match_candidates.length }} 个）<template v-if="current.match_auto && current.match_auto.best">，AI 认为最像的标了「AI 推荐」</template>：</div>
-          <div class="cand-grid">
-            <div class="cand" v-for="c in current.match_candidates" :key="c.offer_id"
-                 :class="{best: current.match_auto && current.match_auto.best === c.offer_id, on: current.match && current.match.offer_id === c.offer_id}">
-              <img :src="imgSrc(c.image)" loading="lazy" @click="zoom(imgSrc(c.image))">
-              <span class="cand-badge" v-if="current.match_auto && current.match_auto.best === c.offer_id">AI 推荐</span>
-              <div class="t" :title="c.title">{{ c.title || c.offer_id }}</div>
-              <div class="row between">
-                <span class="price" v-if="c.price">¥{{ c.price }}</span><span v-else></span>
-                <a :href="'https://detail.1688.com/offer/' + c.offer_id + '.html'" target="_blank">看</a>
+        <transition-group name="mt-row" tag="div" class="mt-rows" v-if="units.length">
+          <div class="mt-row" v-for="u in shownUnits" :key="u.key" :class="u.status">
+            <div class="mt-side left">
+              <img :src="imgSrc(u.images[0])" @click="zoom(imgSrc(u.images[0]))">
+              <div class="grow">
+                <div class="mt-name" :title="u.name">{{ u.name }}</div>
+                <div class="faint">{{ sourceName(current.source) }} · {{ uniq(u.sizes).length ? uniq(u.sizes).join(' / ') : '均码' }}</div>
+                <div class="rub" v-if="u.price_rub">{{ Math.round(u.price_rub) }} ₽</div>
               </div>
-              <button class="btn sm cand-use" :disabled="current.match && current.match.offer_id === c.offer_id" @click="matchPick(c.offer_id)">{{ current.match && current.match.offer_id === c.offer_id ? '当前绑定' : '用这个' }}</button>
+            </div>
+            <div class="mt-mid">
+              <span class="mt-pill" :class="u.status">{{ unitStatusName(u) }}</span>
+              <svg class="mt-arrow" viewBox="0 0 40 12"><path d="M0 6h34M30 1l6 5-6 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <span class="mt-ev" v-if="u.result && u.result.evidence && u.result.evidence.of">{{ u.result.evidence.support }}/{{ u.result.evidence.of }} 张图对上 · {{ u.result.evidence.inliers }} 特征点</span>
+              <span class="mt-ev" v-else-if="u.result && u.result.manual">手动指定</span>
+            </div>
+            <div class="mt-side right" v-if="u.status === 'matched' && u.result">
+              <img :src="imgSrc(u.result.sku_image)" @click="zoom(imgSrc(u.result.sku_image))">
+              <div class="grow">
+                <div class="mt-name" :title="u.result.title">{{ u.result.sku_name || '（单规格商品）' }}</div>
+                <div class="faint ell" :title="u.result.title">{{ u.result.title }}</div>
+                <div class="row" style="gap:8px">
+                  <span class="price">¥{{ u.result.price }}</span>
+                  <span class="faint" v-if="u.result.price_source !== '规格价'">{{ u.result.price_source }}</span>
+                  <span class="faint" v-if="u.result.stock">库存 {{ u.result.stock }}</span>
+                  <a :href="u.result.url" target="_blank">打开 1688</a>
+                </div>
+              </div>
+            </div>
+            <div class="mt-side right mt-blank" v-else-if="u.status === 'none'">
+              <div class="mt-none-ic">∅</div>
+              <div class="grow">
+                <div class="mt-name">无同款</div>
+                <div class="faint">{{ unitWhy(u) }}</div>
+                <div class="faint" v-if="removedKeys.includes(u.key)">这个规格已从商品里删除，不会进入待上架</div>
+              </div>
+            </div>
+            <div class="mt-side right mt-blank" v-else-if="u.status === 'error'">
+              <div class="mt-none-ic err">!</div>
+              <div class="grow"><div class="mt-name">没核对完（不算无同款）</div><div class="faint">{{ u.error }}</div></div>
+            </div>
+            <div class="mt-side right mt-blank" v-else-if="u.status === 'todo'">
+              <div class="grow faint">还没匹配</div>
+            </div>
+            <div class="mt-side right skel" v-else>
+              <div class="sk-img"></div>
+              <div class="grow"><div class="sk-line"></div><div class="sk-line short"></div>
+                <div class="faint" style="margin-top:6px">{{ u.status === 'searching' ? '正在以图搜 1688…' : '正在打开 1688 核对规格…' }}</div></div>
+            </div>
+            <div class="mt-act" v-if="!matchRunning">
+              <button class="btn sm ghost" @click="openPick(u)" title="手动改判">改判</button>
             </div>
           </div>
+        </transition-group>
+        <div class="mt-empty" v-else>
+          <div class="faint">还没匹配。点右上角「找 1688 同款」：每个颜色用它自己的规格图去找，找到同款的规格保留并用 1688 这个规格的售价；无同款的规格会直接删除。</div>
+        </div>
+        <div class="row mt-link">
+          <input class="input grow" v-model="matchUrl" placeholder="已知 1688 同款链接？粘贴进来，用它核对还没匹配上的规格">
+          <button class="btn" :disabled="!matchUrl || matchRunning" @click="matchBind">用这个链接核对</button>
+          <button class="btn ghost danger" v-if="units.length && !matchRunning" @click="matchUnbind">清除匹配结果</button>
         </div>
       </div>
 
       <div class="block">
         <div class="block-head"><b>选择要上架的颜色</b><span class="spacer"></span>
-          <button class="btn sm ghost" @click="dsel.skus = dsel.skus.length === skus.length ? [] : skus.map(k => k.name)">{{ dsel.skus.length === skus.length ? '全不选' : '全选' }}</button></div>
+          <button class="btn sm ghost" @click="dsel.skus = dsel.skus.length === queueSkus.length ? [] : queueSkus.map(k => k.name)">{{ dsel.skus.length === queueSkus.length ? '全不选' : '全选' }}</button></div>
+        <div class="note" v-if="isMarket && !queueSkus.length">还没有匹配到 1688 同款的规格。只有匹配成功的规格才能加入待上架。</div>
         <div class="sku-grid">
-          <div v-for="k in skus" :key="k.name" class="sku-card" :class="{on: dsel.skus.includes(k.name)}" @click="toggleDsku(k.name)">
+          <div v-for="k in queueSkus" :key="k.name" class="sku-card" :class="{on: dsel.skus.includes(k.name)}" @click="toggleDsku(k.name)">
             <img :src="imgSrc(k.image)">
             <i class="check big" :class="{on: dsel.skus.includes(k.name)}"></i>
             <div class="nm" :title="k.name">{{ k.name }}</div>
@@ -268,7 +293,13 @@
         </div>
       </div>
 
-      <div class="block">
+      <div class="block" v-if="isMarket">
+        <div class="row">
+          <button class="btn primary" :disabled="!dsel.skus.length" @click="directToQueue">把选中的 {{ dsel.skus.length }} 个同款规格加入待上架</button>
+          <span class="faint">每个规格只用它自己的 {{ sourceName(current.source) }} 图库（不混入其他颜色的图），进货价用匹配到的 1688 规格售价。</span>
+        </div>
+      </div>
+      <div class="block" v-else>
         <div class="block-head"><b>上架用的图</b><span class="faint">每个颜色：自己的 SKU 图（Ozon 为该颜色全部图）在最前，后面接下面勾选的主图，最多 15 张</span></div>
         <div class="faint" style="margin:4px 0 8px">主图（{{ dsel.main.length }}/{{ (current.main_images||[]).length }}）</div>
         <div class="pick-grid">
@@ -887,6 +918,38 @@
     </div>
   </main>
 
+  <!-- 改判一个规格 -->
+  <div class="modal-bg" v-if="pick" @mousedown.self="pick=null">
+    <div class="modal" style="width:min(760px, 94vw)">
+      <div class="modal-head"><h3>改判「{{ pick.unit.name }}」</h3><button class="btn sm ghost" @click="pick=null">✕</button></div>
+      <div class="modal-body">
+        <div class="row" style="gap:14px;align-items:flex-start">
+          <img class="pick-q" :src="imgSrc(pick.unit.images[0])">
+          <div class="grow">
+            <div class="faint" style="margin-bottom:8px">从已经读过的 1688 商品里选这个规格对应的 1688 规格（进货价用它的售价）：</div>
+            <div v-if="!offerList.length" class="note">还没读过任何 1688 商品。先点「找 1688 同款」，或粘贴已知的 1688 链接核对。</div>
+            <div v-for="o in offerList" :key="o.offer_id" class="pick-offer">
+              <div class="row between"><b class="ell" :title="o.title">{{ o.title }}</b><a :href="o.url" target="_blank">打开</a></div>
+              <div class="pick-colors">
+                <div v-for="c in o.colors" :key="c.name" class="pick-color" :class="{on: pick.offer === o.offer_id && pick.sku === c.name}"
+                     @click="pick.offer = o.offer_id; pick.sku = c.name">
+                  <img :src="imgSrc(c.image)"><span class="ell">{{ c.name || '单规格' }}</span>
+                  <em v-if="c.price">¥{{ c.price }}</em><em v-if="c.stock === 0" class="out">无库存</em>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost danger" @click="pickSet(null)">设为无同款（删除这个规格）</button>
+        <span class="spacer"></span>
+        <button class="btn" @click="pick=null">取消</button>
+        <button class="btn primary" :disabled="!pick.offer" @click="pickSet(pick.offer)">设为同款</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 采集弹窗 -->
   <div class="modal-bg" v-if="showScrape" @mousedown.self="showScrape=false">
     <div class="modal">
@@ -894,9 +957,9 @@
       <div class="modal-body">
         <div class="note err-box" v-if="workMode==='direct' && (extOld || !ext.connected)">
           <template v-if="!ext.connected">采集助手没有连接：请确认 Chrome 开着、采集助手已启用（chrome://extensions）。</template>
-          <template v-else>采集助手是旧版（{{ ext.version }}），采集 WB / 拼多多 / Ozon、自动找同款需要 1.4.0：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
+          <template v-else>采集助手是旧版（{{ ext.version }}），Ozon 完整规格采集、找 1688 同款需要 1.5.0：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
         </div>
-        <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、WB（wildberries.ru）、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。WB / Ozon 商品还要绑定 1688 货源（可自动找同款）才有进货价。需要「采集助手」1.4.0 以上。</div>
+        <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、WB（wildberries.ru）、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。WB / Ozon 商品要先「找 1688 同款」，只有找到同款的规格能上架，进货价用 1688 该规格的售价。需要「采集助手」1.5.0 以上。</div>
         <div class="field"><label>商品链接（每行一个，可以直接粘贴一大段包含链接的文字）</label>
           <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="https://detail.1688.com/offer/123456789012.html"></textarea></div>
         <div class="field"><label>店铺链接（整店采集，每行一个）</label>

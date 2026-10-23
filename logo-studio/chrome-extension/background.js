@@ -30,6 +30,12 @@ async function workerTab() {
   return ids;
 }
 
+async function closeWorker() {
+  const { win } = await chrome.storage.session.get(['win']);
+  await chrome.storage.session.remove(['win', 'tab']);
+  if (win) await chrome.windows.remove(win).catch(() => {});
+}
+
 function waitLoaded(tabId, timeout = 45000) {
   return new Promise(resolve => {
     let done = false;
@@ -128,10 +134,15 @@ function pagePdd() {
 
 // Ozon：在页面里调用 Ozon 自己的页面数据接口（entrypoint），再逐个读取颜色/尺码变体（最多 30 个）
 async function pageOzon() {
+  // 完整规格：普通规格区（webAspects）只列出和当前规格相邻的一部分，Ozon 会把一些 SKU 藏起来；
+  // 「所有颜色」弹窗（/modal/aspectsNew → webAspectsModal）能列出更多，但结果也受入口 SKU 影响。
+  // 所以：对每个新发现的 SKU 都探测弹窗并取并集（最多 40 次、每批 4 个），再逐个读取每个 SKU 自己的页面（每批 6 个、最多 400 个），
+  // 读到的页面里又发现新 SKU 就继续，直到集合不再增加。
   const KEEP = ['webProductHeading', 'webGallery', 'webPrice', 'webAspects', 'webCharacteristics', 'webDescription'];
-  const trim = j => {
+  const LEAF = ['webGallery', 'webPrice', 'webAspects'];  // 其他规格页只要图、价格、规格（说明和特征只取入口页，数据量小很多）
+  const trim = (j, keep = KEEP) => {
     const ws = {};
-    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) if (KEEP.includes(k.split('-')[0])) ws[k] = v;
+    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) if (keep.includes(k.split('-')[0])) ws[k] = v;
     return { widgetStates: ws, layoutTrackingInfo: j && j.layoutTrackingInfo, seo: j && j.seo ? { title: j.seo.title } : null };
   };
   const get = async path => {
@@ -139,27 +150,72 @@ async function pageOzon() {
     if (!r.ok) throw new Error('Ozon 接口返回 ' + r.status);
     return r.json();
   };
-  const path = location.pathname;
-  const first = await get(path);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const known = new Map();          // sku → 页面链接
+  const modalLinks = new Set();
+  const add = (sku, link) => {
+    sku = String(sku || '');
+    if (!/^\d{5,}$/.test(sku)) return;
+    if (!known.has(sku) || (!known.get(sku) && link)) known.set(sku, link ? String(link).split('?')[0] : '');
+  };
+  const walk = (o, depth = 0) => {      // 在任意 JSON 结构里找 {sku, link}
+    if (!o || depth > 12) return;
+    if (typeof o === 'string') {
+      if (o.includes('/modal/aspects')) modalLinks.add(o);
+      if (o.length > 2 && (o[0] === '{' || o[0] === '[')) { try { walk(JSON.parse(o), depth + 1); } catch (e) { /* 不是 JSON */ } }
+      return;
+    }
+    if (Array.isArray(o)) { for (const x of o) walk(x, depth + 1); return; }
+    if (typeof o === 'object') {
+      if (o.sku && (o.link || o.data)) add(o.sku, o.link);
+      for (const v of Object.values(o)) walk(v, depth + 1);
+    }
+  };
+  const aspectsOf = j => {
+    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) if (/^webAspects/.test(k)) walk(v);
+  };
+  const entry = (location.pathname.match(/(\d{5,})\/?$/) || location.pathname.match(/-(\d{5,})/) || [])[1] || '';
+  const first = await get(location.pathname);
   const main = trim(first);
   if (first.nextPage) { // 说明、特征常在第二页
     try { const more = await get(first.nextPage); Object.assign(main.widgetStates, trim(more).widgetStates); } catch (e) { /* 忽略 */ }
   }
-  const pages = [main];
-  const links = [];
-  for (const [k, v] of Object.entries(main.widgetStates)) {
-    if (!k.startsWith('webAspects')) continue;
-    try {
-      for (const a of JSON.parse(v).aspects || []) for (const x of a.variants || []) {
-        if (x.link && !x.active && !links.includes(x.link)) links.push(x.link);
-      }
-    } catch (e) { /* 忽略 */ }
+  const entrySku = String((JSON.parse(first.layoutTrackingInfo || '{}').sku) || entry);
+  add(entrySku, location.pathname);
+  aspectsOf(first);
+  const pages = new Map([[entrySku, main]]);
+  const probed = new Set();
+  const diag = { modal: 0, modal_ok: 0, failed: 0 };
+  const probe = async sku => {
+    probed.add(sku);
+    diag.modal++;
+    const tries = [...[...modalLinks].filter(l => l.includes(sku)), `/modal/aspectsNew?product_id=${sku}`];
+    for (const path of tries) {
+      try {
+        const j = await get(path.startsWith('http') ? new URL(path).pathname + new URL(path).search : path);
+        const before = known.size;
+        for (const [k, v] of Object.entries(j.widgetStates || {})) if (/aspects/i.test(k)) walk(v);
+        diag.modal_ok++;
+        if (known.size >= before) return;
+      } catch (e) { /* 换一种写法 */ }
+    }
+  };
+  for (let round = 0; round < 60; round++) {
+    const toProbe = [...known.keys()].filter(k => !probed.has(k)).slice(0, 4);
+    if (toProbe.length && diag.modal < 40) { await Promise.allSettled(toProbe.map(probe)); continue; }
+    const toFetch = [...known.keys()].filter(k => !pages.has(k)).slice(0, 6);
+    if (!toFetch.length || pages.size >= 400) break;
+    await Promise.allSettled(toFetch.map(async sku => {
+      try {
+        const j = await get(known.get(sku) || `/product/${sku}/`);
+        pages.set(sku, trim(j, LEAF));
+        aspectsOf(j);
+      } catch (e) { pages.set(sku, null); diag.failed++; }
+    }));
+    await sleep(300 + Math.random() * 400);
   }
-  for (const link of links.slice(0, 30)) {
-    await new Promise(r => setTimeout(r, 400 + Math.random() * 500));
-    try { pages.push(trim(await get(link.split('?')[0]))); } catch (e) { /* 单个变体失败不影响其他 */ }
-  }
-  return { pages, url: location.href };
+  diag.discovered = known.size;
+  return { pages: [...pages.values()].filter(Boolean), url: location.href, diag };
 }
 
 // WB：在商品页里读 WB 公开的 card.json（图片服务器上）和价格接口；同一商品的其他颜色一起读（最多 20 个）
@@ -409,10 +465,17 @@ async function loop() {
   if (running) return;
   running = true;
   try {
+    let idle = 0;
     for (;;) {
       let r;
       try { r = await (await fetch(`${SERVER}/api/ext/task?v=${VERSION}`)).json(); } catch (e) { break; } // 工作台没开
-      if (!r || !r.task) break;
+      if (!r || !r.task) {
+        // 工作台还在处理刚交回的结果（比如找同款时核对完会马上派下一个）：在同一个窗口里等，不关窗口
+        if (r && r.busy && idle < 150) { idle++; await sleep(2000); continue; }
+        await closeWorker(); // 没有任务了：关掉采集窗口，下次有任务再开一个
+        break;
+      }
+      idle = 0;
       const task = r.task, delay = Math.max(Number(r.delay) || 3, 1);
       try {
         if (task.kind === 'offer') {

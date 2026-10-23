@@ -76,7 +76,7 @@ def _num(v) -> float | None:
     return float(m.group(0).replace(",", ".")) if m else None
 
 
-SIZE_AXIS = re.compile(r"尺码|尺寸|码数|size|размер", re.I)
+SIZE_AXIS = re.compile(r"尺码|尺寸|码数|size|размер|рост", re.I)
 COLOR_AXIS = re.compile(r"颜色|色|款式|colou?r|цвет", re.I)
 
 
@@ -222,6 +222,60 @@ def _package(chars: dict) -> dict:
     return pk
 
 
+def _ozon_leaves(pages: list[dict]) -> list[dict]:
+    """每个已读到的 Ozon 规格页 = 一个叶子 SKU（各规格轴上被选中的值 + 自己的图和价格）。
+    规格页里列出了、但没读到页面的变体（网络失败等）也补成叶子（只有图、没有价格），避免漏规格。"""
+    leaves, seen_sku = [], set()
+    infos = [_ozon_page(pg) for pg in pages]
+    for info in infos:
+        specs = {}
+        for a in info["aspects"]:
+            act = next((v for v in a["variants"] if v["active"]), None)
+            if act and a["title"]:
+                specs[a["title"]] = act["text"] or act["sku"]
+        if info["sku"] and info["sku"] in seen_sku:
+            continue
+        seen_sku.add(info["sku"])
+        leaves.append({"specs": specs, "image": (info["images"] or [""])[0], "images": info["images"],
+                       "price": info["price"], "sku": info["sku"]})
+    for info, leaf in zip(infos, list(leaves)):
+        for a in info["aspects"]:
+            for v in a["variants"]:
+                if not v["sku"] or v["sku"] in seen_sku or not a["title"]:
+                    continue
+                seen_sku.add(v["sku"])
+                specs = {**leaf["specs"], a["title"]: v["text"] or v["sku"]}
+                leaves.append({"specs": specs, "image": v["image"] or "", "images": [v["image"]] if v["image"] else [],
+                               "price": None, "sku": v["sku"], "partial": True})
+    return leaves
+
+
+def _merge_axes(leaves: list[dict]) -> None:
+    """多个非尺码规格轴（颜色 + 套装数量 + 型号…）合成一个「款式」轴，否则不同款会被并成一个；
+    颜色值只是数字（Ozon 内部编号）时，按主图拆成「颜色款式 N」。"""
+    keys = []
+    for lf in leaves:
+        for k in lf["specs"]:
+            if k not in keys:
+                keys.append(k)
+    other = [k for k in keys if not SIZE_AXIS.search(k)]
+    if len(other) > 1:
+        name = " / ".join(other)
+        for lf in leaves:
+            vals = [lf["specs"].pop(k) for k in other if k in lf["specs"]]
+            lf["specs"] = {name: " · ".join(vals), **lf["specs"]}
+        other = [name]
+    if other:
+        ax = other[0]
+        vals = {lf["specs"].get(ax) for lf in leaves}
+        if vals and all(re.fullmatch(r"[\d\s·]*", v or "") for v in vals):
+            heroes: dict[str, str] = {}
+            for lf in leaves:
+                h = (lf["image"] or "").split("?")[0]
+                heroes.setdefault(h, f"颜色款式 {len(heroes) + 1}")
+                lf["specs"][ax] = heroes[h]
+
+
 def normalize_ozon(raw: dict, sku: str) -> dict:
     pages = [p for p in raw.get("pages") or [] if isinstance(p, dict)]
     if not pages:
@@ -229,36 +283,31 @@ def normalize_ozon(raw: dict, sku: str) -> dict:
     main = _ozon_page(pages[0])
     if not main["title"] and not main["images"]:
         raise ValueError("Ozon 页面数据格式和预期不同")
-    # 每个变体页：取它在各规格轴上被选中的值 + 自己的图和价格
-    skus = []
-    for pg in pages:
-        info = _ozon_page(pg)
-        specs = {}
-        for a in info["aspects"]:
-            act = next((v for v in a["variants"] if v["active"]), None)
-            if act and a["title"]:
-                specs[a["title"]] = act["text"] or act["sku"]
-        skus.append({"specs": specs, "image": (info["images"] or [""])[0], "images": info["images"],
-                     "price": info["price"], "sku": info["sku"]})
+    skus = _ozon_leaves(pages)
+    _merge_axes(skus)
     props, sizes = _axes_from_skus(skus)
-    color_axis = props[0]["name"] if props and props[0]["name"] not in sizes else None
+    color_axis = props[0]["name"] if props and props[0]["name"] not in sizes and not SIZE_AXIS.search(props[0]["name"]) else None
     color_images = {}
-    for s in skus:  # 每个颜色的完整图库（WB 每个颜色用自己的图）
+    for s in sorted(skus, key=lambda x: bool(x.get("partial"))):  # 每个颜色只用它自己规格页的完整图库
         c = s["specs"].get(color_axis) if color_axis else "默认"
-        if c and c not in color_images:
+        if c and c not in color_images and s["images"]:
             color_images[c] = s["images"]
     prices = [s["price"] for s in skus if s.get("price")]
+    ordered = lambda sp: ([sp[color_axis]] if color_axis and color_axis in sp else []) + [v for k, v in sp.items() if k != color_axis]
+    diag = raw.get("diag") or {}
     return {
         "offer_id": sku, "url": f"https://www.ozon.ru/product/{sku}/",
         "title": main["title"], "title_ru": main["title"], "description_ru": main["description"][:5000],
         "brand_source": main["brand"], "category_source": main["category"],
         "main_images": main["images"], "detail_images": [], "color_images": color_images,
         "sku_props": props,
-        "skus": [{"name": " / ".join(s["specs"].values()), "parts": list(s["specs"].values()), "price": None,
+        "skus": [{"name": " / ".join(ordered(s["specs"])), "parts": ordered(s["specs"]), "price": None,
                   "price_rub": s["price"], "ozon_sku": s["sku"]} for s in skus],
         "sizes": sizes, "attrs": main["chars"], "package_source": _package(main["chars"]),
         "market_price_rub": min(prices) if prices else None,
-        "price_min": None, "price_max": None,  # 采购价要等绑定 1688 货源后才有（Ozon 卢布价只是市场参考）
+        "price_min": None, "price_max": None,  # 采购价要等找到 1688 同款后才有（Ozon 卢布价只是市场参考）
+        "capture": {"leaves": len(skus), "pages": len(pages), "partial": sum(1 for s in skus if s.get("partial")),
+                    "discovered": diag.get("discovered"), "modal": diag.get("modal")},
     }
 
 
@@ -368,15 +417,14 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
         return None
     pid = f"{platform}-{item_id}"
     old = store.get_product(pid)
-    keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "match_candidates", "match_auto", "created")
+    keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "units", "match_offers", "match_wait", "created")
             if old and k in old}
     product = {"id": pid, "source": platform, "mode": "direct", "created": time.time(), "sets": [], "ai": {},
                **info, **keep}
-    m = keep.get("match")
-    if m and m.get("price_max"):  # 重新采集：已绑定的 1688 进货价不能丢
-        product["price_min"], product["price_max"] = m.get("price_min"), m["price_max"]
-        for k in product.get("skus") or []:
-            k["price"] = m["price_max"]
+    if product.get("units"):  # 重新采集：按颜色沿用之前的匹配结果（1688 进货价、无同款删除），新出现的颜色标「未匹配」
+        from . import skumatch
+        product["units"] = skumatch.build_units(product)
+        skumatch.apply_results(product)
     store.save_product(product)
     if job:
         job.note(f"{'↻ 已更新' if old else '✓'} {PLATFORM_NAME[platform]}：{info['title'][:30]}（"

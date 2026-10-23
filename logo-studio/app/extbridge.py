@@ -22,7 +22,7 @@ _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
-NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 4, 0), "imgsearch": (1, 4, 0)}  # 各类任务需要的采集助手版本
+NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 4, 0), "page:ozon": (1, 5, 0), "imgsearch": (1, 5, 0)}  # 各类任务需要的采集助手版本
 UPDATE_HINT = "打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面"
 
 
@@ -121,7 +121,11 @@ def next_task(version: str = "") -> dict | None:
             if time.time() - t["taken"] > TASK_TIMEOUT:
                 del _active[tid]
                 j = jobs.get(t["job_id"])
-                if j:
+                if j and t.get("sku"):  # 找同款的任务超时：交给匹配流程按技术失败处理（重试一次，不算无同款）
+                    from . import skumatch
+                    j.inflight = getattr(j, "inflight", 0) + 1
+                    _workers.submit(_sku_run, j, skumatch.on_fail, t.get("pid") or t.get("match_for"), t, "超时未完成")
+                elif j:
                     j.note(f"✗ {t.get('offer_id') or t['kind']}：超时未完成")
                     j.done += 1 if t["kind"] == "offer" else 0
                     _maybe_finish(j)
@@ -138,7 +142,13 @@ def next_task(version: str = "") -> dict | None:
                 # 旧版采集助手不认识这类任务：不派给它（否则它会悄悄丢掉，界面一直没动静），直接说明原因
                 what = "自动找同款" if t["kind"] == "imgsearch" else \
                     f"{sources.PLATFORM_NAME.get(t.get('platform'), '')} {t.get('item_id', '')}"
-                j.note(f"✗ {what}：采集助手版本太旧（{state['version'] or '未知'}），需要 {'.'.join(map(str, need))} 以上。{UPDATE_HINT}")
+                msg = f"采集助手版本太旧（{state['version'] or '未知'}），需要 {'.'.join(map(str, need))} 以上。{UPDATE_HINT}"
+                j.note(f"✗ {what}：{msg}")
+                if t.get("sku"):
+                    from . import skumatch
+                    j.inflight = getattr(j, "inflight", 0) + 1
+                    _workers.submit(_sku_run, j, skumatch.on_fail, t.get("pid") or t.get("match_for"), t, msg)
+                    continue
                 j.done += 1
                 _maybe_finish(j)
                 continue
@@ -156,6 +166,14 @@ def next_task(version: str = "") -> dict | None:
     return None
 
 
+def busy() -> bool:
+    """还有任务在路上（排队、采集中、或刚交回正在处理、处理完可能马上派下一个）：采集窗口先别关。"""
+    with _lock:
+        if _queue or _active:
+            return True
+    return any(j.status == "running" and getattr(j, "inflight", 0) > 0 for j in list(jobs._jobs.values()))
+
+
 def set_status(status: str, message: str) -> None:
     state["last_seen"] = time.time()
     state["status"] = status
@@ -169,14 +187,9 @@ def set_status(status: str, message: str) -> None:
                 j.note(message)
 
 
-def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "1688", match_for: str = "",
-                   auto: bool = False) -> None:
+def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "1688") -> None:
     try:
-        if match_for:  # Ozon 商品绑定 1688 货源：读这个 1688 商品的价格和图，不另存商品
-            from . import match
-            match.bind_result(match_for, offer_id, raw, job, auto)
-            p = None
-        elif platform == "1688":
+        if platform == "1688":
             p = save_offer(None, raw, offer_id, job, getattr(job, "mode", "logo"))
         else:
             p = sources.save(platform, raw, offer_id, job)
@@ -202,6 +215,12 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
         if not job:
             return
         if not ok:
+            if t.get("sku"):  # 找同款的任务失败：自动重试 / 标记失败可重试，不算无同款
+                from . import skumatch
+                job.inflight = getattr(job, "inflight", 0) + 1
+                pid = t.get("pid") or t.get("match_for")
+                _workers.submit(_sku_run, job, skumatch.on_fail, pid, t, str(data.get("error", "失败")))
+                return
             job.note(f"✗ {t.get('offer_id') or t['kind']}：{data.get('error', '失败')}")
             if t["kind"] in ("offer", "page", "imgsearch"):
                 job.done += 1
@@ -212,24 +231,28 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             job.note(f"店铺共发现 {len(ids)} 个商品")
             _enqueue_offers(job, ids, skip_existing=True)
             return
-        if t["kind"] == "imgsearch":
+        if t.get("sku"):
+            from . import skumatch
             job.inflight = getattr(job, "inflight", 0) + 1
-            _workers.submit(_process_search, job, t["pid"], data)
+            if t["kind"] == "imgsearch":
+                _workers.submit(_sku_run, job, skumatch.on_candidates, t["pid"], t["unit"], data)
+            else:
+                _workers.submit(_sku_run, job, skumatch.on_offer, t["match_for"], t["offer_id"], data.get("raw") or {})
             return
         if t["kind"] == "offer":
-            pages = [(t["offer_id"], data.get("raw") or {}, "1688", t.get("match_for", ""), bool(t.get("auto")))]
+            pages = [(t["offer_id"], data.get("raw") or {}, "1688")]
         elif t["kind"] == "page":
-            pages = [(t["item_id"], data.get("raw") or {}, t["platform"], "", False)]
+            pages = [(t["item_id"], data.get("raw") or {}, t["platform"])]
         else:  # tabs：1688 + 拼多多 + Ozon 已打开的商品页
-            pages = [(p["offer_id"], p["raw"], "1688", "", False) for p in data.get("pages", [])] + \
-                [(p["id"], p["raw"], p["platform"], "", False) for p in data.get("others", [])]
+            pages = [(p["offer_id"], p["raw"], "1688") for p in data.get("pages", [])] + \
+                [(p["id"], p["raw"], p["platform"]) for p in data.get("others", [])]
             job.total += len(pages)
             if not pages:
                 job.fail("Chrome 里没有打开的 1688 / 拼多多 / Ozon / WB 商品页")
                 return
         job.inflight = getattr(job, "inflight", 0) + len(pages)
-    for oid, raw, platform, match_for, auto in pages:
-        _workers.submit(_process_offer, job, oid, raw, platform, match_for, auto)
+    for oid, raw, platform in pages:
+        _workers.submit(_process_offer, job, oid, raw, platform)
 
 
 def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
@@ -253,18 +276,19 @@ def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
     return f"已更新到工作台（{where}）" if existed else f"已发送到工作台（{where}）"
 
 
-def _process_search(job: jobs.Job, pid: str, data: dict) -> None:
-    from . import match
-
-    def bind(p_id, offer_id):
+def _sku_enqueue(job: jobs.Job):
+    def enq(kind: str, **kw):
         with _lock:
             job.total += 1
-            _new_task(job, "offer", offer_id=offer_id, url=f"https://detail.1688.com/offer/{offer_id}.html",
-                      match_for=p_id, auto=True)
+            _new_task(job, kind, sku=True, **kw)
+    return enq
+
+
+def _sku_run(job: jobs.Job, fn, *args) -> None:
     try:
-        match.handle_candidates(pid, data, job, bind)
+        fn(*args, job, _sku_enqueue(job))
     except Exception as e:  # noqa: BLE001
-        job.note(f"✗ {pid}：{str(e)[:120]}")
+        job.note(f"✗ 匹配出错：{str(e)[:160]}")
     finally:
         with _lock:
             job.done += 1
@@ -272,35 +296,34 @@ def _process_search(job: jobs.Job, pid: str, data: dict) -> None:
             _maybe_finish(job)
 
 
-def start_auto_match(pids: list[str]) -> jobs.Job:
-    """Ozon / WB 商品自动找 1688 同款（每个商品：以图搜 → AI 排序 → 把握够就自动绑定并读价格）。"""
-    from . import match
+def start_sku_match(pids: list[str], rematch: bool = False, link: dict | None = None) -> jobs.Job:
+    """Ozon / WB 商品逐规格找 1688 同款（本地核验，不用 AI）。link={pid: offer_id} 时只用手动给的链接核对。"""
+    from . import skumatch
 
-    job = jobs.Job("scrape", f"自动找 1688 同款：{len(pids)} 个商品")
+    job = jobs.Job("scrape", f"找 1688 同款：{len(pids)} 个商品")
     job.status = "running"
     job.is_match = True
+    job.inflight = 0
+    enq = _sku_enqueue(job)
+    for pid in pids:
+        if link:
+            skumatch.add_link(pid, link[pid])
+        else:
+            skumatch.prepare(pid, rematch)
     with _lock:
-        for pid in pids:
-            p = store.get_product(pid) or {}
-            img = match.target_image(p)
-            if not img:
-                job.note(f"✗ {pid}：没有主图，跳过")
-                continue
-            job.total += 1
-            _new_task(job, "imgsearch", pid=pid, image=img)
-        _maybe_finish(job)
+        job.inflight += len(pids)
+    for pid in pids:
+        def go(pid=pid):
+            try:
+                skumatch.advance(pid, job, enq)
+            except Exception as e:  # noqa: BLE001
+                job.note(f"✗ {pid}：{str(e)[:160]}")
+            finally:
+                with _lock:
+                    job.inflight -= 1
+                    _maybe_finish(job)
+        _workers.submit(go)
     _watch(job)
-    return job
-
-
-def enqueue_match(pid: str, offer_id: str) -> jobs.Job:
-    """Ozon 商品绑定 1688 货源：让插件打开这个 1688 商品页读价格和图。"""
-    job = jobs.Job("scrape", f"读取 1688 货源 {offer_id}")
-    job.status = "running"
-    job.total = 1
-    job.is_match = True
-    with _lock:
-        _new_task(job, "offer", offer_id=offer_id, url=f"https://detail.1688.com/offer/{offer_id}.html", match_for=pid)
     if not connected():
         job.note("等待 Chrome 采集助手连接…")
     return job

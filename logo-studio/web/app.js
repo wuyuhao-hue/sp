@@ -27,7 +27,7 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, matchUrl: '', dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, matchUrl: '', mFilter: 'all', pick: null, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 4, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 5, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -76,6 +76,32 @@ createApp({
     // 采集上架：按采集来源（1688 / WB / 拼多多 / Ozon）切换
     productSources() { return this.sourcesOf(this.products.filter(p => (p.mode || 'logo') === this.workMode)); },
     listingSources() { return this.sourcesOf(this.listings.filter(l => (l.mode || 'logo') === this.workMode)); },
+    isMarket() { return !!this.current && ['ozon', 'wb'].includes(this.current.source); },
+    units() { return (this.current && this.current.units) || []; },
+    mCount() {
+      const c = { matched: 0, none: 0, error: 0, todo: 0, running: 0 };
+      for (const u of this.units) c[['pending', 'searching', 'verifying'].includes(u.status) ? 'running' : u.status]++;
+      return c;
+    },
+    matchRunning() { return this.mCount.running > 0 || !!(this.current && this.current.match_wait); },
+    mFilters() {
+      const c = this.mCount, f = [{ k: 'all', label: '全部规格', n: this.units.length }, { k: 'matched', label: '同款', n: c.matched },
+        { k: 'none', label: '无同款', n: c.none }];
+      if (c.running) f.push({ k: 'running', label: '匹配中', n: c.running });
+      if (c.todo || c.error) f.push({ k: 'todo', label: '未匹配 / 失败', n: c.todo + c.error });
+      return f;
+    },
+    shownUnits() {
+      const f = this.mFilter, run = ['pending', 'searching', 'verifying'];
+      return this.units.filter(u => f === 'all' || u.status === f || (f === 'running' && run.includes(u.status)) || (f === 'todo' && ['todo', 'error'].includes(u.status)));
+    },
+    removedKeys() { return Object.keys((this.current && this.current.match_removed) || {}); },
+    offerList() { return Object.values((this.current && this.current.match_offers) || {}).filter(o => (o.colors || []).length); },
+    queueSkus() {
+      if (!this.isMarket) return this.skus;
+      const ok = new Set(this.units.filter(u => u.status === 'matched').map(u => u.key));
+      return this.skus.filter(k => ok.has(k.name));
+    },
     selectedMarket() { return this.selected.filter(id => ['ozon', 'wb'].includes((this.products.find(p => p.id === id) || {}).source)); },
     listingLogos() {
       const m = {};
@@ -191,8 +217,9 @@ createApp({
       this.current = await api(`/api/products/${id}`);
       this.skuSel = []; this.skuView = null;
       if (this.current.mode === 'direct') {
-        this.dsel = { skus: this.skus.filter(k => !this.directSetOf(k.name)).map(k => k.name), main: [...(this.current.main_images || [])], detail: false };
-        this.matchUrl = '';
+        this.dsel = { skus: this.queueSkus.filter(k => !this.directSetOf(k.name)).map(k => k.name),
+          main: this.isMarket ? [] : [...(this.current.main_images || [])], detail: false };
+        this.matchUrl = ''; this.mFilter = 'all'; this.pick = null;
       }
     },
     async setMode(m) {
@@ -224,33 +251,52 @@ createApp({
       }
     },
     async matchBind() {
-      try { this.jobs.unshift(await api(`/api/products/${this.current.id}/match`, { body: { url: this.matchUrl } })); this.toast('采集助手正在读取 1688 货源…'); this.matchUrl = ''; }
+      try { this.jobs.unshift(await api(`/api/products/${this.current.id}/match`, { body: { url: this.matchUrl } })); this.toast('采集助手正在打开这个 1688 商品核对规格…'); this.matchUrl = ''; }
       catch (e) { this.toast(e.message, true); }
     },
-    async matchCheck() {
-      this.toast('AI 核对中…');
-      try { this.current = await api(`/api/products/${this.current.id}/match/check`, { body: {} }); this.toast('已重新核对'); }
-      catch (e) { this.toast(e.message, true); }
-    },
-    async matchConfirm(v) { this.current = await api(`/api/products/${this.current.id}/match/confirm`, { body: { confirmed: v } }); },
     async matchUnbind() {
-      if (!confirm('解除和这个 1688 货源的绑定？进货价会清空。')) return;
+      if (!confirm('清除这个商品的全部匹配结果？之前删掉的无同款规格会恢复，进货价清空。')) return;
       this.current = await api(`/api/products/${this.current.id}/match`, { method: 'DELETE' });
       this.loadProducts();
     },
-    async autoMatch(ids) {
-      try { this.jobs.unshift(await api('/api/products/auto-match', { body: { ids } })); this.toast('采集助手正在以图搜 1688 同款，进度在右下角'); }
-      catch (e) { this.toast(e.message, true); }
+    async autoMatch(ids, rematch = false) {
+      try {
+        this.jobs.unshift(await api('/api/products/auto-match', { body: { ids, rematch } }));
+        this.toast('开始找 1688 同款：采集助手会在一个窗口里依次以图搜、打开 1688 核对，进度在右下角');
+        setTimeout(this.refreshCurrent, 400);
+      } catch (e) { this.toast(e.message, true); }
     },
-    async matchPick(oid) {
-      try { this.jobs.unshift(await api(`/api/products/${this.current.id}/match/pick`, { body: { offer_id: oid } })); this.toast('采集助手正在读取这个 1688 商品的价格…'); }
-      catch (e) { this.toast(e.message, true); }
+    rematch() {
+      if (!confirm('全部规格重新匹配？之前删掉的无同款规格会先恢复再重新核对（手动改判过的不动）。')) return;
+      this.autoMatch([this.current.id], true);
     },
-    matchStateName(s) { return { none: '未绑 1688', candidates: '待选同款', auto: '自动绑定·待确认', unconfirmed: '已绑·待确认', bound: '' }[s] || ''; },
-    imageSearch() {
-      const img = (this.current.main_images || [])[0];
-      if (!img) { this.toast('这个商品没有主图', true); return; }
-      window.open('https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(img), '_blank');
+    openPick(u) {
+      const r = u.result || {};
+      this.pick = { unit: u, offer: r.offer_id || '', sku: r.sku_name || '' };
+    },
+    async pickSet(offer) {
+      const u = this.pick.unit;
+      if (!offer && !confirm(`把「${u.name}」设为无同款？这个规格会从商品里删除，不会进入待上架。`)) return;
+      try {
+        this.current = await api(`/api/products/${this.current.id}/match/unit`, { body: { unit: u.key, offer_id: offer, sku_name: offer ? this.pick.sku : null } });
+        this.pick = null; this.toast(offer ? '已设为同款' : '已设为无同款'); this.loadProducts();
+        if (offer && !this.dsel.skus.includes(u.key)) this.dsel.skus.push(u.key);
+      } catch (e) { this.toast(e.message, true); }
+    },
+    unitStatusName(u) {
+      return { matched: '同款', none: '无同款', error: '失败可重试', todo: '未匹配', pending: '排队中', searching: '以图搜中', verifying: '核对 1688' }[u.status] || u.status;
+    },
+    unitWhy(u) {
+      const w = Object.values(u.why || {}).filter(Boolean);
+      if (w.length) return w[0];
+      return (u.cands && !u.cands.length) ? '以图搜没有找到 1688 候选' : '候选的图片和规格都对不上';
+    },
+    uniq(a) { return [...new Set((a || []).filter(Boolean))]; },
+    matchStateName(m) {
+      if (!m) return '';
+      if (m.state === 'none') return '未匹配 1688';
+      if (m.state === 'running') return '匹配中…';
+      return m.matched ? '' : '无同款';
     },
     async refreshCurrent() {
       const p = await api(`/api/products/${this.current.id}`).catch(() => null);
