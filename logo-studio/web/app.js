@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 7, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 7, 1];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;

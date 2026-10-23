@@ -577,15 +577,21 @@ async function doImgSearch(task) {
     const up = await exec(tab, pageUpload, [b64], 30000);
     elog('上传图片搜索', { site: name, ...(up || {}) });
     if (!up || !up.ok) throw new Error((up && up.error) || '上传失败');
+    let found = [];
     for (let i = 0; i < 30; i++) {          // 等结果出来（页面可能跳转到结果页）
       await sleep(1000);
       try {
         const c = await exec(tab, pageCandidates, [null], 15000);
-        if (c && c.length) return c;
+        if (c && c.length) { found = c; break; }
       } catch (e) { /* 页面在跳转，等一下再读 */ }
     }
-    debugSave(name + '-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
-    return [];
+    const diag = await exec(tab, pageNetDiag, [], 15000).catch(e => ({ error: String(e) }));
+    elog('上传后页面情况', { site: name, count: found.length, href: diag.href, broken: diag.broken, requests: (diag.net || []).length });
+    if (!found.length) {
+      debugSave(name + '-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
+    }
+    debugSave(name + '-net-' + (task.unit || ''), JSON.stringify(diag, null, 1));
+    return found;
   }
   for (const [name, fn] of steps) {
     try {
@@ -613,6 +619,16 @@ async function imageB64(url) {
   return 'data:' + (r.headers.get('content-type') || 'image/jpeg') + ';base64,' + btoa(bin);
 }
 
+// 上传后的页面诊断：当前地址、裂开的图片地址、页面请求过的资源、上传时记录下来的接口请求和返回
+function pageNetDiag() {
+  let net = [];
+  try { net = JSON.parse(sessionStorage.getItem('__lsNet') || '[]'); } catch (e) { /* 忽略 */ }
+  const broken = [...document.images].filter(i => i.complete && i.naturalWidth === 0 && i.getAttribute('src')).map(i => i.getAttribute('src').slice(0, 300)).slice(0, 10);
+  const imgs = [...document.images].map(i => (i.currentSrc || i.src || '').slice(0, 200)).filter(Boolean).slice(0, 15);
+  const res = performance.getEntriesByType('resource').map(e => e.name).filter(u => !/\.(css|woff2?|ttf|svg)(\?|$)/.test(u)).slice(-60).map(u => u.slice(0, 300));
+  return { href: location.href.slice(0, 500), title: document.title, broken, imgs, resources: res, net };
+}
+
 // 在页面里把图片放进「上传图片」框（和人点上传一样）。找不到上传框时先点一下「以图搜 / 上传 / 相机」按钮
 async function pageUpload(b64) {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -635,6 +651,32 @@ async function pageUpload(b64) {
       }
     }
   }
+  // 记录上传后页面发出的请求（地址、状态、返回内容开头），存进 sessionStorage，跳到结果页也还在：排查上传失败用
+  try {
+    sessionStorage.setItem('__lsNet', '[]');
+    const rec = x => { try { const a = JSON.parse(sessionStorage.getItem('__lsNet') || '[]'); a.push(x); sessionStorage.setItem('__lsNet', JSON.stringify(a.slice(-60))); } catch (e) { /* 忽略 */ } };
+    if (!window.__lsHooked) {
+      window.__lsHooked = true;
+      const of = window.fetch;
+      window.fetch = async function (u, o) {
+        const url = String((u && u.url) || u).slice(0, 300), m = (o && o.method) || 'GET';
+        try {
+          const r = await of.apply(this, arguments);
+          r.clone().text().then(t => rec({ k: 'fetch', m, url, st: r.status, len: t.length, body: t.slice(0, 400) })).catch(() => rec({ k: 'fetch', m, url, st: r.status }));
+          return r;
+        } catch (e) { rec({ k: 'fetch', m, url, err: String(e).slice(0, 200) }); throw e; }
+      };
+      const oo = XMLHttpRequest.prototype.open, os = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.open = function (m, u) { this.__ls = { m, url: String(u).slice(0, 300) }; return oo.apply(this, arguments); };
+      XMLHttpRequest.prototype.send = function (b) {
+        const info = this.__ls || {};
+        info.sent = b instanceof FormData ? 'FormData' : b ? String(b).slice(0, 200) : '';
+        this.addEventListener('loadend', () => rec({ k: 'xhr', ...info, st: this.status,
+          body: (this.responseType === '' || this.responseType === 'text') ? String(this.responseText || '').slice(0, 400) : this.responseType }));
+        return os.apply(this, arguments);
+      };
+    }
+  } catch (e) { /* 忽略 */ }
   const dt = new DataTransfer();
   dt.items.add(file);
   if (inputs.length) {

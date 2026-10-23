@@ -9,7 +9,7 @@ import sys
 import time
 import urllib.request
 import venv
-import webbrowser
+import webbrowser  # noqa: F401
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -106,6 +106,11 @@ def stop_old() -> None:
     raise SystemExit(f"端口 {PORT} 被占用，请关闭之前打开的黑色窗口后重新双击启动。")
 
 
+def open_page(url: str) -> None:
+    from app.openbrowser import open_page as _open  # 只用标准库，安装依赖前也能用
+    _open(url)
+
+
 def main() -> None:
     disable_quick_edit()
     if sys.version_info < (3, 9):
@@ -113,7 +118,7 @@ def main() -> None:
     if port_in_use():
         if running_version() == local_version():
             print("工具已经在运行，直接打开页面。")
-            webbrowser.open(f"http://127.0.0.1:{PORT}")
+            open_page(f"http://127.0.0.1:{PORT}")
             return
         print("检测到旧版本还在运行，正在关闭它并启动新版本…")
         stop_old()

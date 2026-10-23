@@ -24,7 +24,7 @@
       <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
     </div>
     <div class="spacer"></div>
-    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.7.0（登录检测、WB / Ozon 采集、找同款需要）</span>
+    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.7.1（登录检测、WB / Ozon 采集、找同款需要）</span>
     <div class="login-wrap" v-if="needLogin.length" @mouseleave="showLogin=false">
       <button class="pill login-pill" @click="showLogin=!showLogin"><i class="dot warn"></i>需要登录 {{ needLogin.length }} 个平台</button>
       <transition name="pop">
