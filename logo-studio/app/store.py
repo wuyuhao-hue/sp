@@ -22,15 +22,15 @@ _lock = threading.RLock()
 
 # 套图模板里可选的图片类型
 SHOT_TYPES = {
-    "hero": "首图：正面（隐形人台）+ 左上 logo / 尺码 / 颜色圆点 / 底部大字",
-    "back_overlay": "背面（隐形人台）+ 左上 logo / 尺码 / 颜色圆点 / 底部大字",
+    "hero": "首图：正面（隐形人台）+ 左上 logo / 卖点栏 / 颜色圆点 / 底部大字",
+    "back_overlay": "背面（隐形人台）+ 左上 logo / 卖点栏 / 颜色圆点 / 底部大字",
     "open_lining": "敞开展示内衬 + 底部大字",
-    "material_info": "面料/保暖特写 + 俄语标题说明 + 图标",
+    "material_info": "内里/保暖层特写 + 俄语标题说明 + 图标",
     "material_tech": "面料工艺特写（防水/面料质感）+ 俄语说明",
     "detail_collage": "细节特写拼图（拉链/口袋/袖口）",
     "flat_front": "正面平铺/挂拍（无文字）",
     "side_ghost": "侧面 45°（隐形人台，无文字）",
-    "detail_fabric": "面料微距（无文字）",
+    "detail_fabric": "面料微距特写（无文字）",
     "back_info": "背面 + AI 写的标题文字",
     "hero_ai_text": "首图：AI 写卖点文字版",
     "model_front": "模特正面",
@@ -44,14 +44,14 @@ SHOT_TYPES = {
 DEFAULT_SHOTS = [
     {"type": "hero", "logo": True, "extra": ""},
     {"type": "back_overlay", "logo": False, "extra": ""},
-    {"type": "open_lining", "logo": False, "extra": ""},
+    {"type": "open_lining", "logo": True, "extra": ""},
     {"type": "material_info", "logo": False, "extra": ""},
     {"type": "material_tech", "logo": False, "extra": ""},
     {"type": "detail_collage", "logo": False, "extra": ""},
-    {"type": "flat_front", "logo": True, "extra": ""},
+    {"type": "detail_fabric", "logo": False, "extra": ""},
     {"type": "side_ghost", "logo": True, "extra": ""},
 ]
-SHOTS_VERSION = 4
+SHOTS_VERSION = 5
 
 DEFAULT_SETTINGS = {
     "api_base": "",
@@ -69,7 +69,8 @@ DEFAULT_SETTINGS = {
     "size_chart_auto": True,   # 每套最后自动加一张本地生成的尺码表
     "logo_mode": "ai_crop",    # ai_crop：AI 定位 + 胸口放大由 AI 印（推荐）/ exact：本地贴原图 / ai：AI 整张直接画
     "overlay_logo": True,      # 首图/背面图左上角放品牌 logo
-    "overlay_size": True,      # 尺码标
+    "overlay_points": True,    # 卖点栏（图标 + 俄文）
+    "overlay_size": True,      # 没有卖点时显示尺码区间
     "overlay_swatches": True,  # 右侧颜色圆点
     "overlay_word": True,      # 底部半透明大字
     "copy_lang": "ru",         # 首图卖点文字语言

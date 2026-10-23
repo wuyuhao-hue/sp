@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 
 from . import store
-from .compose import compose, pick_variant
+from .compose import compose, logo_luminance as logo_luminance_rgba, pick_variant
 
 STYLE_TEXT = {
     "print": "a crisp, high-quality screen print",
@@ -24,10 +24,12 @@ COLOR_TEXT = {
 }
 CROP_PROMPT = (
     "Image 1 is a close-up of a garment with a solid magenta placeholder rectangle on it. Image 2 is a brand logo. "
-    "Replace the magenta rectangle with the logo from image 2 so that it looks like {style} on this exact fabric, at "
-    "the same position, size and angle as the rectangle, following the fabric's folds, texture, lighting and shadows. "
-    "Reproduce the logo EXACTLY: identical shape, letters, spelling, spacing and proportions — do not redraw, restyle "
-    "or add anything. {color} Remove every trace of magenta. Everything outside the rectangle must stay exactly the same."
+    "Replace the magenta rectangle with the logo from image 2 so that it looks like {style} on this exact fabric, filling "
+    "the rectangle's position, size and angle, following the fabric's folds, texture, lighting and shadows. "
+    "Reproduce the logo EXACTLY: identical shape, letters, spelling, spacing, proportions and colors as in image 2 — it "
+    "must be crisp and clearly readable, not faded or washed out. Only the logo graphic itself: no label, patch, box, "
+    "frame, outline or background shape around it{patch}. Remove every trace of magenta. Everything outside the rectangle "
+    "must stay exactly the same."
 )
 
 MARKER_RGB = (255, 0, 255)
@@ -37,7 +39,7 @@ def marker_prompt(aspect: float) -> str:
     return (
         "LOGO PLACEHOLDER: on the wearer's left chest (the right side of the image when the garment faces the viewer), "
         "where a premium brand chest logo would sit, place a flat rectangle filled with one solid pure magenta color "
-        f"(#FF00FF), about 8 cm wide and {8 / max(aspect, 0.2):.1f} cm tall (width:height = {aspect:.2f}:1), lying on the "
+        f"(#FF00FF), about 9.5 cm wide and {9.5 / max(aspect, 0.2):.1f} cm tall (width:height = {aspect:.2f}:1), lying on the "
         "fabric and following its angle and perspective. It is only a placeholder that will be replaced later: no text, no "
         "pattern, no gradient, no border inside it, and do not use magenta anywhere else in the image. Exactly one "
         "placeholder; nothing on the back or sleeves."
@@ -131,10 +133,22 @@ def ai_crop_logo(marked: Image.Image, place: dict, logo_meta: dict) -> Image.Ima
     crop = marked.crop(box)
     side = box[2] - box[0]
     logo = Image.open(store.logo_dir(logo_meta["id"]) / logo_meta["logo"]).convert("RGBA")
-    bg = Image.new("RGBA", logo.size, (255, 255, 255, 255))
-    bg.alpha_composite(logo)
+    # 先按胸口面料的深浅决定 logo 颜色（黑或白），保证看得清
+    m0 = find_marker(crop)
+    ring = cv2.dilate(m0["mask"], np.ones((25, 25), np.uint8)) - cv2.dilate(m0["mask"], np.ones((7, 7), np.uint8)) \
+        if m0 else None
+    rgb = np.asarray(crop.convert("RGB"))
+    lum = float(cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)[ring > 0].mean()) if ring is not None and ring.any() else 128.0
+    if logo_meta.get("color_mode") != "original":
+        logo = pick_variant(logo, None, None, "auto", lum)  # 浅色面料印黑色 logo，深色面料印白色 logo
+    # logo 放在和它对比明显的底色上发给 AI，避免浅色 logo 在白底上"看不见"
+    bgc = (40, 40, 44, 255) if logo_luminance_rgba(logo) > 150 else (245, 245, 245, 255)
+    pad = Image.new("RGBA", (int(logo.width * 1.3), int(logo.height * 1.6)), bgc)
+    pad.alpha_composite(logo, ((pad.width - logo.width) // 2, (pad.height - logo.height) // 2))
+    bg = pad
     prompt = CROP_PROMPT.format(style=STYLE_TEXT.get(logo_meta.get("style"), STYLE_TEXT["print"]),
-                                color=COLOR_TEXT.get(logo_meta.get("color_mode"), COLOR_TEXT["auto"]))
+                                patch=" (the logo is a woven patch, so the patch itself is allowed)"
+                                if logo_meta.get("style") == "patch" else "")
     out = ai.edit_images([crop.resize((1024, 1024), Image.LANCZOS), bg.convert("RGB")], prompt,
                          size="1024x1024", fidelity=True)
     out = out.resize((side, side), Image.LANCZOS)

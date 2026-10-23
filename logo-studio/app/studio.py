@@ -139,7 +139,29 @@ SHOT_PROMPTS.update({
         "gutters, crisp and well lit. Optionally one short caption in {lang} under each photo. No logos."
     ),
 })
-CAN_LOGO = {"hero", "hero_ai_text", "hero_model", "model_front", "model_side", "flat_front", "lifestyle", "side_ghost"}
+CLOSE_ONLY = (" IMPORTANT: this is a close-up detail image — do NOT show the whole garment or its full front view; "
+              "only tight crops of the material or details.")
+SHOT_PROMPTS["material_info"] = (
+    "Macro close-up of the garment's inside lining or insulation (for example the fleece, padding or down) filling most "
+    "of the frame, shown at an open edge or turned-back corner, soft dramatic studio light. Upper part: " + HEADLINE +
+    " and 1-2 short lines in {lang} explaining the warmth benefit. At the bottom: a row of 3-4 simple thin-line circular "
+    "icons, each with a 2-3 word caption in {lang}. Based only on these real features: {facts}" + CLOSE_ONLY
+)
+SHOT_PROMPTS["material_tech"] = (
+    "Macro close-up of the garment's OUTER fabric surface only, filling the frame with soft folds, showing its weave and "
+    "quality (if the product is water-repellent, a few water droplets beading on the surface). Upper part: a clean light "
+    "panel with " + HEADLINE + " and 1-2 short lines in {lang}. At the bottom: a row of 3-4 simple thin-line circular "
+    "icons, each with a 2-3 word caption in {lang}. Based only on these real features: {facts}" + CLOSE_ONLY
+)
+SHOT_PROMPTS["detail_collage"] = (
+    "A clean detail collage on white made of 3-4 tight close-up photos of real construction details of this garment — for "
+    "example the zipper pull and teeth, a pocket opening, the cuff, the collar or hem — arranged in a neat grid with thin "
+    "white gutters, crisp and well lit. Under each photo a short caption in {lang} next to a small plus icon. No logos."
+    + CLOSE_ONLY
+)
+SHOT_PROMPTS["detail_fabric"] += CLOSE_ONLY
+CAN_LOGO = {"hero", "hero_ai_text", "hero_model", "model_front", "model_side", "flat_front", "lifestyle", "side_ghost",
+            "open_lining"}
 USES_STYLE = {"hero_ai_text", "hero_model", "back_info", "material_info", "material_tech", "detail_collage"}
 OVERLAY_FULL = {"hero", "back_overlay"}   # 本地叠加：左上 logo、尺码标、颜色圆点、底部大字
 OVERLAY_WORD = {"open_lining"}            # 本地叠加：只加底部大字
@@ -186,6 +208,10 @@ def fill_defaults(pid: str) -> dict:
         if not info.get("big_word") and not edited.get("big_word"):
             info["big_word"] = info.get("big_word_ru") or next(
                 (w for k, w in BIG_WORD if k in (p.get("title") or "")), "")
+        if not info.get("points_local"):
+            from .points import derive
+
+            info["points_local"] = derive([p.get("title") or ""])
         if not info.get("size_label") and not edited.get("size_label"):
             info["size_label"] = default_size_label(p)
     return store.update_product(pid, fn)
@@ -331,7 +357,7 @@ def render_final(pid: str, img: dict, logo: dict | None, product: dict | None = 
     out = Image.open(store.product_dir(pid) / (img.get("garment") or img["base"])).convert("RGB")
     s = store.get_settings()
     if img["type"] in OVERLAY_FULL:
-        out = overlay.apply(out, p, logo, "full", s)
+        out = overlay.apply(out, p, logo, "full_back" if img["type"] == "back_overlay" else "full", s)
     elif img["type"] in OVERLAY_WORD:
         out = overlay.apply(out, p, logo, "word", s)
     return out
@@ -487,8 +513,18 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
 
     # 尺码表识别（本地 OCR）在后台和 AI 生图同时进行
     def ocr():
-        from .ocr_size import read_size_table
+        from .ocr_size import collect_texts, read_size_table
+        from .points import derive
 
+        try:
+            # 本地卖点（没有 AI 写的卖点时使用）：标题 + 前几张详情图里的文字
+            texts = [p.get("title") or ""] + collect_texts(p["detail_images"][:6])
+            local = derive(texts)
+            store.update_product(pid, lambda x: x.setdefault("ai", {}).__setitem__("points_local", local))
+        except Exception as e:  # noqa: BLE001
+            job.note(f"详情图文字识别出错：{str(e)[:80]}")
+        if has_size:
+            return
         try:
             table = read_size_table(p["detail_images"])
         except Exception as e:  # noqa: BLE001
@@ -501,8 +537,8 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
             job.note("详情图里没有识别到尺码表，请在右侧手动填写后点「更新尺码表」")
 
     ocr_thread = None
-    if add_size and not has_size:
-        job.note("后台识别详情图里的尺码表…")
+    if p.get("detail_images"):
+        job.note("后台识别详情图（尺码表、卖点）…")
         ocr_thread = threading.Thread(target=ocr, daemon=True)
         ocr_thread.start()
 
@@ -519,6 +555,8 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
     _run(ai_tasks, job, finish=False)
     if ocr_thread:
         ocr_thread.join()
+        for sid in {t[1] for t in ai_tasks}:  # 卖点可能更新了：首图、背面图在本地重新叠加
+            rerender_set(pid, sid)
     _run(size_tasks, job, finish=False)
     _finish(ai_tasks + size_tasks, job)
 

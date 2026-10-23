@@ -214,8 +214,8 @@ Return ONLY a JSON object with these keys:
 - "description_en": 2-4 sentences describing exactly what the garment looks like and how it is constructed (fabric, texture, quilting, collar, closure, pockets, cuffs, hem, lining, fit). Facts only, no marketing.
 - "material_cn": fabric/material in Chinese if visible, else ""
 - "season_en": e.g. "autumn/winter"
-- "selling_points_ru": 4 short Russian selling points (2-4 words each) based on real features (fabric, warmth, waterproofing, fit, hood, pockets...)
-- "selling_points_cn": the same 4 points in Chinese
+- "selling_points_ru": 6 short Russian selling points (2-4 words each, most important first) based on real features (fabric, warmth, waterproofing, fit, hood, pockets...)
+- "selling_points_cn": the same 6 points in Chinese
 - "title_ru": a Wildberries-style Russian product title (max 60 characters), no brand names
 - "big_word_ru": ONE short Russian word for the garment type, as shown big on Wildberries images (e.g. "Пуховик", "Куртка", "Ветровка", "Худи", "Свитер", "Жилет")
 - "size_table": if any image contains a size chart, copy it EXACTLY as {{"header": [...], "rows": [[...], ...]}} with the

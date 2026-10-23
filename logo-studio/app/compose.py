@@ -13,8 +13,8 @@ import cv2
 import numpy as np
 from PIL import Image
 
-LIGHT = (242, 242, 240)
-DARK = (28, 28, 30)
+LIGHT = (245, 245, 245)
+DARK = (18, 18, 18)
 
 
 def logo_to_mono(logo: Image.Image, color: tuple[int, int, int]) -> Image.Image:

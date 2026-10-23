@@ -173,7 +173,7 @@ def update_info(pid: str, patch: dict = Body(...)):
                 info[k] = patch[k]
                 edited[k] = True
     p = store.update_product(pid, fn)
-    if "big_word" in patch or "size_label" in patch:  # 首图叠加层变了：已生成的套图在本地重新叠加
+    if {"big_word", "size_label", "selling_points_ru"} & set(patch):  # 首图叠加层变了：已生成的套图在本地重新叠加
         for st in p.get("sets") or []:
             if st.get("status") != "running":
                 studio.rerender_set(pid, st["id"])

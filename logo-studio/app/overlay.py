@@ -24,8 +24,8 @@ def _logo_layer(logo_meta: dict, width: int) -> Image.Image:
     # 太浅的 logo 放在浅色背景上看不见：换成深色
     from .compose import DARK, logo_luminance, logo_to_mono
 
-    if logo_luminance(im) > 200:
-        im = logo_to_mono(im, DARK)
+    if logo_meta.get("color_mode") != "original":
+        im = logo_to_mono(im, DARK)  # 左上角放在浅色背景上：统一用黑色
     h = round(width * im.height / im.width)
     return im.resize((width, h), Image.LANCZOS)
 
@@ -53,7 +53,7 @@ def _shadow(layer: Image.Image, radius: int = 6, alpha: int = 70) -> Image.Image
 
 
 def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, opts: dict) -> Image.Image:
-    """kind: full（logo+尺码+色块+大字）/ word（只加底部大字）"""
+    """kind: full / full_back（左上 logo + 卖点栏（没有卖点时显示尺码区间）+ 颜色圆点 + 底部大字）/ word（只加大字）"""
     im = base.convert("RGBA")
     W, H = im.size
     info = product.get("ai") or {}
@@ -69,7 +69,7 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
             f = _font(size)
         d.text((W / 2, H * 0.985), word, font=f, fill=(205, 207, 212, 215), anchor="ms")
 
-    if kind == "full":
+    if kind in ("full", "full_back"):
         y = int(H * 0.035)
         if opts.get("overlay_logo", True) and logo_meta:
             lg = _logo_layer(logo_meta, int(W * 0.40))
@@ -77,8 +77,15 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
                 lg = lg.resize((round(lg.width * H * 0.13 / lg.height), int(H * 0.13)), Image.LANCZOS)
             top.alpha_composite(lg, (int(W * 0.05), y))
             y += lg.height + int(H * 0.03)
+        pts = selling_points(product)
+        if kind == "full_back" and len(pts) >= 5:
+            pts = pts[3:6]  # 背面图展示另外几条卖点
+        else:
+            pts = pts[:3]
         label = (info.get("size_label") or "").strip()
-        if opts.get("overlay_size", True) and label:
+        if opts.get("overlay_points", True) and pts:
+            _points_column(top, pts, int(W * 0.045), y, int(W * 0.27), H)
+        elif opts.get("overlay_size", True) and label:  # 没有卖点时用尺码区间兜底
             f = _font(int(H * 0.045))
             tw = d.textlength(label, font=f)
             bw, bh = int(tw + W * 0.09), int(H * 0.07)
@@ -102,6 +109,67 @@ def apply(base: Image.Image, product: dict, logo_meta: dict | None, kind: str, o
                 yy += int(dia * 0.86)
     im.alpha_composite(top)
     return im.convert("RGB")
+
+
+def _text_font(size: int) -> ImageFont.FreeTypeFont:
+    for d in _FONT_DIRS:
+        for n in ("segoeuib.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf", "Arial Bold.ttf"):
+            if (d / n).exists():
+                return ImageFont.truetype(str(d / n), size)
+    return ImageFont.load_default(size)
+
+
+def _wrap(d: ImageDraw.ImageDraw, text: str, font, width: int) -> list[str]:
+    lines, cur = [], ""
+    for w in text.split():
+        t = (cur + " " + w).strip()
+        if d.textlength(t, font=font) > width and cur:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = t
+    lines.append(cur)
+    return lines[:3]
+
+
+def _points_column(top: Image.Image, pts: list[str], x: int, y: int, col_w: int, H: int) -> None:
+    """左侧卖点栏：每条一个圆形线条图标 + 下面一到两行俄文，放在半透明白色卡片上。"""
+    from .points import draw_icon, icon_for
+
+    d = ImageDraw.Draw(top)
+    icon = int(col_w * 0.42)
+    size = max(16, int(H * 0.024))
+    f = _text_font(size)
+    # 长单词（如 Воротник-стойка）没法换行：缩小字号直到每个单词都放得下
+    while size > 14 and any(d.textlength(w, font=f) > col_w - 16 for t in pts for w in t.split()):
+        size -= 1
+        f = _text_font(size)
+    items = []
+    for t in pts:
+        lines = _wrap(d, t, f, col_w - 16)
+        items.append((t, lines))
+    line_h = int(f.size * 1.18)
+    block_h = sum(icon + 10 + len(ls) * line_h + int(H * 0.025) for _, ls in items)
+    card = Image.new("RGBA", (col_w + 24, block_h + 20), (0, 0, 0, 0))
+    ImageDraw.Draw(card).rounded_rectangle((0, 0, card.width - 1, card.height - 1), radius=18, fill=(255, 255, 255, 205))
+    top.alpha_composite(card, (x - 12, y - 10))
+    for t, lines in items:
+        ic = draw_icon(icon_for(t), icon)
+        top.alpha_composite(ic, (x + (col_w - icon) // 2, y))
+        y += icon + 10
+        for ln in lines:
+            d.text((x + col_w / 2, y), ln, font=f, fill=(20, 20, 24, 255), anchor="ma")
+            y += line_h
+        y += int(H * 0.025)
+
+
+def selling_points(product: dict) -> list[str]:
+    """卖点：AI 写的或手动填的优先；没有时用本地关键词规则从标题和详情图文字里提取。"""
+    info = product.get("ai") or {}
+    pts = [p for p in info.get("selling_points_ru") or [] if p.strip()]
+    if pts:
+        return pts
+    return [p["ru"] for p in info.get("points_local") or []]
 
 
 def default_size_label(product: dict) -> str:

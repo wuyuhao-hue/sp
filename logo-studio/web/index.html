@@ -182,8 +182,9 @@
             <select class="input" :value="aiInfo.gender || guessGender" @change="saveInfo({gender: $event.target.value})">
               <option value="male">男模特</option><option value="female">女模特</option><option value="unisex">中性</option>
             </select></div>
-          <div class="field" style="margin-top:10px"><label>首图卖点（{{ langName }}，每行一个，最多 4 个）</label>
-            <textarea class="input" rows="4" :value="(aiInfo['selling_points_' + lang] || []).join('\n')" @change="saveInfo({['selling_points_' + lang]: $event.target.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 4)})" placeholder="留空则由 AI 根据图片自己写"></textarea></div>
+          <div class="field" style="margin-top:10px"><label>卖点（{{ langName }}，每行一个，最多 6 条）</label>
+            <textarea class="input" rows="4" :value="(aiInfo['selling_points_' + lang] || []).join('\n')" @change="saveInfo({['selling_points_' + lang]: $event.target.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 6)})" :placeholder="localPointsText || '留空则自动从标题和详情图文字中提取'"></textarea>
+            <span class="faint">首图显示前 3 条，背面图显示第 4~6 条。{{ settings.text_model ? '「重新理解」会让 AI 重写卖点。' : '设置「商品理解模型」后可由 AI 写卖点。' }}留空时自动提取（灰字为当前自动提取的结果）。</span></div>
           <div class="faint" v-if="aiInfo.selling_points_cn && lang !== 'cn'" style="margin-top:4px">中文：{{ aiInfo.selling_points_cn.join(' / ') }}</div>
           <div class="row" style="margin-top:10px;gap:10px">
             <div class="field grow"><label>首图底部大字</label>
@@ -267,7 +268,7 @@
               </select></div>
             <div class="field grow"><label>颜色</label>
               <select class="input" v-model="l.color_mode" @change="saveLogo(l, {color_mode: l.color_mode})">
-                <option value="auto">自动与衣服撞色</option><option value="original">保持原色</option>
+                <option value="auto">黑白自动（浅色衣服印黑色，深色衣服印白色）</option><option value="original">保持原色</option>
               </select></div>
           </div>
           <div class="row between"><span class="faint">改动对之后生成的图生效</span><button class="btn sm danger" @click="deleteLogo(l)">删除</button></div>
@@ -338,7 +339,8 @@
             <div class="row" style="margin-top:12px;flex-wrap:wrap;gap:14px">
               <span class="faint">首图 / 背面图本地叠加：</span>
               <span class="switch" :class="{on: settings.overlay_logo}" @click="settings.overlay_logo = !settings.overlay_logo"><i></i>左上角 logo</span>
-              <span class="switch" :class="{on: settings.overlay_size}" @click="settings.overlay_size = !settings.overlay_size"><i></i>尺码标</span>
+              <span class="switch" :class="{on: settings.overlay_points}" @click="settings.overlay_points = !settings.overlay_points"><i></i>卖点栏（图标+俄文）</span>
+              <span class="switch" :class="{on: settings.overlay_size}" @click="settings.overlay_size = !settings.overlay_size"><i></i>没有卖点时显示尺码区间</span>
               <span class="switch" :class="{on: settings.overlay_swatches}" @click="settings.overlay_swatches = !settings.overlay_swatches"><i></i>颜色圆点</span>
               <span class="switch" :class="{on: settings.overlay_word}" @click="settings.overlay_word = !settings.overlay_word"><i></i>底部大字</span>
             </div>

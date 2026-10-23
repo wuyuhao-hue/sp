@@ -47,6 +47,7 @@ createApp({
       return t && t.header ? [t.header, ...t.rows].map(r => r.join(' | ')).join('\n') : '';
     },
     shotTypeOptions() { const o = { ...this.shotTypes }; delete o.size_chart; return o; },
+    localPointsText() { return (this.aiInfo.points_local || []).map(p => p.ru).join('\n'); },
     lang() { return this.settings.copy_lang || 'ru'; },
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },

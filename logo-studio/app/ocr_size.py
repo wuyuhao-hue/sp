@@ -47,7 +47,28 @@ def _engine():
     return RapidOCR()
 
 
+_cache: dict[str, list[dict]] = {}
+
+
 def _ocr(src: str) -> list[dict]:
+    if src in _cache:
+        return _cache[src]
+    _cache[src] = _ocr_raw(src)
+    return _cache[src]
+
+
+def collect_texts(srcs: list[str]) -> list[str]:
+    """识别若干张详情图的文字（用于提取卖点）。"""
+    out = []
+    for src in srcs:
+        try:
+            out += [i["t"] for i in _ocr(src)]
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def _ocr_raw(src: str) -> list[dict]:
     im = ai.load_image(src, 1400)
     with _lock:  # 识别引擎不保证多线程安全
         r = _engine()(np.asarray(im))
