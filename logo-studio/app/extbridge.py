@@ -179,14 +179,14 @@ def start_tabs_job() -> jobs.Job:
     return job
 
 
-def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False) -> None:
+def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False, nowait: bool = False) -> None:
     """skip_existing：整店采集时跳过已有商品；手动给的链接则重新采集（更新信息，保留套图）。"""
     for oid in ids:
         if skip_existing and store.get_product(f"d1688-{oid}" if getattr(job, "mode", "logo") == "direct" else f"1688-{oid}"):
             job.note(f"{oid} 已采集过，跳过")
             continue
         job.total += 1
-        _new_task(job, "offer", offer_id=oid, url=f"https://detail.1688.com/offer/{oid}.html")
+        _new_task(job, "offer", offer_id=oid, url=f"https://detail.1688.com/offer/{oid}.html", **({"nowait": True} if nowait else {}))
     _maybe_finish(job)
 
 
@@ -350,7 +350,18 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
                 pid = t.get("pid") or t.get("match_for")
                 _workers.submit(_sku_run, job, skumatch.on_fail, pid, t, str(data.get("error", "失败")))
                 return
-            job.note(f"✗ {t.get('offer_id') or t['kind']}：{data.get('error', '失败')}")
+            err = str(data.get("error", "失败"))
+            if err.startswith("BLOCKED:"):
+                # 批量采集遇到人机验证 / 登录：整组停下并提示，不在后台一直等
+                dropped = [x for x in _queue if x["job_id"] == job.id]
+                _queue[:] = [x for x in _queue if x["job_id"] != job.id]
+                job.note(f"⚠ {err[8:]}，已停止采集" + (f"（还有 {len(dropped)} 个没采集）" if dropped else "") +
+                         "。请在 Chrome 里打开对应网站完成验证 / 登录，再重新采集（已采集过的会自动跳过）")
+                job.done += 1 if t["kind"] in ("offer", "page") else 0
+                job.total -= sum(1 for x in dropped if x["kind"] in ("offer", "page"))
+                _maybe_finish(job)
+                return
+            job.note(f"✗ {t.get('offer_id') or t['kind']}：{err}")
             if t["kind"] in ("offer", "page", "imgsearch"):
                 job.done += 1
             _maybe_finish(job)
@@ -364,15 +375,18 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             ids = list(dict.fromkeys(str(i) for i in data.get("ids", []) if isinstance(i, (str, int))))
             job.note(f"{'店铺' if t['kind'] == 'shop' else '搜索页'}共发现 {len(ids)} 个商品")
             pf = t.get("platform") or "1688"
+            if data.get("blocked"):
+                job.note(f"⚠ 翻到第 {int(data.get('pages') or 0) + 1} 页遇到人机验证 / 需要登录，已停止翻页：先采集已读到的 {len(ids)} 个商品。"
+                         "在 Chrome 里完成验证后可以重新采集（已采集过的会自动跳过）")
             if pf == "1688":
-                _enqueue_offers(job, ids, skip_existing=True)
+                _enqueue_offers(job, ids, skip_existing=True, nowait=True)
             else:
                 new = [i for i in ids if not store.get_product(sources.pid_for(pf, i, getattr(job, "mode", "direct")))]
                 if len(new) < len(ids):
                     job.note(f"{len(ids) - len(new)} 个已采集过，跳过")
                 for i in new:
                     job.total += 1
-                    _new_task(job, "page", platform=pf, item_id=i, url=PAGE_URL[pf].format(i))
+                    _new_task(job, "page", platform=pf, item_id=i, url=PAGE_URL[pf].format(i), nowait=True)
                 _maybe_finish(job)
             return
         if t.get("sku"):

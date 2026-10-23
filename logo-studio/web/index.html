@@ -26,7 +26,7 @@
     </div>
     <div class="spacer"></div>
  <span class="pill warn-pill" v-if="pageStale" @click="reloadPage" style="cursor:pointer" title="点一下刷新">⚠ 采集助手已更新，请按 F5 刷新本页面</span>
-    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.10.0</span>
+    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.11.0</span>
     <div class="login-wrap" v-if="needLogin.length" @mouseleave="showLogin=false">
       <button class="pill login-pill" @click="showLogin=!showLogin"><i class="dot warn"></i>需要登录 {{ needLogin.length }} 个平台</button>
       <transition name="pop">
@@ -144,10 +144,7 @@
         <button class="btn primary block" v-if="workMode==='direct'" @click="batchDirectQueue">移入待上架</button>
         <button class="btn block" v-if="selectedMarket.length" @click="batchMatch">全部进入匹配（{{ selectedMarket.length }}）</button>
         <template v-if="workMode!=='direct'">
-        <div class="row">
-          <select class="input sm grow" v-model="batch.logo_id"><option :value="null">不印标</option><option v-for="l in logos" :key="l.id" :value="l.id">{{ l.name }}</option></select>
-          <select class="input sm grow" v-model="batch.style"><option v-for="(n, k) in styleOptions" :key="k" :value="k">{{ n }}</option></select>
-        </div>
+        <div class="faint bb-hint">logo、风格用右侧选的：{{ genLogo ? (logoById(genLogo) || {}).name : '不印标' }} · {{ styleOptions[genStyle] || genStyle }}</div>
         <div class="row">
           <select class="input sm grow" v-model="batch.sku_scope"><option value="all">每个商品全部颜色</option><option value="first">每个商品只做第一个颜色</option></select>
         </div>
@@ -167,7 +164,8 @@
             {{ skus.length }} 个{{ workMode==='direct' ? '颜色' : ' SKU' }} · {{ (current.sizes||[]).length || 1 }} 个尺码 · {{ (current.main_images||[]).length }} 主图 · {{ (current.detail_images||[]).length }} 详情图
             <template v-if="current.price_min"> · 进货价 <span class="price">¥{{ fmtPrice(current.price_min, current.price_max) }}</span></template>
             <template v-if="current.market_price_rub"> · {{ sourceName(current.source) }} 售价 {{ Math.round(current.market_price_rub) }} ₽</template>
-            · <a :href="current.url" target="_blank">打开原链接</a>
+            · <a :href="current.url" target="_blank">{{ sourceName(current.source) }} 原链接</a>
+            <template v-for="u in matchLinks" :key="u.url"> · <a :href="u.url" target="_blank" class="match-link" :title="'对应颜色：' + u.colors.join('、')">1688 同款<template v-if="matchLinks.length > 1">（{{ u.colors[0] }}{{ u.colors.length > 1 ? ' 等' : '' }}）</template></a></template>
           </div>
         </div>
       </div>
@@ -638,7 +636,8 @@
           <div class="faint" style="margin-top:4px">
             <span class="q-status inline" :class="ed.L.status">{{ statusName(ed.L.status) }}</span>
             logo：{{ ed.L.logo_name || '无' }} · 店铺：{{ shopName(shopCurrent) || '未绑定' }}
-            <a v-if="ed.product.url" :href="ed.product.url" target="_blank" style="margin-left:8px">1688 原链接</a>
+            <span class="ed-links"><a v-for="lk in (ed.product.links || [])" :key="lk.url" :href="lk.url" target="_blank" :class="lk.kind"
+               :title="lk.colors && lk.colors.length ? '对应颜色：' + lk.colors.join('、') : lk.url">{{ lk.label }}<template v-if="lk.colors && lk.colors.length && (ed.product.links || []).filter(x => x.kind === 'match').length > 1">（{{ lk.colors.slice(0, 2).join('、') }}{{ lk.colors.length > 2 ? '…' : '' }}）</template> ↗</a></span>
           </div>
         </div>
         <button class="btn sm ghost" @click="closeEditor">✕</button>
@@ -692,7 +691,7 @@
             <tbody>
               <tr v-for="v in ed.L.variants" :key="v.sku" :class="{off: !v.enabled}">
                 <td><i class="check" :class="{on: v.enabled}" @click="v.enabled = !v.enabled" style="cursor:pointer"></i></td>
-                <td><img class="ed-thumb" :src="optCover(v)" @click="zoom(optCover(v))"></td>
+                <td><div class="ed-thumb-wrap" @click="openGallery(v)" title="点击查看这个颜色即将上架的全部图片"><img class="ed-thumb" :src="optCover(v)"><span class="ed-thumb-n" v-if="optImages(v).length > 1">{{ optImages(v).length }}</span></div></td>
                 <td>{{ v.sku }}
                   <select class="input sm" style="margin-top:4px;width:100%" v-if="(ed.options[v.sku]||[]).length > 1" v-model="v.sid">
                     <option v-for="(o, i) in ed.options[v.sku]" :key="o.sid" :value="o.sid">第 {{ i + 1 }} 套 · {{ styleName(o.style) }}</option>
@@ -799,6 +798,18 @@
         <button class="btn" :disabled="!!ed.busy || ed.L.status==='uploading'" @click="saveListing()">保存</button>
         <button class="btn primary" :disabled="!!ed.busy || ed.L.status==='uploading' || !shops.length" @click="saveAndUpload">保存并上架</button>
       </div>
+    </div>
+  </div>
+  <!-- 某个颜色即将上架的全部图片：左右切换 -->
+  <div class="modal-bg gal-bg" v-if="gal" @mousedown.self="gal=null">
+    <div class="gal">
+      <div class="gal-head"><b>{{ gal.title }}</b><span class="faint">即将上架 · 第 {{ gal.i + 1 }} / {{ gal.imgs.length }} 张</span><span class="spacer"></span><button class="btn sm ghost" @click="gal=null">✕</button></div>
+      <div class="gal-main">
+        <button class="gal-nav" :disabled="gal.imgs.length < 2" @click="galStep(-1)">‹</button>
+        <img :src="gal.imgs[gal.i]" :key="gal.i">
+        <button class="gal-nav" :disabled="gal.imgs.length < 2" @click="galStep(1)">›</button>
+      </div>
+      <div class="gal-strip"><img v-for="(u, k) in gal.imgs" :key="k" :src="u" :class="{on: k === gal.i}" @click="gal.i = k"></div>
     </div>
   </div>
   <datalist id="dl-colors"><option v-for="c in dir.colors" :key="c" :value="c"></option></datalist>
@@ -1017,11 +1028,13 @@
           <template v-else>采集助手是旧版（{{ ext.version }}）：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
         </div>
         <div class="plat-row"><span v-for="pl in ['1688', 'wb', 'ozon', 'pdd']" :key="pl" class="plat"><i class="src-ic"><span v-html="srcIcon(pl)"></span><img v-if="iconOk(pl)" :src="'/api/src-icon/' + pl" @error="iconBad[pl] = true" @load="$event.target.classList.add('ok')"></i>{{ pl === '1688' ? '1688' : sourceName(pl) }}</span></div>
-        <div class="field"><label>商品链接</label>
-          <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="粘贴 1688 / WB / Ozon / 拼多多 商品链接，每行一个，混在一起也可以"></textarea></div>
+        <div class="field"><label>商品链接 / 搜索结果页链接</label>
+          <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="每行一个，四个平台混在一起也可以&#10;商品页：detail.1688.com/offer/…、ozon.ru/product/…、wildberries.ru/catalog/…/detail.aspx、拼多多 goods_id=…&#10;搜索页 / 类目页：ozon.ru/search/?text=…、wildberries.ru/catalog/0/search.aspx?search=…、s.1688.com/selloffer/…、拼多多 search_result…"></textarea></div>
         <div class="field"><label>店铺链接（整店采集）</label>
           <textarea class="input" rows="2" v-model="scrapeForm.shops" placeholder="1688 店铺或 ozon.ru/seller/… ，每行一个"></textarea></div>
-        <div class="field" style="width:200px"><label>每个店铺最多翻页</label><input class="input" type="number" min="1" max="50" v-model.number="scrapeForm.max_pages"></div>
+        <div class="field pages-field"><label>店铺 / 搜索页最多翻页</label>
+          <div class="row"><input class="input" type="number" min="-1" v-model.number="scrapeForm.max_pages" style="width:110px">
+            <span class="faint">填 -1 = 不限，翻到最后一页；中途遇到人机验证 / 登录会停下并提示</span></div></div>
         <div class="note" v-if="!extInstalled">
           <b>还没有安装「采集助手」Chrome 扩展</b>，装一次就行：<br>
           1. 在 Chrome 地址栏输入 <b>chrome://extensions</b> 打开扩展页<br>
@@ -1055,21 +1068,41 @@
     </div>
   </div>
 
-  <!-- 任务 -->
-  <div class="jobs">
-    <div class="job" v-for="j in visibleJobs" :key="j.id">
-      <div class="row between"><b style="font-size:13px">{{ j.title }}</b>
-        <span class="row">
-          <span class="tag" :class="{ok: j.status==='done', warn: j.status==='running'}">{{ jobStatus(j) }}</span>
-          <button v-if="j.status==='running'" class="btn sm ghost" @click="cancelJob(j)">取消</button>
-          <button v-else class="btn sm ghost" @click="hideJob(j)">✕</button>
-        </span>
+  <!-- 任务中心：右下角按钮，点开看进行中 / 历史任务 -->
+  <div class="tc">
+    <transition name="tcpop">
+    <div class="tc-panel" v-if="showJobs">
+      <div class="tc-head">
+        <b>任务</b>
+        <div class="seg tc-seg">
+          <button :class="{on: jobTab==='live'}" @click="jobTab='live'">进行中 <span>{{ liveJobs.length }}</span></button>
+          <button :class="{on: jobTab==='past'}" @click="jobTab='past'">历史 <span>{{ pastJobs.length }}</span></button>
+        </div>
+        <span class="spacer"></span>
+        <button class="btn sm ghost" v-if="jobTab==='past' && pastJobs.length" @click="clearJobs">清除记录</button>
       </div>
-      <div class="bar" v-if="j.total"><i :style="{width: (100*j.done/j.total)+'%'}"></i></div>
-      <div class="log"><div v-for="(l, k) in j.log.slice(-5)" :key="k">{{ l }}</div></div>
-      <div class="faint" style="margin-top:4px" v-if="j.calls && j.calls.total">已请求中转站 {{ j.calls.total }} 次（生图 {{ j.calls.image || 0 }}<template v-if="j.calls.text">、文字 {{ j.calls.text }}</template><template v-if="j.calls.failed">，失败 {{ j.calls.failed }}</template>）</div>
-      <div class="row" style="margin-top:8px" v-if="j.kind==='export' && j.status==='done'"><button class="btn sm" @click="openFolder(j.results[0])">打开文件夹</button></div>
+      <div class="tc-list scroll">
+        <div class="job" v-for="j in (jobTab==='live' ? liveJobs : pastJobs)" :key="j.id" :class="j.status">
+          <div class="row between"><b class="job-t" :title="j.title">{{ j.title }}</b>
+            <span class="row">
+              <span class="tag" :class="{ok: j.status==='done', warn: j.status==='running', err: j.status==='failed'}">{{ jobStatus(j) }}</span>
+              <button v-if="j.status==='running'" class="btn sm ghost" @click="cancelJob(j)">取消</button>
+              <button v-else class="btn sm ghost" title="从列表移除" @click="hideJob(j)">✕</button>
+            </span>
+          </div>
+          <div class="bar" v-if="j.total"><i :style="{width: (100*j.done/j.total)+'%'}"></i></div>
+          <div class="log"><div v-for="(l, k) in j.log.slice(-5)" :key="k">{{ l }}</div></div>
+          <div class="faint" style="margin-top:4px" v-if="j.calls && j.calls.total">已请求中转站 {{ j.calls.total }} 次（生图 {{ j.calls.image || 0 }}<template v-if="j.calls.text">、文字 {{ j.calls.text }}</template><template v-if="j.calls.failed">，失败 {{ j.calls.failed }}</template>）</div>
+          <div class="row" style="margin-top:8px" v-if="j.kind==='export' && j.status==='done'"><button class="btn sm" @click="openFolder(j.results[0])">打开文件夹</button></div>
+        </div>
+        <div class="tc-empty faint" v-if="!(jobTab==='live' ? liveJobs : pastJobs).length">{{ jobTab==='live' ? '没有进行中的任务' : '没有历史任务' }}</div>
+      </div>
     </div>
+    </transition>
+    <button class="tc-btn" :class="{busy: liveJobs.length, on: showJobs}" @click="showJobs = !showJobs; if (showJobs) jobTab = liveJobs.length ? 'live' : 'past'" title="任务">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="m3.5 6 1 1 2-2M3.5 12l1 1 2-2M3.5 18l1 1 2-2"/></svg>
+      <span class="tc-badge" v-if="liveJobs.length">{{ liveJobs.length }}</span>
+    </button>
   </div>
 
   <transition name="fade"><div class="toast" :class="{err: toastErr}" v-if="toastMsg">{{ toastMsg }}</div></transition>

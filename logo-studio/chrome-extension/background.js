@@ -500,9 +500,12 @@ async function blockedState(tabId) {
   throw new Error('页面打不开：' + ((lastErr && lastErr.message) || '加载失败'));
 }
 
+let noWait = false;   // 整店 / 搜索页批量采集：遇到登录或人机验证直接停下并告诉工作台，不在这里等
+
 async function waitUnblocked(win, tabId) {
   let b = await blockedState(tabId);
   if (!b) return false;
+  if (noWait) throw new Error('BLOCKED:' + (b === 'login' ? '需要登录' : '遇到人机验证'));
   elog('页面需要' + (b === 'login' ? '登录' : '人机验证') + '，已切到采集标签页等待处理', { url: (await chrome.tabs.get(tabId)).url.slice(0, 300) });
   await post('/api/ext/status', {
     status: b, message: b === 'login' ? '请在 Chrome 的采集标签页里登录（1688 / 拼多多）' : '请在 Chrome 的采集标签页里完成人机验证',
@@ -817,7 +820,10 @@ async function pageOzonShop(maxPages) {
   while (path && pages < maxPages) {
     pages++;
     let j;
-    try { j = await get(path); } catch (e) { break; }
+    try { j = await get(path); } catch (e) {
+      if (pages === 1) throw new Error('BLOCKED:遇到人机验证（Ozon 接口被拦）');
+      return { ids, pages: pages - 1, blocked: true };
+    }
     const txt = JSON.stringify(j.widgetStates || {});
     let added = 0;
     for (const m of txt.matchAll(/\/product\/[\w%-]*?-?(\d{6,})\//g)) if (!ids.includes(m[1])) { ids.push(m[1]); added++; }
@@ -837,10 +843,10 @@ async function doShop(task, delay) {
   const { win, tab } = await workerTab();
   if (task.platform === 'ozon' || /ozon\./.test(task.url)) {
     await navigate(tab, task.url.trim().startsWith('http') ? task.url.trim() : 'https://' + task.url.trim());
-    await waitUnblocked(win, tab);
-    const r = await exec(tab, pageOzonShop, [task.max_pages || 5], 240000);
-    elog('Ozon 店铺商品列表', { url: task.url, pages: r.pages, count: r.ids.length });
-    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids } });
+    if (await blockedState(tab)) throw new Error('BLOCKED:遇到人机验证 / 需要登录');
+    const r = await exec(tab, pageOzonShop, [task.max_pages || 5], 1800000);
+    elog('Ozon 店铺商品列表', { url: task.url, pages: r.pages, count: r.ids.length, blocked: !!r.blocked });
+    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids, blocked: !!r.blocked, pages: r.pages } });
     return;
   }
   let base = task.url.trim();
@@ -848,12 +854,16 @@ async function doShop(task, delay) {
   const origin = base.match(/^https?:\/\/[^/]+/)[0];
   const listUrl = base.includes('offerlist') ? base : origin + '/page/offerlist.htm';
   const ids = [];
-  for (let page = 1; page <= task.max_pages; page++) {
+  let blocked = false, page = 1;
+  for (; page <= task.max_pages; page++) {
     const url = /pageNum=\d+/.test(listUrl)
       ? listUrl.replace(/pageNum=\d+/, 'pageNum=' + page)
       : listUrl + (listUrl.includes('?') ? '&' : '?') + 'pageNum=' + page;
     await navigate(tab, url);
-    await waitUnblocked(win, tab);
+    if (await blockedState(tab)) {   // 翻页中途遇到验证：停下，先交回已经读到的
+      if (page === 1) throw new Error('BLOCKED:遇到人机验证 / 需要登录');
+      blocked = true; break;
+    }
     const html = await exec(tab, pageScrollAndCollect);
     let added = 0;
     for (const m of (html || '').matchAll(OFFER_RE)) {
@@ -862,7 +872,7 @@ async function doShop(task, delay) {
     if (!added) break;
     await sleep(rand(delay, delay * 2) * 1000);
   }
-  await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids } });
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids, blocked, pages: page - 1 } });
 }
 
 // ---------------- 搜索结果页 / 类目页：翻页读出商品编号 ----------------
@@ -889,34 +899,42 @@ async function doSearch(task, delay) {
   const { win, tab } = await workerTab();
   const url0 = task.url.trim().startsWith('http') ? task.url.trim() : 'https://' + task.url.trim();
   const maxPages = Math.max(1, Number(task.max_pages) || 3);
+  const firstPage = async u => {   // 第一页就要登录 / 验证：直接报错停下，让用户先去处理
+    await navigate(tab, u);
+    if (await blockedState(tab)) throw new Error('BLOCKED:遇到人机验证 / 需要登录');
+  };
   if (task.platform === 'ozon') {   // Ozon 搜索 / 类目页和店铺页一样，走页面自己的接口翻页
-    await navigate(tab, url0);
-    await waitUnblocked(win, tab);
-    const r = await exec(tab, pageOzonShop, [maxPages], 240000);
-    elog('Ozon 搜索页商品列表', { url: url0, pages: r.pages, count: r.ids.length });
-    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids } });
+    await firstPage(url0);
+    const r = await exec(tab, pageOzonShop, [maxPages], 1800000);
+    elog('Ozon 搜索页商品列表', { url: url0, pages: r.pages, count: r.ids.length, blocked: !!r.blocked });
+    await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids: r.ids, blocked: !!r.blocked, pages: r.pages } });
     return;
   }
   const re = LIST_RE[task.platform];
   const ids = [];
+  let blocked = false, pages = 0;
   const grab = html => { let n = 0; for (const m of (html || '').matchAll(re)) if (!ids.includes(m[1])) { ids.push(m[1]); n++; } return n; };
   if (task.platform === 'pdd') {    // 拼多多手机版搜索是无限下拉：多滚几轮
-    await navigate(tab, url0);
-    await waitUnblocked(win, tab);
-    grab(await exec(tab, pageScrollList, [maxPages * 6], 300000));
+    await firstPage(url0);
+    grab(await exec(tab, pageScrollList, [Math.min(maxPages * 6, 3000)], 1800000));
+    pages = 1;
   } else {
     const key = task.platform === 'wb' ? 'page' : 'beginPage';
     for (let page = 1; page <= maxPages; page++) {
       const u = new URL(url0);
       if (page > 1) u.searchParams.set(key, String(page));
-      await navigate(tab, u.toString());
-      await waitUnblocked(win, tab);
+      if (page === 1) await firstPage(u.toString());
+      else {
+        await navigate(tab, u.toString());
+        if (await blockedState(tab)) { blocked = true; break; }   // 翻页中途遇到验证：停下，先交回已经读到的
+      }
+      pages = page;
       if (!grab(await exec(tab, pageScrollList, [12], 120000))) break;
       if (page < maxPages) await sleep(rand(delay, delay * 2) * 1000);
     }
   }
-  elog('搜索页商品列表', { platform: task.platform, url: url0, count: ids.length });
-  await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids } });
+  elog('搜索页商品列表', { platform: task.platform, url: url0, pages, count: ids.length, blocked });
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { ids, blocked, pages } });
 }
 
 async function doTabs(task) {
@@ -953,6 +971,7 @@ async function loop() {
       idle = 0;
       const task = r.task, delay = Math.max(Number(r.delay) || 3, 1);
       abortNow = false;
+      noWait = !!task.nowait;
       // 处理任务期间每 3 秒报到一次：工作台知道采集助手还在忙；用户点了取消时，工作台在回复里让这个任务立刻中止
       const beat = setInterval(() => post('/api/ext/status', { status: '', message: '' }).then(x => {
         if (!abortNow && x && Array.isArray(x.abort) && x.abort.includes(task.id)) {

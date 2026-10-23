@@ -742,6 +742,22 @@ def _listing(pid: str, key: str) -> tuple[dict, dict]:
     return p, L
 
 
+def _product_links(p: dict) -> list[dict]:
+    """商品编辑顶部的链接：采集来源的原链接 + 找到的 1688 同款链接（Ozon / WB 匹配过的）。"""
+    src = p.get("source") or "1688"
+    out = []
+    if p.get("url"):
+        out.append({"kind": "source", "label": f"{sources.PLATFORM_NAME.get(src, src)} 原链接", "url": p["url"]})
+    seen = {}
+    for u in p.get("units") or []:
+        r = u.get("result") or {}
+        if u.get("status") == "matched" and r.get("url"):
+            seen.setdefault(r["url"], {"kind": "match", "label": "1688 同款", "url": r["url"], "colors": []})["colors"].append(u.get("name") or u["key"])
+    if not seen and (p.get("match") or {}).get("url") and src != "1688":
+        seen[p["match"]["url"]] = {"kind": "match", "label": "1688 同款", "url": p["match"]["url"], "colors": []}
+    return out + list(seen.values())
+
+
 @app.get("/api/listings/{pid}/{key}")
 def listing_get(pid: str, key: str):
     p, L = _listing(pid, key)
@@ -752,7 +768,10 @@ def listing_get(pid: str, key: str):
     for st in sets:
         cover = next((i for i in st.get("images", []) if i.get("file") or i.get("url")), None)
         options.setdefault(st["sku"], []).append({"sid": st["id"], "style": st.get("style"), "created": st["created"],
-                                                  "cover": store.img_url(pid, cover) if cover else ""})
+                                                  "cover": store.img_url(pid, cover) if cover else "",
+                                                  # 这一套即将上架的全部图片（商品编辑里点缩略图可以左右翻看）
+                                                  "images": [store.img_url(pid, im) for im in st.get("images", [])
+                                                             if im.get("status") == "done" and store.img_ok(pid, im)]})
     prices = {v["sku"]: wb_listing.variant_price(p, L, v) for v in L["variants"]}
     sid = _current_shop()
     codes = {v["sku"]: wb_listing.vendor_code(p, L, v, prefix, sid) for v in L["variants"]}
@@ -760,7 +779,7 @@ def listing_get(pid: str, key: str):
     view = {**{k: v for k, v in L.items() if k != "pub"}, **{k: P.get(k) for k in ("status", "progress", "error", "log", "nm", "media_done")}}
     view["status"] = view.get("status") or "draft"
     return {"listing": view, "summary": _listing_summary(p, L, sid), "set_options": options, "prices": prices, "codes": codes,
-            "product": {"title": p.get("title"), "url": p.get("url"), "sizes": p.get("sizes"),
+            "product": {"title": p.get("title"), "url": p.get("url"), "sizes": p.get("sizes"), "links": _product_links(p),
                         "price_min": p.get("price_min"), "price_max": p.get("price_max")}}
 
 
@@ -999,7 +1018,7 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     shop_lines = [l.strip() for l in shops.splitlines() if l.strip()]
     if not link_lines and not shop_lines:
         raise HTTPException(400, "请填写商品链接或店铺链接")
-    max_pages = max(1, min(max_pages, 50))
+    max_pages = 9999 if max_pages < 0 else max(1, min(max_pages, 500))  # -1：不限，翻到最后一页（遇到验证会停下）
     s = store.get_settings()
     # 拼多多 / Ozon / WB 链接只有采集助手能采
     if s.get("scrape_mode") == "extension" or s.get("work_mode") == "direct" or sources.parse_links(links) \
@@ -1183,6 +1202,12 @@ def open_browser():
         b.page.bring_to_front()
     browser.submit(go)
     return {"ok": True}
+
+
+@app.post("/api/jobs/clear")
+def jobs_clear():
+    """清除任务中心里已结束的任务记录（进行中的不动）。"""
+    return {"cleared": jobs.clear_finished()}
 
 
 @app.post("/api/jobs/{job_id}/cancel")

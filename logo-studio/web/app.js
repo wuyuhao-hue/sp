@@ -19,7 +19,7 @@ createApp({
     query: '', selected: [], skuSel: [], skuView: null, genLogo: null, logoPicked: false, genStyle: null, showRefs: false,
     styles: {}, batch: { logo_id: null, style: 'random', sku_scope: 'all' },
     settings: {}, shotTypes: {}, canLogoTypes: [], defaultShots: [], models: [],
-    browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
+    browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [], showJobs: false, jobTab: 'live',
     extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'),
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
     generating: false, analyzing: false, readingSize: false, lightbox: null, qSel: [],
@@ -27,14 +27,14 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, dAll: false, showSettings: false, setSec: 'ai', setSnap: '', matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, dAll: false, gal: null, showSettings: false, setSec: 'ai', setSnap: '', matchUrl: '', mFilter: 'all', pick: null, logoFilterOpen: false, lfMode: 'has', lfQuery: '', iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
       const q = this.query.trim().toLowerCase();
       return this.products.filter(p => (p.mode || 'logo') === this.workMode
         && (!q || (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q))
-        && (this.pStage === 'all' || p.stage === this.pStage) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource));
+        && this.stageHit(p, this.pStage) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource));
     },
     allSelected() { return this.filtered.length && this.filtered.every(p => this.selected.includes(p.id)); },
     skus() {
@@ -57,7 +57,7 @@ createApp({
       return !!(this.ext.connected && this.ext.version && v && v !== this.ext.version);
     },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 10, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 11, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -95,8 +95,9 @@ createApp({
       return this.loginItems.filter(it => !it.ok);
     },
     stageNames() {
-      return this.workMode === 'direct' ? { all: '全部', new: '未加入', queued: '已加入', live: '已上架' }
-        : { all: '全部', new: '未生成', generated: '已生成', queued: '已加入', live: '已上架' };
+      // 待上架 / 已上架属于顶部「上架」页，这里只按商品本身的处理进度筛选
+      return this.workMode === 'direct' ? { all: '全部', matched: '已匹配', unmatched: '未匹配', new: '未加入' }
+        : { all: '全部', new: '未生成', generated: '已生成', unqueued: '未加入' };
     },
     isMarket() { return !!this.current && ['ozon', 'wb'].includes(this.current.source); },
     units() { return (this.current && this.current.units) || []; },
@@ -119,6 +120,11 @@ createApp({
     },
     removedKeys() { return Object.keys((this.current && this.current.match_removed) || {}); },
     offerList() { return Object.values((this.current && this.current.match_offers) || {}).filter(o => (o.colors || []).length); },
+    matchLinks() {
+      const m = {};
+      for (const u of this.units) if (u.status === 'matched' && u.result && u.result.url) (m[u.result.url] = m[u.result.url] || { url: u.result.url, colors: [] }).colors.push(u.name);
+      return Object.values(m);
+    },
     matchedKeys() { return this.units.filter(u => u.status === 'matched').map(u => u.key); },
     queueSkus() {
       if (!this.isMarket) return this.skus;
@@ -152,7 +158,8 @@ createApp({
       return { full, sale: Math.round(full * (100 - Math.min(99, Math.max(0, pr.discount || 0))) / 100) };
     },
     queueCount() { return this.products.filter(p => (p.mode || 'logo') === this.workMode).reduce((n, p) => n + (p.queued || 0), 0); },
-    visibleJobs() { return this.jobs.filter(j => !this.hiddenJobs.includes(j.id)).slice(0, 3); },
+    liveJobs() { return this.jobs.filter(j => ['running', 'pending'].includes(j.status)); },
+    pastJobs() { return this.jobs.filter(j => !['running', 'pending'].includes(j.status) && !this.hiddenJobs.includes(j.id)); },
     extMode() { return (this.settings.scrape_mode || 'extension') === 'extension'; },
     statusTitle() { return this.extMode ? (this.ext.message || '') : this.browserState.message; },
     browserDot() {
@@ -181,8 +188,14 @@ createApp({
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll(), this.loadShops().catch(() => {})]);
     if (this.filtered.length) this.openProduct(this.filtered[0].id);
     setInterval(this.poll, 1500);
-    document.addEventListener('mousedown', e => { if (this.logoFilterOpen && !e.target.closest('.lf-wrap')) this.logoFilterOpen = false; });
-    document.addEventListener('keydown', e => { if (e.key === 'Escape') { this.logoFilterOpen = false; if (this.showSettings) this.closeSettings(); } });
+    document.addEventListener('mousedown', e => {
+      if (this.logoFilterOpen && !e.target.closest('.lf-wrap')) this.logoFilterOpen = false;
+      if (this.showJobs && !e.target.closest('.tc')) this.showJobs = false;   // 点任务中心以外的地方收起
+    });
+    document.addEventListener('keydown', e => {
+      if (this.gal && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { this.galStep(e.key === 'ArrowLeft' ? -1 : 1); e.preventDefault(); return; }
+      if (this.gal && e.key === 'Escape') { this.gal = null; return; }
+      if (e.key === 'Escape') { this.logoFilterOpen = false; if (this.showSettings) this.closeSettings(); } });
     window.postMessage({ logoStudio: 'check-logins' }, '*');  // 打开工作台就检测一次各平台登录状态
   },
   methods: {
@@ -238,15 +251,6 @@ createApp({
         const sig = s.jobs.map(j => `${j.id}:${j.done}:${j.status}`).join('|');
         const running = s.jobs.some(j => j.status === 'running');
         this.jobs = s.jobs;
-        // 完成的任务几秒后自动收起（导出任务多留一会儿，方便点「打开文件夹」）
-        const now = Date.now();
-        this._doneAt = this._doneAt || {};
-        for (const j of s.jobs) {
-          if (j.status === 'running' || j.status === 'pending') continue;
-          this._doneAt[j.id] = this._doneAt[j.id] || now;
-          const keep = j.kind === 'export' ? 30000 : j.status === 'failed' ? 15000 : 6000;
-          if (now - this._doneAt[j.id] > keep && !this.hiddenJobs.includes(j.id)) this.hiddenJobs.push(j.id);
-        }
         if (sig !== this._sig || running) {
           this._sig = sig;
           await this.loadProducts();
@@ -446,14 +450,24 @@ createApp({
     },
     sourceCount(s) {
       return this.products.filter(p => (p.mode || 'logo') === this.workMode && (!s || p.source === s)
-        && (this.pStage === 'all' || p.stage === this.pStage)).length;
+        && this.stageHit(p, this.pStage)).length;
     },
     logoMatch(p) {
       const f = this.pLogo, ids = p.logo_ids || [];
       if (!f) return true;
       return f.startsWith('!') ? !ids.includes(f.slice(1)) : ids.includes(f);
     },
-    stageCount(k) { return this.products.filter(p => (p.mode || 'logo') === this.workMode && (k === 'all' || p.stage === k) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource)).length; },
+    stageHit(p, k) {
+      const m = p.match_state, market = ['ozon', 'wb'].includes(p.source);
+      if (k === 'all') return true;
+      if (k === 'matched') return market && !!(m && m.matched);
+      if (k === 'unmatched') return market && !(m && m.matched);
+      if (k === 'new') return p.stage === 'new';
+      if (k === 'generated') return p.stage !== 'new';
+      if (k === 'unqueued') return p.stage === 'generated';
+      return p.stage === k;
+    },
+    stageCount(k) { return this.products.filter(p => (p.mode || 'logo') === this.workMode && this.stageHit(p, k) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource)).length; },
     setLive(st) {
       // 这套图在哪些店铺已上架（按上架记录里这个款式的 nmID）
       const L = ((this.current && this.current.listings) || {})[st.kind === 'source' ? 'src' : (st.logo_id || 'none')];
@@ -626,6 +640,9 @@ createApp({
       if (this.ed && this.ed.snap !== this.editSig(this.ed.L) && !confirm('关闭编辑？没点「保存」的修改会丢失。')) return;
       this.ed = null;
     },
+    optImages(v) { const o = (this.ed.options[v.sku] || []).find(x => x.sid === v.sid); return (o && o.images && o.images.length) ? o.images : (o && o.cover ? [o.cover] : []); },
+    openGallery(v) { const imgs = this.optImages(v); if (imgs.length) this.gal = { imgs, i: 0, title: v.sku }; },
+    galStep(d) { if (this.gal) this.gal.i = (this.gal.i + d + this.gal.imgs.length) % this.gal.imgs.length; },
     optCover(v) { const o = (this.ed.options[v.sku] || []).find(x => x.sid === v.sid); return o ? o.cover : ''; },
     async loadSubjectData() {
       const sid = this.ed.L.subject_id;
@@ -797,8 +814,10 @@ createApp({
     async batchGenerate() {
       if (!this.apiReady) { this.toast('请先在「设置」里填写中转站地址和令牌', true); this.openSettings('ai'); return; }
       const n = this.selected.length;
-      if (!confirm(`对 ${n} 个商品批量生成套图（${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}，每套约 ${this.activeShots.length + 1} 次生图调用）？`)) return;
-      try { this.jobs.unshift(await api('/api/batch/generate', { body: { ids: this.selected, ...this.batch } })); this.toast('已开始批量生成，进度在右下角'); }
+      // logo 和风格统一用右侧面板里选的（左右两处设置会互相打架，只保留右侧一处）
+      const lg = this.genLogo ? (this.logoById(this.genLogo) || {}).name : '不印标';
+      if (!confirm(`对 ${n} 个商品批量生成套图\n\nlogo：${lg}\n风格：${this.styleOptions[this.genStyle] || this.genStyle}\n范围：${this.batch.sku_scope === 'all' ? '全部颜色' : '每个商品第一个颜色'}\n每套约 ${this.activeShots.length + 1} 次生图调用`)) return;
+      try { this.jobs.unshift(await api('/api/batch/generate', { body: { ids: this.selected, logo_id: this.genLogo || null, style: this.genStyle, sku_scope: this.batch.sku_scope } })); this.toast('已开始批量生成，进度在右下角任务中心'); }
       catch (e) { this.toast(e.message, true); }
     },
     async batchQueue() {
@@ -846,6 +865,11 @@ createApp({
     async openBrowser() { await api('/api/browser/open', { body: {} }); this.toast('正在打开浏览器，第一次使用请在窗口中登录 1688'); },
     async cancelJob(j) { j.status = 'cancelled'; await api(`/api/jobs/${j.id}/cancel`, { body: {} }); this.refreshCurrent && this.refreshCurrent(); },
     hideJob(j) { this.hiddenJobs.push(j.id); },
+    async clearJobs() {
+      await api('/api/jobs/clear', { body: {} }).catch(() => {});
+      this.jobs = this.jobs.filter(j => ['running', 'pending'].includes(j.status));
+      this.hiddenJobs = [];
+    },
     async openFolder(path) { await api('/api/open-folder', { body: { path } }).catch(e => this.toast(e.message, true)); },
 
     // ---------- Logo ----------

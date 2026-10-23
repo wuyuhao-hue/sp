@@ -62,12 +62,25 @@ def run_in_thread(job: Job, fn, *args) -> Job:
     return job
 
 
+DONE = ("done", "failed", "cancelled")
+
+
 def list_jobs() -> list[dict]:
-    cutoff = time.time() - 3600
+    """当前和历史任务（历史保留 24 小时、最多 80 个，右下角任务中心里可以清除）。"""
+    cutoff = time.time() - 86400
     with _lock:
-        for k in [k for k, j in _jobs.items() if j.created < cutoff and j.status in ("done", "failed")]:
-            del _jobs[k]
+        old = sorted((j for j in _jobs.values() if j.status in DONE), key=lambda j: j.created, reverse=True)
+        for j in old[80:] + [j for j in old[:80] if j.created < cutoff]:
+            _jobs.pop(j.id, None)
         return [j.to_dict() for j in sorted(_jobs.values(), key=lambda j: j.created, reverse=True)]
+
+
+def clear_finished() -> int:
+    with _lock:
+        ks = [k for k, j in _jobs.items() if j.status in DONE]
+        for k in ks:
+            del _jobs[k]
+        return len(ks)
 
 
 def get(job_id: str) -> Job | None:

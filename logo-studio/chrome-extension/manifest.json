@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI 套图工作台 采集助手",
-  "version": "1.10.0",
+  "version": "1.11.0",
   "description": "在你自己的 Chrome 里采集 1688 / 拼多多 / Ozon / WB 商品，自动找 1688 同款，发送到本机运行的 AI 套图工作台。",
   "permissions": [
     "tabs",
