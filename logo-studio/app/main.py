@@ -186,10 +186,12 @@ def read_size_table(pid: str):
     p = _product_or_404(pid)
     if not p.get("detail_images"):
         raise HTTPException(400, "这个商品没有详情图，请重新采集或手动填写尺码表")
+    from .ocr_size import read_size_table
+
     try:
-        table = ai.extract_size_table(p["detail_images"], p.get("sizes") or [])
+        table = read_size_table(p["detail_images"])  # 本地 OCR，不调用接口
     except Exception as e:  # noqa: BLE001
-        raise HTTPException(400, str(e)) from e
+        raise HTTPException(400, f"识别失败：{e}") from e
     if not table:
         raise HTTPException(400, "详情图里没有找到尺码表，请手动填写")
 
@@ -480,12 +482,12 @@ def test_settings():
     msg = f"连接成功，共 {len(models)} 个模型。"
     suggest = "" if s.get("text_model") else ai.suggest_vision_model(models)
     if suggest:
-        msg += f"已为「商品理解模型」填入 {suggest}（用于读取尺码表、写卖点），确认后点「保存设置」。"
+        msg += f"可选：能看图的 {suggest} 可以填到「商品理解模型」里，用来写俄语卖点和标题（尺码表由本地识别，不需要它）。"
     if models and s["image_model"] not in models:
         msg += f"注意：生图模型「{s['image_model']}」不在列表里，请检查名称。"
     if s.get("text_model") and models and s["text_model"] not in models:
         msg += f"注意：商品理解模型「{s['text_model']}」不在列表里。"
-    return {"ok": True, "message": msg, "models": models, "suggest_text_model": suggest}
+    return {"ok": True, "message": msg, "models": models}
 
 
 # ---------------- 静态文件 ----------------

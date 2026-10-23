@@ -210,7 +210,7 @@ createApp({
     },
     async readSizeTable() {
       this.readingSize = true;
-      try { this.current = await api(`/api/products/${this.current.id}/size-table`, { body: {} }); this.toast('已读取尺码表，可以在下面检查修改'); }
+      try { this.current = await api(`/api/products/${this.current.id}/size-table`, { body: {} }); this.toast('已识别尺码表，请在下面核对一下数字'); }
       catch (e) { this.toast(e.message, true); }
       this.readingSize = false;
     },
@@ -304,7 +304,6 @@ createApp({
       const r = await api('/api/settings/test', { body: {} });
       this.testMsg = r.message;
       this.models = r.models || [];
-      if (r.suggest_text_model && !this.settings.text_model) this.settings.text_model = r.suggest_text_model;
     },
     async addStyleRef(e) {
       const f = e.target.files[0];

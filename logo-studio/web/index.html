@@ -193,9 +193,9 @@
           </div>
           <div class="faint" style="margin-top:4px">改了会自动更新已生成套图的首图和背面图（本地处理，不花钱）</div>
           <div class="field" style="margin-top:10px"><label class="row between">尺码表（每行一个尺码，用 | 分隔，第一行是表头）
-              <button class="btn sm ghost" :disabled="readingSize || !settings.text_model" :title="settings.text_model ? '' : '需要先在设置里填「商品理解模型」'" @click="readSizeTable">{{ readingSize ? '读取中…' : '从详情图读取' }}</button></label>
+              <button class="btn sm ghost" :disabled="readingSize || !(current.detail_images||[]).length" title="本地识别详情图里的尺码表，不调用任何接口" @click="readSizeTable">{{ readingSize ? '识别中…' : '从详情图识别' }}</button></label>
             <textarea class="input mono" rows="5" :value="sizeTableText" @change="saveInfo({size_table: $event.target.value})" placeholder="Размер | Длина | Обхват груди | Ширина плеч&#10;L | 73 | 114 | 47&#10;XL | 75 | 118 | 48.5"></textarea>
-            <span class="faint" v-if="!sizeTableText">配置了商品理解模型时，会自动从详情图里读取</span></div>
+            <span class="faint" v-if="!sizeTableText">生成套图时会自动从详情图里识别（本地识别，不花钱）；识别不到时手动填写</span></div>
           <div class="field" style="margin-top:10px"><label>俄语标题（导出用）</label>
             <input class="input" :value="aiInfo.title_ru || ''" @change="saveInfo({title_ru: $event.target.value})"></div>
           <div class="faint" v-if="aiInfo.description_en" style="margin-top:8px;line-height:1.5">{{ aiInfo.description_en }}</div>

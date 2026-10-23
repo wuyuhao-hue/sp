@@ -218,11 +218,6 @@ def ensure_analysis(product: dict, force: bool = False) -> dict:
     for k, v in result.items():
         if not (info.get("edited") or {}).get(k):
             info[k] = v
-    if not (info.get("size_table") or {}).get("rows") and details and not (info.get("edited") or {}).get("size_table"):
-        try:  # 尺码表可能在任意一张详情图里：所有详情图再专门读一次
-            info["size_table"] = ai.extract_size_table(details, product.get("sizes") or [])
-        except Exception:  # noqa: BLE001
-            pass
     return info
 
 
@@ -466,11 +461,12 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
             job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
     p = fill_defaults(pid)
     info = p.get("ai") or {}
-    if s.get("size_chart_auto", True) and s.get("text_model") and not (info.get("size_table") or {}).get("rows") \
-            and p.get("detail_images"):
-        job.note("从详情图读取尺码表…")
+    if s.get("size_chart_auto", True) and not (info.get("size_table") or {}).get("rows") and p.get("detail_images"):
+        job.note("本地识别详情图里的尺码表…")
         try:
-            table = ai.extract_size_table(p["detail_images"], p.get("sizes") or [])
+            from .ocr_size import read_size_table
+
+            table = read_size_table(p["detail_images"])
             if table:
                 store.update_product(pid, lambda x: x.setdefault("ai", {}).__setitem__("size_table", table))
                 p = store.get_product(pid)
