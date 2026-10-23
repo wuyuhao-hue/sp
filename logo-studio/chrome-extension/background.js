@@ -8,6 +8,18 @@ const OFFER_RE = /(?:offer\/|offerId=|offer_id=)(\d{8,15})/g;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
 
+// 平台官方图标：页面打开后 Chrome 显示的那个 favicon，发给工作台做来源选项卡的图标（每个平台发一次）
+const iconSent = new Set();
+async function sendFavicon(tabId) {
+  const t = await chrome.tabs.get(tabId);
+  const host = (t.url || '').split('/')[2] || '';
+  const p = /1688\.com/.test(host) ? '1688' : /yangkeduo|pinduoduo/.test(host) ? 'pdd' : /ozon\./.test(host) ? 'ozon' : /wildberries\./.test(host) ? 'wb' : '';
+  if (!p || iconSent.has(p) || !t.favIconUrl || !/^https?:/.test(t.favIconUrl)) return;
+  iconSent.add(p);
+  const data = await imageB64(t.favIconUrl);
+  await post('/api/src-icon/' + p, { data, url: t.favIconUrl });
+}
+
 // 过程日志写进工作台的运行日志（data/logs），出问题时一起导出
 function elog(msg, data = {}) {
   fetch(SERVER + '/api/ext/log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -21,26 +33,44 @@ async function post(path, body) {
   return r.json().catch(() => ({}));
 }
 
-// ---------------- 采集窗口 ----------------
+// ---------------- 采集标签页 ----------------
+// 在工作台所在的 Chrome 窗口里静默开一个后台标签页（不抢焦点），所有采集 / 以图搜 / 1688 核对都在这一个标签页里依次进行；
+// 任务全部结束后自动关掉。和你平时用的是同一个浏览器、同一套登录状态。
+async function workbenchTab() {
+  const tabs = await chrome.tabs.query({ url: ['http://127.0.0.1:8765/*', 'http://localhost:8765/*'] });
+  return tabs[0] || null;
+}
+
 async function workerTab() {
-  const { win, tab } = await chrome.storage.session.get(['win', 'tab']);
+  const { win, tab, own } = await chrome.storage.session.get(['win', 'tab', 'own']);
   if (tab) {
     try {
       const t = await chrome.tabs.get(tab);
-      if (t.windowId === win) return { win, tab };
-    } catch (e) { /* 窗口被关掉了，重新开一个 */ }
+      return { win: t.windowId, tab, own };
+    } catch (e) { /* 标签页被关掉了，重新开一个 */ }
   }
-  const w = await chrome.windows.create({ url: 'about:blank', focused: false, state: 'minimized' });
-  const ids = { win: w.id, tab: w.tabs[0].id };
+  const wb = await workbenchTab();
+  let ids;
+  try {
+    const winId = wb ? wb.windowId : (await chrome.windows.getLastFocused({ windowTypes: ['normal'] })).id;
+    const t = await chrome.tabs.create({ windowId: winId, url: 'about:blank', active: false, index: wb ? wb.index + 1 : undefined });
+    ids = { win: winId, tab: t.id, own: false };
+  } catch (e) {  // 没有打开的 Chrome 窗口：退回到单独开一个最小化窗口
+    const w = await chrome.windows.create({ url: 'about:blank', focused: false, state: 'minimized' });
+    ids = { win: w.id, tab: w.tabs[0].id, own: true };
+  }
   await chrome.storage.session.set(ids);
+  elog('开启采集标签页（后台，不抢焦点）', ids);
   return ids;
 }
 
 async function closeWorker() {
-  const { win } = await chrome.storage.session.get(['win']);
-  if (win) elog('任务都做完了，关闭采集窗口');
-  await chrome.storage.session.remove(['win', 'tab']);
-  if (win) await chrome.windows.remove(win).catch(() => {});
+  const { win, tab, own } = await chrome.storage.session.get(['win', 'tab', 'own']);
+  await chrome.storage.session.remove(['win', 'tab', 'own']);
+  if (!tab) return;
+  elog('任务都做完了，关闭采集标签页');
+  if (own) await chrome.windows.remove(win).catch(() => {});
+  else await chrome.tabs.remove(tab).catch(() => {});
 }
 
 function waitLoaded(tabId, timeout = 45000) {
@@ -65,6 +95,7 @@ async function navigate(tabId, url) {
   await chrome.tabs.update(tabId, { url });
   const ok = await loaded;
   elog(ok ? '打开页面' : '页面 45 秒没加载完，继续尝试读取', { url: url.slice(0, 300), ms: Date.now() - t0 });
+  sendFavicon(tabId).catch(() => {});
   await sleep(rand(1200, 2200));
 }
 
@@ -232,6 +263,7 @@ async function pageOzon() {
   aspectsOf(first);
   const pages = new Map([[entrySku, main]]);
   const probed = new Set();
+  let firstModal = '';
   const diag = { modal: 0, modal_ok: 0, failed: 0, dom_clicked: 0 };
   try { await domScan(); } catch (e) { diag.dom_error = String(e).slice(0, 120); }
   diag.after_dom = known.size;
@@ -244,6 +276,7 @@ async function pageOzon() {
     for (const path of tries) {
       try {
         const j = await get(path.startsWith('http') ? new URL(path).pathname + new URL(path).search : path);
+        if (!firstModal) firstModal = path + '\n' + JSON.stringify(j.widgetStates || {}).slice(0, 60000);
         const before = known.size;
         for (const [k, v] of Object.entries(j.widgetStates || {})) if (/aspects/i.test(k)) walk(v);
         diag.modal_ok++;
@@ -266,6 +299,11 @@ async function pageOzon() {
     await sleep(300 + Math.random() * 400);
   }
   diag.discovered = known.size;
+  try {   // 给开发者排查漏规格：入口页规格区的原始数据 + 第一次弹窗返回（都很小）
+    const asp = Object.entries(first.widgetStates || {}).filter(([k]) => /aspects/i.test(k)).map(([k, v]) => k + '=' + String(v).slice(0, 30000));
+    diag.raw_aspects = asp.join('\n').slice(0, 60000);
+    diag.raw_modal = (firstModal || '').slice(0, 60000);
+  } catch (e) { /* 忽略 */ }
   diag.modal_links = [...modalLinks].slice(0, 5);
   diag.skus = [...known.keys()].slice(0, 80);
   diag.fetched = [...pages.values()].filter(Boolean).length;
@@ -456,11 +494,12 @@ async function blockedState(tabId) {
 async function waitUnblocked(win, tabId) {
   let b = await blockedState(tabId);
   if (!b) return false;
-  elog('页面需要' + (b === 'login' ? '登录' : '人机验证') + '，已弹出窗口等待处理', { url: (await chrome.tabs.get(tabId)).url.slice(0, 300) });
+  elog('页面需要' + (b === 'login' ? '登录' : '人机验证') + '，已切到采集标签页等待处理', { url: (await chrome.tabs.get(tabId)).url.slice(0, 300) });
   await post('/api/ext/status', {
-    status: b, message: b === 'login' ? '请在弹出的 Chrome 窗口中登录（1688 / 拼多多）' : '请在弹出的 Chrome 窗口中完成人机验证',
+    status: b, message: b === 'login' ? '请在 Chrome 的采集标签页里登录（1688 / 拼多多）' : '请在 Chrome 的采集标签页里完成人机验证',
   });
-  await chrome.windows.update(win, { state: 'normal', focused: true });
+  await chrome.tabs.update(tabId, { active: true }).catch(() => {});   // 需要人处理：切到采集标签页
+  await chrome.windows.update(win, { state: 'normal', focused: true }).catch(() => {});
   const t0 = Date.now();
   for (let i = 1; Date.now() - t0 < 14 * 60 * 1000; i++) {
     await sleep(2000);
@@ -472,7 +511,9 @@ async function waitUnblocked(win, tabId) {
   if (b) throw new Error('等待登录/验证超时');
   await post('/api/ext/status', { status: '', message: '验证已通过，继续采集' });
   await sleep(rand(3000, 6000));
-  await chrome.windows.update(win, { state: 'minimized' }).catch(() => {});
+  const wbt = await workbenchTab();   // 处理完切回工作台，采集标签页继续在后台跑
+  if (wbt && wbt.windowId === win) await chrome.tabs.update(wbt.id, { active: true }).catch(() => {});
+  else await chrome.windows.update(win, { state: 'minimized' }).catch(() => {});
   return true;
 }
 
@@ -505,33 +546,110 @@ async function doPage(task) {
 }
 
 async function doImgSearch(task) {
-  // 先用 AiPrice，没结果再用 1688 自己的以图搜。已经在 AiPrice 页面上就不重新打开（快很多）
+  // 以图搜 1688 同款。Ozon / WB 的图片在俄罗斯的服务器上，国内的 AiPrice / 1688 服务器往往下载不到，
+  // 所以除了传图片地址，还会像人一样把图片「上传」到搜索框（图片由工作台下载好、缩到 1024 再给过来）。顺序：
+  // ① AiPrice 接口（传地址）→ ② AiPrice 页面上传图片 → ③ 1688 以图搜页面上传图片 → ④ 1688 以图搜（传地址）
   const { win, tab } = await workerTab();
-  let candidates = [], source = '', note = '', html = '';
-  try {
-    const cur = (await chrome.tabs.get(tab)).url || '';
-    if (!cur.includes('aiprice.com')) {
-      await navigate(tab, 'https://www.aiprice.com/img/search');
-      await waitUnblocked(win, tab);
-    }
-    const r = await exec(tab, pageAiprice, [task.image], 60000);
-    if (r && r.html) { html = r.html; candidates = await exec(tab, pageCandidates, [r.html]); }
-    else note = (r && r.error) || '';
-    source = 'aiprice';
-  } catch (e) { note = 'AiPrice：' + e.message; }
-  if (!candidates || !candidates.length) {
-    if (html) debugSave('aiprice-' + (task.unit || ''), html);   // 有页面但一个候选都没解析出来：存下来给开发者看格式
-    try {
-      await navigate(tab, 'https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(task.image));
-      await waitUnblocked(win, tab);
+  let candidates = [], source = '', notes = [];
+  const b64 = task.image_b64 || await imageB64(task.image).catch(() => '');
+  const goto = async url => { await navigate(tab, url); await waitUnblocked(win, tab); };
+  const steps = [
+    ['aiprice', async () => {
+      const cur = (await chrome.tabs.get(tab)).url || '';
+      if (!cur.includes('aiprice.com')) await goto('https://www.aiprice.com/img/search');
+      const r = await exec(tab, pageAiprice, [task.image], 60000);
+      if (!(r && r.html)) throw new Error((r && r.error) || '没有返回页面');
+      const c = await exec(tab, pageCandidates, [r.html]);
+      if (!c.length) debugSave('aiprice-api-' + (task.unit || ''), r.html);
+      return c;
+    }],
+    ['aiprice-upload', async () => uploadSearch('https://www.aiprice.com/img/search', 'aiprice-upload')],
+    ['1688-upload', async () => uploadSearch('https://s.1688.com/youyuan/index.htm?tab=imageSearch', '1688-upload')],
+    ['1688', async () => {
+      await goto('https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(task.image));
       await exec(tab, pageScrollAndCollect, [], 30000).catch(() => {});
-      candidates = await exec(tab, pageCandidates, [null], 30000);
-      source = '1688';
-      if (!candidates.length) debugSave('1688search-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
-    } catch (e) { note = (note ? note + '；' : '') + '1688 以图搜：' + e.message; }
+      return await exec(tab, pageCandidates, [null], 30000);
+    }],
+  ];
+  async function uploadSearch(url, name) {
+    if (!b64) throw new Error('没拿到图片数据');
+    await goto(url);
+    const up = await exec(tab, pageUpload, [b64], 30000);
+    elog('上传图片搜索', { site: name, ...(up || {}) });
+    if (!up || !up.ok) throw new Error((up && up.error) || '上传失败');
+    for (let i = 0; i < 30; i++) {          // 等结果出来（页面可能跳转到结果页）
+      await sleep(1000);
+      try {
+        const c = await exec(tab, pageCandidates, [null], 15000);
+        if (c && c.length) return c;
+      } catch (e) { /* 页面在跳转，等一下再读 */ }
+    }
+    debugSave(name + '-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
+    return [];
   }
-  elog('以图搜结果', { unit: task.unit, source, count: (candidates || []).length, note, image: task.image });
-  await post('/api/ext/result', { task_id: task.id, ok: true, data: { candidates: candidates || [], source, note } });
+  for (const [name, fn] of steps) {
+    try {
+      candidates = (await fn()) || [];
+      elog('以图搜一步', { unit: task.unit, step: name, count: candidates.length });
+      if (candidates.length) { source = name; break; }
+      notes.push(name + '：0 个结果');
+    } catch (e) {
+      notes.push(name + '：' + e.message);
+      elog('以图搜一步失败', { unit: task.unit, step: name, error: e.message });
+    }
+  }
+  const note = candidates.length ? '' : notes.join('；');
+  elog('以图搜结果', { unit: task.unit, source, count: candidates.length, note, image: task.image });
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { candidates, source, note } });
+}
+
+// 图片转成 base64（工作台没给时，采集助手自己下载）
+async function imageB64(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('图片下载失败 ' + r.status);
+  const buf = new Uint8Array(await r.arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return 'data:' + (r.headers.get('content-type') || 'image/jpeg') + ';base64,' + btoa(bin);
+}
+
+// 在页面里把图片放进「上传图片」框（和人点上传一样）。找不到上传框时先点一下「以图搜 / 上传 / 相机」按钮
+async function pageUpload(b64) {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const [head, data] = b64.split(',');
+  const bin = atob(data);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  const type = (head.match(/data:([^;]+)/) || [])[1] || 'image/jpeg';
+  const file = new File([arr], 'query.' + (type.split('/')[1] || 'jpg'), { type });
+  const find = () => [...document.querySelectorAll('input[type=file]')];
+  let inputs = find();
+  if (!inputs.length) {
+    for (const el of document.querySelectorAll('button, a, span, div, i, label, img')) {
+      const t = ((el.textContent || '').trim() + ' ' + (el.getAttribute('title') || '') + ' ' + (el.getAttribute('class') || '') + ' ' + (el.getAttribute('alt') || '')).slice(0, 200);
+      if ((el.textContent || '').trim().length < 30 && /上传|以图|拍照|图片搜|搜同款|camera|upload|img-?search|image-?search|photo|pic-?search/i.test(t)) {
+        try { el.click(); } catch (e) { /* 忽略 */ }
+        await sleep(800);
+        inputs = find();
+        if (inputs.length) break;
+      }
+    }
+  }
+  const dt = new DataTransfer();
+  dt.items.add(file);
+  if (inputs.length) {
+    const inp = inputs.find(i => /image/.test(i.accept || '')) || inputs[0];
+    inp.files = dt.files;
+    inp.dispatchEvent(new Event('input', { bubbles: true }));
+    inp.dispatchEvent(new Event('change', { bubbles: true }));
+    return { ok: true, how: 'input', inputs: inputs.length, url: location.href };
+  }
+  const zone = document.querySelector('[class*="drop"], [class*="upload"], [class*="Upload"]');
+  if (zone) {  // 只支持拖拽的上传区
+    for (const ev of ['dragenter', 'dragover', 'drop']) zone.dispatchEvent(new DragEvent(ev, { bubbles: true, cancelable: true, dataTransfer: dt }));
+    return { ok: true, how: 'drop', url: location.href };
+  }
+  return { ok: false, error: '页面上没找到上传图片的地方', url: location.href };
 }
 
 function debugSave(name, html) {

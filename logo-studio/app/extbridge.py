@@ -22,8 +22,9 @@ _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
-NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 4, 0), "page:ozon": (1, 5, 0), "imgsearch": (1, 5, 0)}  # 各类任务需要的采集助手版本
-UPDATE_HINT = "打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面"
+NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 6, 0), "page:ozon": (1, 6, 0), "imgsearch": (1, 6, 0)}  # 各类任务需要的采集助手版本
+UPDATE_HINT = ("打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面。"
+               "如果刷新后版本号没变，说明加载的不是这次更新的文件夹：点「移除」，再「加载已解压的扩展程序」选 AI套图工作台/logo-studio/chrome-extension")
 
 
 def _ver(v: str) -> tuple:
@@ -183,9 +184,21 @@ def _summary(t: dict, data: dict) -> dict:
         for k in ("pages", "cards"):
             if isinstance(raw.get(k), list):
                 out[k] = len(raw[k])
-        for k in ("diag", "error"):
-            if raw.get(k):
-                out[k] = raw[k]
+        if isinstance(raw.get("diag"), dict):
+            d = dict(raw["diag"])
+            rawbits = {k: d.pop(k) for k in ("raw_aspects", "raw_modal") if k in d}
+            if any(rawbits.values()):  # 规格区 / 弹窗的原始数据单独存成调试文件（排查漏规格用），日志里只记概要
+                try:
+                    import json as _json
+                    dd = store.DATA / "debug"
+                    dd.mkdir(parents=True, exist_ok=True)
+                    (dd / f"{t.get('platform', 'x')}-{t.get('item_id', '')}-aspects-{time.strftime('%m%d-%H%M%S')}.json").write_text(
+                        runlog.mask(_json.dumps({"diag": d, **rawbits}, ensure_ascii=False)), "utf-8")
+                except Exception:  # noqa: BLE001
+                    pass
+            out["diag"] = d
+        if raw.get("error"):
+            out["error"] = raw["error"]
     if "candidates" in data:
         out["candidates"] = len(data.get("candidates") or [])
         out["source"] = data.get("source")

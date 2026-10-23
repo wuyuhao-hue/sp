@@ -27,7 +27,7 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, matchUrl: '', mFilter: 'all', pick: null, dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, matchUrl: '', mFilter: 'all', pick: null, iconBad: {}, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 5, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 6, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -139,7 +139,7 @@ createApp({
       if (this.extMode) {
         if (this.ext.status === 'login') return '请在 Chrome 中登录 1688';
         if (this.ext.status === 'verify') return '请在 Chrome 中完成验证';
-        return this.ext.connected ? '采集助手已连接' : (this.extInstalled ? '采集助手连接中…' : '未安装采集助手');
+        return this.ext.connected ? `采集助手 ${this.ext.version || ''} 已连接` : (this.extInstalled ? '采集助手连接中…' : '未安装采集助手');
       }
       return { ready: '浏览器已连接', need_login: '等待登录 1688', need_verify: '等待滑块验证', starting: '浏览器启动中', error: '浏览器出错' }[this.browserState.state] || '浏览器未启动';
     },
@@ -338,6 +338,7 @@ createApp({
       return this.listings.filter(l => this.qMatch(l, f)).length;
     },
     sourceName(s) { return { '1688': '1688', wb: 'WB', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
+    iconOk(s) { return ['1688', 'pdd', 'ozon', 'wb'].includes(s) && !this.iconBad[s]; },
     srcIcon(s) {
       // 来源平台图标（品牌色简化图形）
       const box = (bg, inner) => `<svg viewBox="0 0 24 24" width="18" height="18"><rect width="24" height="24" rx="6" fill="${bg}"/>${inner}</svg>`;

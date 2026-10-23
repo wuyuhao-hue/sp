@@ -563,3 +563,5 @@ a.btn { text-decoration: none; }
 .q-src .src-ic { width: 15px; height: 15px; border-radius: 4px; }
 .src-tabs { gap: 5px; }
 .src-tabs button { flex: 1 1 auto; min-width: auto; padding: 0 8px; }
+.src-ic img { width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; }
+.src-ic > span { display: contents; }

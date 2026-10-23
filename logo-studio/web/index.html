@@ -24,7 +24,7 @@
       <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
     </div>
     <div class="spacer"></div>
-    <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.5.0（Ozon 完整规格、找同款需要）</span>
+    <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.6.0（WB / Ozon 采集、找同款需要）</span>
     <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
@@ -49,7 +49,7 @@
         </div>
         <div class="src-tabs" v-if="workMode==='direct' && productSources.length > 1">
           <button :class="{on: !pSource}" @click="pSource=''; selected=[]">全部 <span>{{ sourceCount('') }}</span></button>
-          <button v-for="s in productSources" :key="s" :class="{on: pSource===s}" @click="pSource=s; selected=[]" :title="sourceName(s)"><i class="src-ic" v-html="srcIcon(s)"></i>{{ sourceName(s) }} <span>{{ sourceCount(s) }}</span></button>
+          <button v-for="s in productSources" :key="s" :class="{on: pSource===s}" @click="pSource=s; selected=[]" :title="sourceName(s)"><i class="src-ic"><img v-if="iconOk(s)" :src="'/api/src-icon/' + s" @error="iconBad[s] = true"><span v-else v-html="srcIcon(s)"></span></i>{{ sourceName(s) }} <span>{{ sourceCount(s) }}</span></button>
         </div>
         <select class="input sm" v-model="pLogo" v-if="logos.length && workMode!=='direct'">
           <option value="">全部 logo</option>
@@ -69,7 +69,7 @@
           <div class="grow">
             <div class="t">{{ p.title || '（无标题）' }}</div>
             <div class="meta">
-              <span class="tag src" v-if="workMode==='direct'"><i class="src-ic sm" v-html="srcIcon(p.source)"></i>{{ sourceName(p.source) }}</span>
+              <span class="tag src" v-if="workMode==='direct'"><i class="src-ic sm"><img v-if="iconOk(p.source)" :src="'/api/src-icon/' + p.source" @error="iconBad[p.source] = true"><span v-else v-html="srcIcon(p.source)"></span></i>{{ sourceName(p.source) }}</span>
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
               <span class="price rub" v-else-if="p.market_price_rub">{{ Math.round(p.market_price_rub) }} ₽</span>
               <span class="tag warn" v-if="matchStateName(p.match_state)">{{ matchStateName(p.match_state) }}</span>
@@ -192,7 +192,7 @@
         <div class="grow">
           <h2 :title="current.title">{{ current.title || '（无标题）' }}</h2>
           <div class="faint" style="margin-top:4px">
-            <span class="tag src"><i class="src-ic sm" v-html="srcIcon(current.source)"></i>{{ sourceName(current.source) }}</span> {{ current.offer_id }} ·
+            <span class="tag src"><i class="src-ic sm"><img v-if="iconOk(current.source)" :src="'/api/src-icon/' + current.source" @error="iconBad[current.source] = true"><span v-else v-html="srcIcon(current.source)"></span></i>{{ sourceName(current.source) }}</span> {{ current.offer_id }} ·
             {{ skus.length }} 个颜色 · {{ (current.sizes||[]).length || 1 }} 个尺码 · {{ (current.main_images||[]).length }} 主图 · {{ (current.detail_images||[]).length }} 详情图
             <template v-if="current.price_min"> · 进货价 <span class="price">¥{{ fmtPrice(current.price_min, current.price_max) }}</span></template>
             <template v-if="current.market_price_rub"> · {{ sourceName(current.source) }} 售价 {{ Math.round(current.market_price_rub) }} ₽</template>
@@ -410,7 +410,7 @@
 
       <div class="logo-tabs" v-if="workMode==='direct' && listingSources.length">
         <button :class="{on: qSource===''}" @click="qSource=''; qSel=[]">全部来源 <span>{{ facetCount('source', '') }}</span></button>
-        <button v-for="s in listingSources" :key="s" :class="{on: qSource===s}" @click="qSource=s; qSel=[]"><i class="src-ic" v-html="srcIcon(s)"></i>{{ s === '1688' ? '1688' : sourceName(s) }} <span>{{ facetCount('source', s) }}</span></button>
+        <button v-for="s in listingSources" :key="s" :class="{on: qSource===s}" @click="qSource=s; qSel=[]"><i class="src-ic"><img v-if="iconOk(s)" :src="'/api/src-icon/' + s" @error="iconBad[s] = true"><span v-else v-html="srcIcon(s)"></span></i>{{ s === '1688' ? '1688' : sourceName(s) }} <span>{{ facetCount('source', s) }}</span></button>
       </div>
       <div class="logo-tabs" v-if="listingLogos.length > 1">
         <button :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]">全部 <span>{{ facetCount('logo', '') }}</span></button>
@@ -449,7 +449,7 @@
             <img :src="(l.variants.find(v => v.enabled && v.cover) || l.variants[0] || {}).cover">
             <i class="check" :class="{on: qSel.includes(lkey(l))}"></i>
             <span class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
-            <span class="q-src" v-if="l.source && l.mode === 'direct'"><i class="src-ic" v-html="srcIcon(l.source)"></i>{{ sourceName(l.source) }}</span>
+            <span class="q-src" v-if="l.source && l.mode === 'direct'"><i class="src-ic"><img v-if="iconOk(l.source)" :src="'/api/src-icon/' + l.source" @error="iconBad[l.source] = true"><span v-else v-html="srcIcon(l.source)"></span></i>{{ sourceName(l.source) }}</span>
           </div>
           <div class="q-vars">
             <div class="q-var" v-for="v in l.variants" :key="v.sku" :class="{off: !v.enabled}" :title="v.sku + (v.color ? ' → ' + v.color : '')">
@@ -963,9 +963,9 @@
       <div class="modal-body">
         <div class="note err-box" v-if="workMode==='direct' && (extOld || !ext.connected)">
           <template v-if="!ext.connected">采集助手没有连接：请确认 Chrome 开着、采集助手已启用（chrome://extensions）。</template>
-          <template v-else>采集助手是旧版（{{ ext.version }}），Ozon 完整规格采集、找 1688 同款需要 1.5.0：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
+          <template v-else>采集助手是旧版（{{ ext.version }}），WB / Ozon 采集、找 1688 同款需要 1.6.0：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
         </div>
-        <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、WB（wildberries.ru）、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。WB / Ozon 商品要先「找 1688 同款」，只有找到同款的规格能上架，进货价用 1688 该规格的售价。需要「采集助手」1.5.0 以上。</div>
+        <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、WB（wildberries.ru）、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。WB / Ozon 商品要先「找 1688 同款」，只有找到同款的规格能上架，进货价用 1688 该规格的售价。需要「采集助手」1.6.0 以上。</div>
         <div class="field"><label>商品链接（每行一个，可以直接粘贴一大段包含链接的文字）</label>
           <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="https://detail.1688.com/offer/123456789012.html"></textarea></div>
         <div class="field"><label>店铺链接（整店采集，每行一个）</label>

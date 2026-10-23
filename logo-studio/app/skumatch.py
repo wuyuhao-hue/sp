@@ -125,6 +125,15 @@ def restore_removed(p: dict, keys: list[str] | None = None) -> None:
 
 
 # ---------------- 候选：本地几何排序 ----------------
+def query_b64(src: str) -> str:
+    """以图搜要上传的图片（工作台下载、缩到最长边 1024、JPEG）：国内搜索站下载不到 Ozon / WB 的图片地址时用。"""
+    try:
+        from . import ai
+        return "data:image/jpeg;base64," + ai._jpeg_b64(ai.load_image(src), 1024)
+    except Exception:  # noqa: BLE001  下载不到：采集助手会自己下载
+        return ""
+
+
 def rank_candidates(unit: dict, cands: list[dict]) -> list[dict]:
     """卡片级（候选商品主图）只看几何：卡片图可能是同款的另一个颜色，颜色在详情闸门里再核。"""
     out = []
@@ -349,7 +358,7 @@ def advance(pid: str, job, enqueue) -> None:
                     continue
                 u["status"] = "searching"
                 wait = {"kind": "imgsearch", "unit": u["key"], "t": time.time()}
-                enqueue("imgsearch", pid=pid, unit=u["key"], image=u["images"][0])
+                enqueue("imgsearch", pid=pid, unit=u["key"], image=u["images"][0], image_b64=query_b64(u["images"][0]))
                 break
             plan = [o for o in fetch_plan(u) if o not in u["tried"] and o not in u.get("failed", [])]
             if plan:
@@ -430,7 +439,7 @@ def on_fail(pid: str, task: dict, error: str, job, enqueue) -> None:
         wait = p.get("match_wait")
         if retry:
             if task["kind"] == "imgsearch":
-                enqueue("imgsearch", pid=pid, unit=key, image=task["image"])
+                enqueue("imgsearch", pid=pid, unit=key, image=task["image"], image_b64=task.get("image_b64") or query_b64(task["image"]))
             else:
                 enqueue("offer", offer_id=task["offer_id"], url=task["url"], match_for=pid)
         else:

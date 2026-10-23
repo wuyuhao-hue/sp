@@ -422,7 +422,8 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
     pid = f"{platform}-{item_id}"
     from . import runlog
     runlog.log("采集", f"{PLATFORM_NAME[platform]} {item_id} 解析完成", colors=[v["name"] for v in (info["sku_props"][:1] or [{"values": []}])[0]["values"]],
-               skus=len(info.get("skus") or []), sizes=info.get("sizes"), capture=info.get("capture"), diag=raw.get("diag"))
+               skus=len(info.get("skus") or []), sizes=info.get("sizes"), capture=info.get("capture"),
+               diag={k: v for k, v in (raw.get("diag") or {}).items() if not k.startswith("raw_")})
     old = store.get_product(pid)
     keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "units", "match_offers", "match_wait", "created")
             if old and k in old}

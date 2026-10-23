@@ -1016,6 +1016,72 @@ def ext_debug(name: str = Body(""), html: str = Body("")):
     return {"ok": True}
 
 
+# ---------------- 来源平台官方图标 ----------------
+ICON_URLS = {
+    "1688": ["https://img.alicdn.com/tfs/TB1uh..zbj1gK0jSZFuXXcrHpXa-16-16.ico?_=2020", "https://www.1688.com/favicon.ico"],
+    "pdd": ["https://mobile.yangkeduo.com/favicon.ico", "https://www.pinduoduo.com/favicon.ico"],
+    "ozon": ["https://www.ozon.ru/favicon.ico"],
+    "wb": ["https://www.wildberries.ru/favicon.ico"],
+}
+_icon_tried: dict[str, float] = {}
+
+
+def _icon_file(p: str):
+    d = store.DATA / "icons"
+    for f in d.glob(f"{p}.*"):
+        return f
+    return None
+
+
+def _icon_save(p: str, data: bytes) -> None:
+    head = data[:12]
+    ext = "png" if head.startswith(b"\x89PNG") else "svg" if b"<svg" in data[:300] else "gif" if head.startswith(b"GIF") \
+        else "jpg" if head.startswith(b"\xff\xd8") else "webp" if head[8:12] == b"WEBP" else "ico"
+    d = store.DATA / "icons"
+    d.mkdir(parents=True, exist_ok=True)
+    for f in d.glob(f"{p}.*"):
+        f.unlink()
+    (d / f"{p}.{ext}").write_bytes(data)
+
+
+@app.get("/api/src-icon/{p}")
+def src_icon(p: str):
+    """平台官方图标：第一次用到时从平台官网下载并缓存到 data/icons（采集助手打开平台页面时也会把浏览器里的图标发过来）。"""
+    import httpx
+
+    if p not in ICON_URLS:
+        raise HTTPException(404, "没有这个平台")
+    f = _icon_file(p)
+    if not f and time.time() - _icon_tried.get(p, 0) > 600:
+        _icon_tried[p] = time.time()
+        for u in ICON_URLS[p]:
+            try:
+                r = httpx.get(u, timeout=6, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+                if r.status_code == 200 and 50 < len(r.content) < 300000 and not r.content[:200].lstrip().lower().startswith(b"<!doctype"):
+                    _icon_save(p, r.content)
+                    break
+            except Exception:  # noqa: BLE001
+                continue
+        f = _icon_file(p)
+    if not f:
+        raise HTTPException(404, "图标还没下载到")
+    media = {"png": "image/png", "svg": "image/svg+xml", "gif": "image/gif", "jpg": "image/jpeg", "webp": "image/webp"}.get(
+        f.suffix[1:], "image/x-icon")
+    return FileResponse(f, media_type=media, headers={"Cache-Control": "max-age=86400"})
+
+
+@app.post("/api/src-icon/{p}")
+def src_icon_put(p: str, data: str = Body(...), url: str = Body("")):
+    import base64
+
+    if p not in ICON_URLS:
+        raise HTTPException(404, "没有这个平台")
+    raw = base64.b64decode(data.split(",", 1)[-1])
+    if 50 < len(raw) < 300000:
+        _icon_save(p, raw)
+    return {"ok": True}
+
+
 @app.get("/api/logs/export")
 def logs_export():
     """导出运行日志（最近 14 天 + 采集调试文件），出问题时把这个 zip 发给开发者。"""
