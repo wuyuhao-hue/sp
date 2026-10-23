@@ -556,7 +556,7 @@
           <div class="log-box"><div v-for="(x, i) in ed.L.log.slice().reverse()" :key="i">{{ x }}</div></div></details>
       </div>
       <div class="modal-foot">
-        <button class="btn" style="margin-right:auto" :disabled="!!ed.busy || !ed.L.subject_id" @click="aiFill" title="用设置里的「商品理解模型」看图填写标题、说明、属性、颜色">{{ ed.busy==='ai' ? 'AI 填写中…' : 'AI 填写' }}</button>
+        <button class="btn" style="margin-right:auto" :disabled="!!ed.busy" @click="aiFill" title="用设置里的「上架资料模型」填写：没选类目会先自动匹配类目，再填标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">{{ ed.busy==='ai' ? 'AI 填写中…' : 'AI 填写' }}</button>
         <button class="btn" :disabled="!!ed.busy" @click="preflight">{{ ed.busy==='pf' ? '检查中…' : '预检' }}</button>
         <button class="btn" :disabled="!!ed.busy || ed.L.status==='uploading'" @click="saveListing()">保存</button>
         <button class="btn primary" :disabled="!!ed.busy || ed.L.status==='uploading' || !shops.length" @click="saveAndUpload">保存并上架</button>
@@ -610,6 +610,7 @@
           <div class="field"><label>令牌（API Key）</label><input class="input" v-model="settings.api_key" placeholder="sk-..."></div>
           <div class="field"><label>生图模型</label><input class="input" v-model="settings.image_model" list="model-list" placeholder="gpt-image-2"></div>
           <div class="field"><label>商品理解模型（可选，需要能看图）</label><input class="input" v-model="settings.text_model" list="model-list" placeholder="如 gpt-4o，留空则不使用"></div>
+          <div class="field"><label>上架资料模型（WB 待上架里的 AI 填写：类目、标题、说明、属性、包装尺寸重量、海关编码）</label><input class="input" v-model="settings.listing_model" list="model-list" placeholder="如 gpt-6-sol，留空则用商品理解模型"></div>
           <div class="field"><label>调用方式</label>
             <select class="input" v-model="settings.image_api">
               <option value="auto">自动适配（推荐）</option><option value="edits">图片编辑接口 /images/edits</option><option value="chat">对话接口 /chat/completions</option>

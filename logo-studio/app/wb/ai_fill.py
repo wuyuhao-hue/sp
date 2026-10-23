@@ -49,24 +49,82 @@ def _img_b64(src: str) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def _chat(content: list[dict], max_tokens: int) -> dict:
+def listing_model() -> str:
     s = store.get_settings()
-    if not s.get("text_model"):
-        raise RuntimeError("需要在「设置」里填写能看图的「商品理解模型」才能 AI 填写")
-    with ai._client(180) as c:
-        body = {"model": s["text_model"], "temperature": 0.1, "max_tokens": max_tokens,
-                "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": content}]}
-        r = c.post("/chat/completions", json=body)
-        if r.status_code == 400 and "response_format" in r.text:
-            body.pop("response_format")
+    return (s.get("listing_model") or s.get("text_model") or "").strip()
+
+
+def _chat(content: list[dict], max_tokens: int) -> dict:
+    """调用「上架资料模型」，只要 JSON。
+
+    不同模型/中转站支持的参数不一样（新的推理模型常常不支持 temperature、max_tokens、response_format，
+    有的不收图片）。被拒绝（400，不计费）时去掉对应参数再发，并把结果按模型记进设置（listing_caps），
+    以后直接用能用的参数。5xx / 超时不重发。"""
+    model = listing_model()
+    if not model:
+        raise RuntimeError("需要在「设置」里填写「上架资料模型」（例如 gpt-6-sol）才能 AI 填写")
+    s = store.get_settings()
+    all_caps = dict(s.get("listing_caps") or {})
+    caps = dict(all_caps.get(model) or {})
+    has_image = any(c.get("type") == "image_url" for c in content)
+    if has_image and caps.get("images") is False:
+        content = _text_only(content)
+    body = {"model": model, "messages": [{"role": "user", "content": content}]}
+    if caps.get("temperature", True):
+        body["temperature"] = 0.1
+    if caps.get("token_param", "max_tokens") == "max_tokens":
+        body["max_tokens"] = max_tokens
+    elif caps.get("token_param") == "max_completion_tokens":
+        body["max_completion_tokens"] = max_tokens * 4  # 推理模型的思考也算在里面
+    if caps.get("json_mode", True):
+        body["response_format"] = {"type": "json_object"}
+    with ai._client(300) as c:
+        for _ in range(6):
             r = c.post("/chat/completions", json=body)
+            if r.status_code != 400:
+                break
+            low = r.text.lower()
+            if "temperature" in low and "temperature" in body:
+                body.pop("temperature")
+                caps["temperature"] = False
+            elif "max_tokens" in low and "max_tokens" in body:
+                body.pop("max_tokens")
+                body["max_completion_tokens"] = max_tokens * 4
+                caps["token_param"] = "max_completion_tokens"
+            elif "max_completion_tokens" in low and "max_completion_tokens" in body:
+                body.pop("max_completion_tokens")
+                caps["token_param"] = "none"
+            elif "response_format" in low and "response_format" in body:
+                body.pop("response_format")
+                caps["json_mode"] = False
+            elif has_image and caps.get("images") is not False and any(
+                    k in low for k in ("image", "vision", "multimodal", "content type", "image_url")):
+                body["messages"][0]["content"] = _text_only(content)
+                caps["images"] = False
+            else:
+                break
+        if caps != (all_caps.get(model) or {}):
+            all_caps[model] = caps
+            store.save_settings({"listing_caps": all_caps})
         if r.status_code >= 400:
             raise ai._error(r)
-        text = r.json()["choices"][0]["message"]["content"] or ""
+        choice = (r.json().get("choices") or [{}])[0]
+        text = (choice.get("message") or {}).get("content") or ""
+        if isinstance(text, list):
+            text = "".join(x.get("text", "") for x in text if isinstance(x, dict))
     m = re.search(r"\{.*\}", text, re.S)
     if not m:
-        raise RuntimeError("模型没有返回有效 JSON")
+        if choice.get("finish_reason") == "length":
+            raise RuntimeError(f"模型「{model}」输出被截断（思考用完了输出额度），请稍后重试或换模型")
+        raise RuntimeError(f"模型「{model}」没有返回有效 JSON：{text[:120]}")
     return json.loads(m.group(0))
+
+
+def _text_only(content: list[dict]) -> list[dict]:
+    """模型不收图片时：去掉图片，只按 1688 文字信息判断。"""
+    out = [c for c in content if c.get("type") != "image_url"]
+    out.append({"type": "text", "text": "（注意：本次没有提供图片，只能根据上面的文字信息判断；看不出来的字段不要填，写进 notes。）"})
+    return out
 
 
 def match_official(value: str, candidates: list[str]) -> str | None:
@@ -115,6 +173,8 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
         except Exception:  # noqa: BLE001
             pass
     res = _chat(content, 4600)
+    if not isinstance(res, dict):
+        raise RuntimeError("模型返回格式不对")
     out, rejected = {"charcs": {}}, []
     if res.get("title"):
         out["title"] = LS.clean_title(res["title"])

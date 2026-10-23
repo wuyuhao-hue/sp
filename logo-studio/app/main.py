@@ -1017,6 +1017,8 @@ def test_settings():
         msg += f"注意：生图模型「{s['image_model']}」不在列表里，请检查名称。"
     if s.get("text_model") and models and s["text_model"] not in models:
         msg += f"注意：商品理解模型「{s['text_model']}」不在列表里。"
+    if s.get("listing_model") and models and s["listing_model"] not in models:
+        msg += f"注意：上架资料模型「{s['listing_model']}」不在列表里，请检查名称。"
     return {"ok": True, "message": msg, "models": models}
 
 

@@ -450,7 +450,7 @@ createApp({
     },
     selectedListings() { return this.listings.filter(l => this.qSel.includes(this.lkey(l))).map(l => ({ pid: l.pid, key: l.key })); },
     async batchAi() {
-      if (!this.settings.text_model) { this.toast('请先在「设置」里填写能看图的「商品理解模型」', true); return; }
+      if (!this.settings.listing_model && !this.settings.text_model) { this.toast('请先在「设置」里填写「上架资料模型」（如 gpt-6-sol）', true); return; }
       if (!confirm(`对 ${this.qSel.length} 张商品卡做 AI 填写？\n没选类目的会自动匹配类目；标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码会被覆盖。\n每张卡约 2 次 AI 调用。`)) return;
       try { this.jobs.unshift(await api('/api/listings/batch-ai', { body: { items: this.selectedListings() } })); this.toast('已开始，进度在右下角'); }
       catch (e) { this.toast(e.message, true); }

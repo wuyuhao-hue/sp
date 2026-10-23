@@ -85,9 +85,9 @@ def suggest(p: dict, cli, use_ai: bool = True) -> dict | None:
     cands = candidates(p, subjects)
     if not cands:
         return None
-    if use_ai and store.get_settings().get("text_model"):
-        from .ai_fill import _chat
+    from .ai_fill import _chat, listing_model
 
+    if use_ai and listing_model():
         try:
             r = _chat([{"type": "text", "text": PROMPT.format(
                 title=p.get("title", ""), attrs=json.dumps(p.get("attrs") or {}, ensure_ascii=False)[:800],

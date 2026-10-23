@@ -108,6 +108,8 @@ DEFAULT_SETTINGS = {
     "api_key": "",
     "image_model": "gpt-image-2",
     "text_model": "",          # 可选：能看图的对话模型，用来理解商品、写俄语卖点
+    "listing_model": "gpt-6-sol",  # WB 上架资料（类目、标题、说明、属性、包装、海关编码）用的模型；留空则用 text_model
+    "listing_caps": {},        # 各模型支持的参数（自动探测后记住）
     "image_quality": "",       # 留空则不传，由中转站决定；可填 standard / hd / low / medium / high
     "image_api": "auto",       # auto 自动适配 / edits 图片编辑接口 / chat 对话接口
     "image_api_detected": "",
