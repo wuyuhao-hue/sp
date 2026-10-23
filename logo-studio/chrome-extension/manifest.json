@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "AI 套图工作台 采集助手",
-  "version": "1.3.0",
-  "description": "在你自己的 Chrome 里采集 1688 / 拼多多 / Ozon 商品，发送到本机运行的 AI 套图工作台。",
+  "version": "1.4.0",
+  "description": "在你自己的 Chrome 里采集 1688 / 拼多多 / Ozon / WB 商品，自动找 1688 同款，发送到本机运行的 AI 套图工作台。",
   "permissions": [
     "tabs",
     "scripting",
@@ -14,6 +14,10 @@
     "*://*.yangkeduo.com/*",
     "*://*.pinduoduo.com/*",
     "*://*.ozon.ru/*",
+    "*://*.wildberries.ru/*",
+    "*://*.wbbasket.ru/*",
+    "*://card.wb.ru/*",
+    "*://*.aiprice.com/*",
     "http://127.0.0.1:8765/*",
     "http://localhost:8765/*"
   ],
@@ -35,7 +39,8 @@
       "matches": [
         "*://detail.1688.com/offer/*",
         "*://mobile.yangkeduo.com/goods*",
-        "*://*.ozon.ru/product/*"
+        "*://*.ozon.ru/*",
+        "*://*.wildberries.ru/*"
       ],
       "js": [
         "page-button.js"

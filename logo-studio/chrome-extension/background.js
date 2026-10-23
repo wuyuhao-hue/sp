@@ -162,6 +162,86 @@ async function pageOzon() {
   return { pages, url: location.href };
 }
 
+// WB：在商品页里读 WB 公开的 card.json（图片服务器上）和价格接口；同一商品的其他颜色一起读（最多 20 个）
+async function pageWb() {
+  const nm = Number((location.pathname.match(/catalog\/(\d+)/) || [])[1]);
+  const vp = n => ({ vol: Math.floor(n / 1e5), part: Math.floor(n / 1e3) });
+  const hosts = {};
+  for (const e of performance.getEntriesByType('resource')) {
+    const m = e.name.match(/https:\/\/(basket-\d+\.wbbasket\.ru)\/vol(\d+)\//);
+    if (m) hosts[m[2]] = m[1];
+  }
+  const tryHost = async (h, n) => {
+    const { vol, part } = vp(n);
+    try {
+      const r = await fetch(`https://${h}/vol${vol}/part${part}/${n}/info/ru/card.json`);
+      if (r.ok) return { nm: n, host: h, vol, part, card: await r.json() };
+    } catch (e) { /* 换下一个服务器 */ }
+    return null;
+  };
+  const get = async n => {
+    const { vol } = vp(n);
+    if (hosts[vol]) { const r = await tryHost(hosts[vol], n); if (r) return r; }
+    for (let i = 1; i <= 40; i++) {
+      const h = `basket-${String(i).padStart(2, '0')}.wbbasket.ru`;
+      const r = await tryHost(h, n);
+      if (r) { hosts[vol] = h; return r; }
+    }
+    return null;
+  };
+  const first = await get(nm);
+  if (!first) return { cards: [], error: '没找到这个商品的 card.json' };
+  const ids = [nm];
+  for (const c of first.card.full_colors || []) if (c && c.nm_id && !ids.includes(c.nm_id)) ids.push(c.nm_id);
+  for (const c of first.card.colors || []) if (typeof c === 'number' && !ids.includes(c)) ids.push(c);
+  const cards = [first];
+  for (const n of ids.slice(1, 20)) { const c = await get(n); if (c) cards.push(c); }
+  let detail = null;
+  for (const v of ['v4', 'v2', 'v1']) {
+    try {
+      const r = await fetch(`https://card.wb.ru/cards/${v}/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm=${ids.slice(0, 20).join(';')}`);
+      if (!r.ok) continue;
+      const j = await r.json();
+      if ((j.products || (j.data || {}).products || []).length) { detail = j; break; }
+    } catch (e) { /* 换下一个版本 */ }
+  }
+  return { cards, detail };
+}
+
+// 以图搜 1688 同款：从搜索结果里提取候选（商品链接周围的图、标题、价格）。自包含，页面里和解析 HTML 文本时都能用
+function pageCandidates(html) {
+  const doc = html ? new DOMParser().parseFromString(html, 'text/html') : document;
+  const out = [], seen = new Set();
+  for (const a of doc.querySelectorAll('a[href]')) {
+    const m = (a.getAttribute('href') || '').match(/(?:offer\/|offerId=|offer_id=)(\d{8,15})/);
+    if (!m || seen.has(m[1])) continue;
+    let box = a;
+    for (let i = 0; i < 6 && box.parentElement; i++) {
+      if (box.querySelector('img') && (box.innerText || box.textContent || '').length > 8) break;
+      box = box.parentElement;
+    }
+    const img = box.querySelector('img');
+    const src = img ? (img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('src') || '') : '';
+    const text = (box.innerText || box.textContent || '').replace(/\s+/g, ' ').trim();
+    const price = (text.match(/[¥￥]\s*(\d+(?:\.\d+)?)/) || [])[1];
+    const titleEl = box.querySelector('[class*=title], [title]');
+    seen.add(m[1]);
+    let abs = src;
+    try { abs = src ? new URL(src, location.href).href : ''; } catch (e) { /* 保留原样 */ }
+    out.push({ offer_id: m[1], image: abs, price: price ? Number(price) : null,
+               title: ((titleEl && (titleEl.getAttribute('title') || titleEl.innerText)) || a.getAttribute('title') || text).trim().slice(0, 80) });
+    if (out.length >= 20) break;
+  }
+  return out;
+}
+
+async function pageAiprice(img) {
+  // AiPrice 站内接口（原项目实测可用）：返回 HTML，候选在 .sbi-items-list .sbi-item
+  const r = await fetch('/img/search_detail?image=' + encodeURIComponent(img), { credentials: 'include' });
+  if (!r.ok) return { candidates: [], error: 'AiPrice 返回 ' + r.status };
+  return { html: (await r.text()).slice(0, 3000000) };
+}
+
 function platformOf(url) {
   let m = url.match(/detail\.1688\.com\/offer\/(\d{8,15})/);
   if (m) return { platform: '1688', id: m[1] };
@@ -169,6 +249,8 @@ function platformOf(url) {
   if (m) return { platform: 'pdd', id: m[1] };
   m = url.match(/ozon\.\w+\/product\/(?:[\w%-]+-)?(\d{5,12})/);
   if (m) return { platform: 'ozon', id: m[1] };
+  m = url.match(/wildberries\.\w+\/catalog\/(\d{5,12})\//);
+  if (m) return { platform: 'wb', id: m[1] };
   return null;
 }
 
@@ -254,8 +336,32 @@ async function doPage(task) {
   await navigate(tab, task.url);
   await waitUnblocked(win, tab);
   if (task.platform === 'pdd') await exec(tab, pageScrollAndCollect).catch(() => {});
-  const raw = await exec(tab, task.platform === 'pdd' ? pagePdd : pageOzon);
+  const raw = await exec(tab, { pdd: pagePdd, ozon: pageOzon, wb: pageWb }[task.platform]);
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { raw } });
+}
+
+async function doImgSearch(task) {
+  // 先用 AiPrice，没结果再用 1688 自己的以图搜
+  const { win, tab } = await workerTab();
+  let candidates = [], source = '', note = '';
+  try {
+    await navigate(tab, 'https://www.aiprice.com/img/search');
+    await waitUnblocked(win, tab);
+    const r = await exec(tab, pageAiprice, [task.image]);
+    if (r && r.html) candidates = await exec(tab, pageCandidates, [r.html]);
+    else note = (r && r.error) || '';
+    source = 'aiprice';
+  } catch (e) { note = 'AiPrice：' + e.message; }
+  if (!candidates || !candidates.length) {
+    try {
+      await navigate(tab, 'https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(task.image));
+      await waitUnblocked(win, tab);
+      await exec(tab, pageScrollAndCollect).catch(() => {});
+      candidates = await exec(tab, pageCandidates, [null]);
+      source = '1688';
+    } catch (e) { note = (note ? note + '；' : '') + '1688 以图搜：' + e.message; }
+  }
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { candidates: candidates || [], source, note } });
 }
 
 async function doShop(task, delay) {
@@ -283,7 +389,8 @@ async function doShop(task, delay) {
 }
 
 async function doTabs(task) {
-  const tabs = await chrome.tabs.query({ url: ['*://detail.1688.com/offer/*', '*://mobile.yangkeduo.com/goods*', '*://*.ozon.ru/product/*'] });
+  const tabs = await chrome.tabs.query({ url: ['*://detail.1688.com/offer/*', '*://mobile.yangkeduo.com/goods*', '*://*.ozon.ru/product/*',
+                                               '*://*.wildberries.ru/catalog/*'] });
   const pages = [], others = [];
   for (const t of tabs) {
     const pf = platformOf(t.url);
@@ -291,7 +398,7 @@ async function doTabs(task) {
     try {
       if (await exec(t.id, pageBlocked)) continue;
       if (pf.platform === '1688') pages.push({ offer_id: pf.id, raw: await exec(t.id, pageExtract) });
-      else others.push({ platform: pf.platform, id: pf.id, raw: await exec(t.id, pf.platform === 'pdd' ? pagePdd : pageOzon) });
+      else others.push({ platform: pf.platform, id: pf.id, raw: await exec(t.id, { pdd: pagePdd, ozon: pageOzon, wb: pageWb }[pf.platform]) });
     } catch (e) { /* 页面还没加载完之类，跳过 */ }
   }
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { pages, others } });
@@ -314,6 +421,9 @@ async function loop() {
         } else if (task.kind === 'page') {
           await doPage(task);
           await sleep(rand(delay, delay * 2) * 1000);
+        } else if (task.kind === 'imgsearch') {
+          await doImgSearch(task);
+          await sleep(rand(delay, delay * 2) * 1000);
         } else if (task.kind === 'shop') await doShop(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
         else throw new Error('采集助手不认识这个任务（' + task.kind + '），请更新采集助手');
@@ -333,8 +443,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const pf = platformOf(sender.tab.url);
       if (!pf) return { ok: false, message: '不是商品详情页' };
-      if (pf.platform !== 'ozon') await exec(sender.tab.id, pageScrollAndCollect).catch(() => {});
-      const fn = { '1688': pageExtract, pdd: pagePdd, ozon: pageOzon }[pf.platform];
+      if (pf.platform === '1688' || pf.platform === 'pdd') await exec(sender.tab.id, pageScrollAndCollect).catch(() => {});
+      const fn = { '1688': pageExtract, pdd: pagePdd, ozon: pageOzon, wb: pageWb }[pf.platform];
       const raw = await exec(sender.tab.id, fn);
       const r = await post('/api/ext/collect', { offer_id: pf.id, raw, platform: pf.platform });
       return { ok: true, message: r.message || '已发送' };

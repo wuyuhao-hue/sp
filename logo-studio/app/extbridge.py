@@ -22,7 +22,7 @@ _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
-NEED_VERSION = {"page": (1, 3, 0)}  # 拼多多 / Ozon 采集需要的采集助手版本
+NEED_VERSION = {"page": (1, 3, 0), "page:wb": (1, 4, 0), "imgsearch": (1, 4, 0)}  # 各类任务需要的采集助手版本
 UPDATE_HINT = "打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面"
 
 
@@ -59,7 +59,7 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
     with _lock:
         for s in shops:
             _new_task(job, "shop", url=s, max_pages=max_pages)
-        for x in others:  # 拼多多 / Ozon：一律进「采集上架」。必须先排进队列，再处理 1688（否则只有拼多多/Ozon 链接时任务会被提前结束）
+        for x in others:  # 拼多多 / Ozon / WB：一律进「采集上架」。必须先排进队列，再处理 1688（否则只有拼多多/Ozon 链接时任务会被提前结束）
             job.total += 1
             _new_task(job, "page", platform=x["platform"], item_id=x["id"], url=x["url"])
         _enqueue_offers(job, ids)
@@ -133,11 +133,12 @@ def next_task(version: str = "") -> dict | None:
                     j.note("已取消")
                     _maybe_finish(j)
                 continue
-            need = NEED_VERSION.get(t["kind"])
+            need = NEED_VERSION.get(f"{t['kind']}:{t.get('platform')}") or NEED_VERSION.get(t["kind"])
             if need and _ver(state["version"]) < need:
                 # 旧版采集助手不认识这类任务：不派给它（否则它会悄悄丢掉，界面一直没动静），直接说明原因
-                j.note(f"✗ {sources.PLATFORM_NAME.get(t.get('platform'), '')} {t.get('item_id', '')}：采集助手版本太旧"
-                       f"（{state['version'] or '未知'}），拼多多 / Ozon 需要 {'.'.join(map(str, need))} 以上。{UPDATE_HINT}")
+                what = "自动找同款" if t["kind"] == "imgsearch" else \
+                    f"{sources.PLATFORM_NAME.get(t.get('platform'), '')} {t.get('item_id', '')}"
+                j.note(f"✗ {what}：采集助手版本太旧（{state['version'] or '未知'}），需要 {'.'.join(map(str, need))} 以上。{UPDATE_HINT}")
                 j.done += 1
                 _maybe_finish(j)
                 continue
@@ -149,6 +150,8 @@ def next_task(version: str = "") -> dict | None:
                 j.note(f"正在翻店铺商品列表：{t['url']}")
             elif t["kind"] == "page":
                 j.note(f"正在打开{sources.PLATFORM_NAME[t['platform']]}商品 {t['item_id']}（{j.done + 1}/{j.total}）…")
+            elif t["kind"] == "imgsearch":
+                j.note(f"正在以图搜 1688 同款（{j.done + 1}/{j.total}）…")
             return {k: v for k, v in t.items() if k != "taken"}
     return None
 
@@ -166,11 +169,12 @@ def set_status(status: str, message: str) -> None:
                 j.note(message)
 
 
-def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "1688", match_for: str = "") -> None:
+def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "1688", match_for: str = "",
+                   auto: bool = False) -> None:
     try:
         if match_for:  # Ozon 商品绑定 1688 货源：读这个 1688 商品的价格和图，不另存商品
             from . import match
-            match.bind_result(match_for, offer_id, raw, job)
+            match.bind_result(match_for, offer_id, raw, job, auto)
             p = None
         elif platform == "1688":
             p = save_offer(None, raw, offer_id, job, getattr(job, "mode", "logo"))
@@ -199,7 +203,7 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             return
         if not ok:
             job.note(f"✗ {t.get('offer_id') or t['kind']}：{data.get('error', '失败')}")
-            if t["kind"] in ("offer", "page"):
+            if t["kind"] in ("offer", "page", "imgsearch"):
                 job.done += 1
             _maybe_finish(job)
             return
@@ -208,24 +212,28 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             job.note(f"店铺共发现 {len(ids)} 个商品")
             _enqueue_offers(job, ids, skip_existing=True)
             return
+        if t["kind"] == "imgsearch":
+            job.inflight = getattr(job, "inflight", 0) + 1
+            _workers.submit(_process_search, job, t["pid"], data)
+            return
         if t["kind"] == "offer":
-            pages = [(t["offer_id"], data.get("raw") or {}, "1688", t.get("match_for", ""))]
+            pages = [(t["offer_id"], data.get("raw") or {}, "1688", t.get("match_for", ""), bool(t.get("auto")))]
         elif t["kind"] == "page":
-            pages = [(t["item_id"], data.get("raw") or {}, t["platform"], "")]
+            pages = [(t["item_id"], data.get("raw") or {}, t["platform"], "", False)]
         else:  # tabs：1688 + 拼多多 + Ozon 已打开的商品页
-            pages = [(p["offer_id"], p["raw"], "1688", "") for p in data.get("pages", [])] + \
-                [(p["id"], p["raw"], p["platform"], "") for p in data.get("others", [])]
+            pages = [(p["offer_id"], p["raw"], "1688", "", False) for p in data.get("pages", [])] + \
+                [(p["id"], p["raw"], p["platform"], "", False) for p in data.get("others", [])]
             job.total += len(pages)
             if not pages:
-                job.fail("Chrome 里没有打开的 1688 / 拼多多 / Ozon 商品页")
+                job.fail("Chrome 里没有打开的 1688 / 拼多多 / Ozon / WB 商品页")
                 return
         job.inflight = getattr(job, "inflight", 0) + len(pages)
-    for oid, raw, platform, match_for in pages:
-        _workers.submit(_process_offer, job, oid, raw, platform, match_for)
+    for oid, raw, platform, match_for, auto in pages:
+        _workers.submit(_process_offer, job, oid, raw, platform, match_for, auto)
 
 
 def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
-    """商品页上的「采集到工作台」按钮。1688 按工作台当前模式存；拼多多/Ozon 进「采集上架」。"""
+    """商品页上的「采集到工作台」按钮。1688 按工作台当前模式存；拼多多/Ozon/WB 进「采集上架」。"""
     global _manual_job
     state["last_seen"] = time.time()
     mode = _mode() if platform == "1688" else "direct"
@@ -243,6 +251,46 @@ def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
     _workers.submit(_process_offer, job, offer_id, raw, platform)
     where = "采集上架" if mode == "direct" else "采集印标"
     return f"已更新到工作台（{where}）" if existed else f"已发送到工作台（{where}）"
+
+
+def _process_search(job: jobs.Job, pid: str, data: dict) -> None:
+    from . import match
+
+    def bind(p_id, offer_id):
+        with _lock:
+            job.total += 1
+            _new_task(job, "offer", offer_id=offer_id, url=f"https://detail.1688.com/offer/{offer_id}.html",
+                      match_for=p_id, auto=True)
+    try:
+        match.handle_candidates(pid, data, job, bind)
+    except Exception as e:  # noqa: BLE001
+        job.note(f"✗ {pid}：{str(e)[:120]}")
+    finally:
+        with _lock:
+            job.done += 1
+            job.inflight -= 1
+            _maybe_finish(job)
+
+
+def start_auto_match(pids: list[str]) -> jobs.Job:
+    """Ozon / WB 商品自动找 1688 同款（每个商品：以图搜 → AI 排序 → 把握够就自动绑定并读价格）。"""
+    from . import match
+
+    job = jobs.Job("scrape", f"自动找 1688 同款：{len(pids)} 个商品")
+    job.status = "running"
+    job.is_match = True
+    with _lock:
+        for pid in pids:
+            p = store.get_product(pid) or {}
+            img = match.target_image(p)
+            if not img:
+                job.note(f"✗ {pid}：没有主图，跳过")
+                continue
+            job.total += 1
+            _new_task(job, "imgsearch", pid=pid, image=img)
+        _maybe_finish(job)
+    _watch(job)
+    return job
 
 
 def enqueue_match(pid: str, offer_id: str) -> jobs.Job:

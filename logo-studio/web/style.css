@@ -418,3 +418,17 @@ pre.log-box { white-space: pre-wrap; max-height: 320px; }
 .pick.on { border-color: var(--accent); opacity: 1; }
 .pick img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .pick .check { position: absolute; top: 6px; left: 6px; }
+/* 采集来源切换（商品列表） */
+.src-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.src-tabs button { flex: 1; min-width: 0; height: 26px; padding: 0 6px; border-radius: 7px; border: 1px solid var(--line); background: var(--panel); color: var(--muted); font-size: 12px; cursor: pointer; white-space: nowrap; }
+.src-tabs button.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); font-weight: 600; }
+.src-tabs button span { font-size: 11px; color: var(--faint); }
+/* 1688 同款候选 */
+.cand-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+.cand { position: relative; display: flex; flex-direction: column; gap: 5px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.cand.best { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cand.on { border-color: var(--ok); }
+.cand img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 7px; cursor: zoom-in; background: #eceef3; }
+.cand .t { font-size: 12px; line-height: 1.35; height: 2.7em; overflow: hidden; }
+.cand-badge { position: absolute; top: 10px; left: 10px; padding: 1px 7px; border-radius: 6px; background: var(--accent); color: #fff; font-size: 11px; }
+.cand-use { width: 100%; justify-content: center; }

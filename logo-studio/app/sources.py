@@ -14,11 +14,14 @@ import time
 
 from . import store
 
-PLATFORM_NAME = {"1688": "1688", "pdd": "拼多多", "ozon": "Ozon"}
-REFERER = {"1688": "https://detail.1688.com/", "pdd": "https://mobile.yangkeduo.com/", "ozon": "https://www.ozon.ru/"}
+PLATFORM_NAME = {"1688": "1688", "pdd": "拼多多", "ozon": "Ozon", "wb": "WB"}
+REFERER = {"1688": "https://detail.1688.com/", "pdd": "https://mobile.yangkeduo.com/", "ozon": "https://www.ozon.ru/",
+           "wb": "https://www.wildberries.ru/"}
+MARKET = ("ozon", "wb")  # 这些平台的价格是卢布市场价，进货价要靠绑定 1688 货源
 
 PDD_URL = re.compile(r"(?:yangkeduo|pinduoduo)\.com/[^\s\"']*?goods_id=(\d{6,15})")
 OZON_URL = re.compile(r"ozon\.(?:ru|by|kz|com)/product/([\w\-%]+?-)?(\d{5,12})/?")
+WB_URL = re.compile(r"(?:wildberries\.(?:ru|by|kz|am|kg|uz)|wb\.ru)/catalog/(\d{5,12})/")
 
 
 def parse_links(text: str) -> list[dict]:
@@ -33,6 +36,10 @@ def parse_links(text: str) -> list[dict]:
         if ("ozon", m.group(2)) not in seen:
             seen.add(("ozon", m.group(2)))
             out.append({"platform": "ozon", "id": m.group(2), "url": f"https://www.ozon.ru/product/{m.group(2)}/"})
+    for m in WB_URL.finditer(text or ""):
+        if ("wb", m.group(1)) not in seen:
+            seen.add(("wb", m.group(1)))
+            out.append({"platform": "wb", "id": m.group(1), "url": f"https://www.wildberries.ru/catalog/{m.group(1)}/detail.aspx"})
     return out
 
 
@@ -255,10 +262,105 @@ def normalize_ozon(raw: dict, sku: str) -> dict:
     }
 
 
+# ---------------- WB ----------------
+def _wb_products(detail) -> dict:
+    """card.wb.ru 的价格接口（v1/v2/v4 结构不同）→ {nm: {"price": 卢布, "sizes": [...], "colors": [...], "brand": ...}}"""
+    if not isinstance(detail, dict):
+        return {}
+    prods = detail.get("products") or (detail.get("data") or {}).get("products") or []
+    out = {}
+    for pr in prods:
+        prices = []
+        for sz in pr.get("sizes") or []:
+            pv = (sz.get("price") or {})
+            v = pv.get("product") or pv.get("total") or sz.get("salePriceU")
+            if v:
+                prices.append(v / 100)
+        if not prices and pr.get("salePriceU"):
+            prices.append(pr["salePriceU"] / 100)
+        out[str(pr.get("id"))] = {"price": min(prices) if prices else None,
+                                  "sizes": [sz.get("origName") or sz.get("name") or "" for sz in pr.get("sizes") or []],
+                                  "colors": [c.get("name") for c in pr.get("colors") or [] if c.get("name")],
+                                  "brand": pr.get("brand") or ""}
+    return out
+
+
+def _wb_options(card: dict) -> dict:
+    out = {}
+    for o in card.get("options") or []:
+        if o.get("name"):
+            out[o["name"]] = str(o.get("value") or "")
+    for g in card.get("grouped_options") or []:
+        for o in g.get("options") or []:
+            if o.get("name") and o["name"] not in out:
+                out[o["name"]] = str(o.get("value") or "")
+    return out
+
+
+def normalize_wb(raw: dict, nm: str) -> dict:
+    cards = [c for c in raw.get("cards") or [] if isinstance(c, dict) and isinstance(c.get("card"), dict)]
+    if not cards:
+        raise ValueError("没读到 WB 商品数据（card.json），页面可能还没加载完")
+    det = _wb_products(raw.get("detail"))
+    main = next((c for c in cards if str(c.get("nm")) == str(nm)), cards[0])
+    mc = main["card"]
+    skus, color_images, colors = [], {}, []
+    for c in cards:
+        card = c["card"]
+        n = str(c.get("nm") or card.get("nm_id"))
+        d = det.get(n, {})
+        color = (card.get("nm_colors_names") or (d.get("colors") or [""])[0] or f"款式 {len(colors) + 1}").strip()
+        if color in color_images:
+            color = f"{color} {len(colors) + 1}"
+        cnt = int(((card.get("media") or {}).get("photo_count")) or c.get("photos") or 1)  # 没写张数：至少有第 1 张
+        imgs = [f"https://{c['host']}/vol{c['vol']}/part{c['part']}/{n}/images/big/{i}.webp" for i in range(1, cnt + 1)] \
+            if c.get("host") else []
+        colors.append({"name": color, "image": (imgs or [""])[0]})
+        color_images[color] = imgs
+        sizes = [v.get("tech_size") or v.get("techSize") for v in ((card.get("sizes_table") or {}).get("values") or [])]
+        sizes = [x for x in sizes if x and x != "0"] or [x for x in d.get("sizes") or [] if x and x != "0"] or [""]
+        for z in sizes:
+            skus.append({"name": f"{color} / {z}" if z else color, "parts": [color, z] if z else [color], "price": None,
+                         "price_rub": d.get("price"), "wb_nm": n})
+    sizes = []
+    for k in skus:
+        if len(k["parts"]) > 1 and k["parts"][1] not in sizes:
+            sizes.append(k["parts"][1])
+    attrs = _wb_options(mc)
+    pk = _package(attrs)
+    for k, v in attrs.items():  # WB 自己的包装字段（厘米 / 克）
+        kl, n_ = k.lower(), _num(v)
+        if not n_:
+            continue
+        if "длина упаковки" in kl:
+            pk["length"] = n_
+        elif "ширина упаковки" in kl:
+            pk["width"] = n_
+        elif "высота упаковки" in kl:
+            pk["height"] = n_
+        elif "вес" in kl and "упаков" in kl and not pk.get("weight"):
+            pk["weight"] = round(n_ / 1000, 3) if n_ > 30 else n_
+    prices = [k["price_rub"] for k in skus if k.get("price_rub")]
+    data = mc.get("data") or {}
+    return {
+        "offer_id": str(nm), "url": f"https://www.wildberries.ru/catalog/{nm}/detail.aspx",
+        "title": mc.get("imt_name") or "", "title_ru": mc.get("imt_name") or "",
+        "description_ru": (mc.get("description") or "")[:5000],
+        "brand_source": (mc.get("selling") or {}).get("brand_name") or det.get(str(nm), {}).get("brand", ""),
+        "category_source": mc.get("subj_name") or "", "wb_subject_id": data.get("subject_id") or mc.get("subject_id"),
+        "main_images": color_images.get(colors[0]["name"], []) if colors else [], "detail_images": [],
+        "color_images": color_images,
+        "sku_props": [{"name": "Цвет", "values": colors}] + ([{"name": "Размер", "values": [{"name": z, "image": ""} for z in sizes]}]
+                                                             if sizes else []),
+        "skus": skus, "sizes": sizes, "attrs": attrs, "package_source": pk,
+        "market_price_rub": min(prices) if prices else None, "price_min": None, "price_max": None,
+    }
+
+
 def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
     """保存一个采集上架商品。重新采集时更新信息，保留已加入待上架的图和上架记录。"""
     try:
-        info = normalize_pdd(raw, item_id) if platform == "pdd" else normalize_ozon(raw, item_id)
+        info = {"pdd": normalize_pdd, "ozon": normalize_ozon, "wb": normalize_wb}[platform](raw, item_id)
     except Exception as e:  # noqa: BLE001
         name = _dump(f"{platform}-{item_id}", raw)
         if job:
@@ -266,9 +368,15 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
         return None
     pid = f"{platform}-{item_id}"
     old = store.get_product(pid)
-    keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "created") if old and k in old}
+    keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "match_candidates", "match_auto", "created")
+            if old and k in old}
     product = {"id": pid, "source": platform, "mode": "direct", "created": time.time(), "sets": [], "ai": {},
                **info, **keep}
+    m = keep.get("match")
+    if m and m.get("price_max"):  # 重新采集：已绑定的 1688 进货价不能丢
+        product["price_min"], product["price_max"] = m.get("price_min"), m["price_max"]
+        for k in product.get("skus") or []:
+            k["price"] = m["price_max"]
     store.save_product(product)
     if job:
         job.note(f"{'↻ 已更新' if old else '✓'} {PLATFORM_NAME[platform]}：{info['title'][:30]}（"

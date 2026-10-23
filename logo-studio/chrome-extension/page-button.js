@@ -1,4 +1,5 @@
-// 1688 / 拼多多 / Ozon 商品页右下角的「采集到工作台」按钮。
+// 1688 / 拼多多 / Ozon / WB 商品页右下角的「采集到工作台」按钮。
+// WB、Ozon 是单页应用：站内点进商品页不会重新加载，所以按网址随时显示/隐藏按钮。
 (() => {
   if (document.getElementById('logo-studio-collect')) return;
   const btn = document.createElement('button');
@@ -22,4 +23,8 @@
     });
   });
   document.body.appendChild(btn);
+  const PRODUCT = /detail\.1688\.com\/offer\/\d|yangkeduo\.com\/goods|pinduoduo\.com\/.*goods_id=|ozon\.\w+\/product\/|wildberries\.\w+\/catalog\/\d+\//;
+  const sync = () => { btn.style.display = PRODUCT.test(location.href) ? '' : 'none'; };
+  sync();
+  setInterval(sync, 1000);
 })();

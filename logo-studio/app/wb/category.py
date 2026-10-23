@@ -77,6 +77,18 @@ def candidates(p: dict, subjects: list[dict]) -> list[dict]:
 
 def suggest(p: dict, cli, use_ai: bool = True) -> dict | None:
     """返回 {id, name, source, reason}；找不到返回 None。"""
+    if p.get("wb_subject_id"):  # 从 WB 采集来的：直接用它在 WB 上的类目
+        return {"id": int(p["wb_subject_id"]), "name": p.get("category_source", ""), "source": "source",
+                "reason": "WB 原商品的类目"}
+    if p.get("category_source"):  # Ozon 等平台的类目名（俄文）：和 WB 类目同名就直接用
+        try:
+            subjects = all_subjects(cli)
+        except Exception:  # noqa: BLE001
+            subjects = []
+        name = p["category_source"].strip().lower()
+        hit = next((c for c in subjects if c.get("subjectName", "").strip().lower() == name), None)
+        if hit:
+            return {"id": hit["subjectID"], "name": hit["subjectName"], "source": "source", "reason": "和来源平台的类目同名"}
     kw = keyword(p.get("title", ""))
     mem = _memory().get(kw) if kw else None
     if mem:

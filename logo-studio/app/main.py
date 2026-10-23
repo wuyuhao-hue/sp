@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import VERSION, ai, extbridge, jobs, store, studio
+from . import VERSION, ai, extbridge, jobs, sources, store, studio
 from .export import export_sets
 from .scraper import browser, run_scrape, run_scrape_tabs
 
@@ -68,8 +68,19 @@ def _summary(p: dict) -> dict:
         "running": any(st.get("status") == "running" for st in sets),
         "source": p.get("source"), "created": p.get("created"), "mode": p.get("mode") or "logo",
         "match": bool(p.get("match")), "market_price_rub": p.get("market_price_rub"),
+        "match_state": _match_state(p),
         **_lifecycle(p),
     }
+
+
+def _match_state(p: dict) -> str:
+    """Ozon/WB 商品的 1688 货源状态：none 没绑 / candidates 有候选待选 / auto 自动绑定待确认 / bound 已确认。"""
+    if p.get("source") not in sources.MARKET:
+        return ""
+    m = p.get("match")
+    if m:
+        return "bound" if m.get("confirmed") else ("auto" if m.get("auto") else "unconfirmed")
+    return "candidates" if p.get("match_candidates") else "none"
 
 
 def _lifecycle(p: dict) -> dict:
@@ -83,7 +94,7 @@ def _lifecycle(p: dict) -> dict:
         stage = "live"
     elif any(st.get("queued") for st in sets):
         stage = "queued"
-    elif done:
+    elif done and (p.get("mode") or "logo") != "direct":  # 采集上架没有「生成」这一步
         stage = "generated"
     else:
         stage = "new"
@@ -386,6 +397,24 @@ def match_bind(pid: str, url: str = Body(..., embed=True)):
     if not oid:
         raise HTTPException(400, "没认出 1688 商品链接（形如 https://detail.1688.com/offer/123456789012.html）")
     return extbridge.enqueue_match(pid, oid).to_dict()
+
+
+@app.post("/api/products/{pid}/match/pick")
+def match_pick(pid: str, offer_id: str = Body(..., embed=True)):
+    """从自动找到的候选里选一个绑定。"""
+    _product_or_404(pid)
+    if not re.fullmatch(r"\d{8,15}", offer_id or ""):
+        raise HTTPException(400, "候选编号不对")
+    return extbridge.enqueue_match(pid, offer_id).to_dict()
+
+
+@app.post("/api/products/auto-match")
+def auto_match(ids: list[str] = Body(..., embed=True)):
+    """Ozon / WB 商品自动找 1688 同款（以图搜 + AI 比对，把握够就自动绑定）。"""
+    pids = [i for i in ids if (store.get_product(i) or {}).get("source") in sources.MARKET]
+    if not pids:
+        raise HTTPException(400, "选中的商品里没有 Ozon / WB 商品（1688、拼多多商品本身就有人民币价）")
+    return extbridge.start_auto_match(pids).to_dict()
 
 
 @app.post("/api/products/{pid}/match/check")
@@ -952,7 +981,9 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     if not link_lines and not shop_lines:
         raise HTTPException(400, "请填写商品链接或店铺链接")
     max_pages = max(1, min(max_pages, 50))
-    if store.get_settings().get("scrape_mode") == "extension" or store.get_settings().get("work_mode") == "direct":
+    s = store.get_settings()
+    # 拼多多 / Ozon / WB 链接只有采集助手能采
+    if s.get("scrape_mode") == "extension" or s.get("work_mode") == "direct" or sources.parse_links(links):
         return extbridge.start_job(link_lines, shop_lines, max_pages).to_dict()
     job = jobs.Job("scrape", f"采集 {len(link_lines)} 个链接 / {len(shop_lines)} 个店铺")
     browser.submit(run_scrape, link_lines, shop_lines, max_pages, job)

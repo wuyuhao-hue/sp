@@ -26,7 +26,7 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', qShopF: '', qSubject: null, qQuery: '',
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
     dsel: { skus: [], main: [], detail: false }, matchUrl: '', dir: { colors: [], countries: [] },
   }),
   computed: {
@@ -34,7 +34,7 @@ createApp({
       const q = this.query.trim().toLowerCase();
       return this.products.filter(p => (p.mode || 'logo') === this.workMode
         && (!q || (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q))
-        && (this.pStage === 'all' || p.stage === this.pStage) && this.logoMatch(p));
+        && (this.pStage === 'all' || p.stage === this.pStage) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource));
     },
     allSelected() { return this.filtered.length && this.filtered.every(p => this.selected.includes(p.id)); },
     skus() {
@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 3, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 4, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -73,6 +73,10 @@ createApp({
     shownListings() { return this.listings.filter(l => this.qMatch(l)); },
     otherShops() { return this.shops.filter(s => s.id !== this.shopCurrent); },
     listingSubjects() { return [...new Set(this.listings.filter(l => (l.mode || 'logo') === this.workMode).map(l => l.subject_name || ''))].sort(); },
+    // 采集上架：按采集来源（1688 / WB / 拼多多 / Ozon）切换
+    productSources() { return this.sourcesOf(this.products.filter(p => (p.mode || 'logo') === this.workMode)); },
+    listingSources() { return this.sourcesOf(this.listings.filter(l => (l.mode || 'logo') === this.workMode)); },
+    selectedMarket() { return this.selected.filter(id => ['ozon', 'wb'].includes((this.products.find(p => p.id === id) || {}).source)); },
     listingLogos() {
       const m = {};
       for (const l of this.listings.filter(x => (x.mode || 'logo') === this.workMode)) {
@@ -195,7 +199,7 @@ createApp({
       if (m === this.workMode) return;
       await api('/api/mode', { body: { mode: m } });
       this.settings.work_mode = m;
-      this.selected = []; this.pStage = 'all'; this.pLogo = '';
+      this.selected = []; this.pStage = 'all'; this.pLogo = ''; this.pSource = ''; this.qSource = '';
       await this.loadProducts();
       if (this.filtered.length) await this.openProduct(this.filtered[0].id); else this.current = null;
       if (m === 'direct' && this.tab === 'logos') this.tab = 'products';
@@ -234,6 +238,15 @@ createApp({
       this.current = await api(`/api/products/${this.current.id}/match`, { method: 'DELETE' });
       this.loadProducts();
     },
+    async autoMatch(ids) {
+      try { this.jobs.unshift(await api('/api/products/auto-match', { body: { ids } })); this.toast('采集助手正在以图搜 1688 同款，进度在右下角'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async matchPick(oid) {
+      try { this.jobs.unshift(await api(`/api/products/${this.current.id}/match/pick`, { body: { offer_id: oid } })); this.toast('采集助手正在读取这个 1688 商品的价格…'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    matchStateName(s) { return { none: '未绑 1688', candidates: '待选同款', auto: '自动绑定·待确认', unconfirmed: '已绑·待确认', bound: '' }[s] || ''; },
     imageSearch() {
       const img = (this.current.main_images || [])[0];
       if (!img) { this.toast('这个商品没有主图', true); return; }
@@ -250,11 +263,12 @@ createApp({
       const st = l.status || 'draft';
       return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock' || st === 'waiting')) || st === f;
     },
-    qFilters() { return { status: this.qFilter, logo: this.qLogo, subject: this.qSubject, shop: this.qShopF }; },
+    qFilters() { return { status: this.qFilter, logo: this.qLogo, subject: this.qSubject, shop: this.qShopF, source: this.qSource }; },
     qMatch(l, f = this.qFilters()) {
       if ((l.mode || 'logo') !== this.workMode) return false;  // 只看当前模式（采集印标 / 采集上架）的商品卡
       if (!this.listingMatch(l, f.status)) return false;
       if (f.logo && l.key !== f.logo) return false;
+      if (f.source && (l.source || '1688') !== f.source) return false;
       if (f.subject !== null && (l.subject_name || '') !== f.subject) return false;
       if (f.shop) {
         const [kind, sid] = f.shop.split(':');
@@ -270,13 +284,21 @@ createApp({
       const f = { ...this.qFilters(), [dim]: val };
       return this.listings.filter(l => this.qMatch(l, f)).length;
     },
-    sourceName(s) { return { '1688': '1688', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
+    sourceName(s) { return { '1688': '1688', wb: 'WB', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
+    sourcesOf(list) {
+      const order = ['1688', 'wb', 'pdd', 'ozon'], have = new Set(list.map(x => x.source || '1688'));
+      return [...order.filter(s => have.has(s)), ...[...have].filter(s => !order.includes(s))];
+    },
+    sourceCount(s) {
+      return this.products.filter(p => (p.mode || 'logo') === this.workMode && (!s || p.source === s)
+        && (this.pStage === 'all' || p.stage === this.pStage)).length;
+    },
     logoMatch(p) {
       const f = this.pLogo, ids = p.logo_ids || [];
       if (!f) return true;
       return f.startsWith('!') ? !ids.includes(f.slice(1)) : ids.includes(f);
     },
-    stageCount(k) { return this.products.filter(p => (p.mode || 'logo') === this.workMode && (k === 'all' || p.stage === k) && this.logoMatch(p)).length; },
+    stageCount(k) { return this.products.filter(p => (p.mode || 'logo') === this.workMode && (k === 'all' || p.stage === k) && this.logoMatch(p) && (!this.pSource || p.source === this.pSource)).length; },
     setLive(st) {
       // 这套图在哪些店铺已上架（按上架记录里这个款式的 nmID）
       const L = ((this.current && this.current.listings) || {})[st.kind === 'source' ? 'src' : (st.logo_id || 'none')];

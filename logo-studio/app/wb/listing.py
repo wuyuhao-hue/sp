@@ -124,7 +124,7 @@ def sync(p: dict) -> dict:
             "package": {"length": None, "width": None, "height": None, "weight": None},
             "stock": 0, "pub": {},
         })
-        if key == "src" and not L.get("src_init"):  # 采集上架：Ozon 自带的俄文标题、说明、包装尺寸直接带进来
+        if key == "src" and not L.get("src_init"):  # 采集上架：Ozon / WB 自带的俄文标题、说明、包装尺寸直接带进来
             L["src_init"] = True
             if p.get("title_ru"):
                 L["title"] = clean_title(p["title_ru"])
@@ -133,6 +133,8 @@ def sync(p: dict) -> dict:
             pk = p.get("package_source") or {}
             if all(pk.get(k) for k in ("length", "width", "height", "weight")):
                 L["package"] = dict(pk)
+            if p.get("wb_subject_id"):  # WB 采集来的：类目直接用原商品的
+                L["subject_id"], L["subject_name"] = int(p["wb_subject_id"]), p.get("category_source", "")
         _migrate(L)
         if L.get("brand") and L["brand"] == L.get("logo_name") and re.search(r"[\u4e00-\u9fff]", L["brand"]):
             L["brand"] = _logo_brand(L.get("logo_id"))  # 旧版本把 logo 名当品牌：改成 Logo 库里的 WB 品牌名
@@ -166,7 +168,7 @@ def sync(p: dict) -> dict:
                            "cny": max([c for c in (_cny(p, v["sku"], s) for v in L["variants"]) if c] or
                                       [p.get("price_max") or p.get("price_min") or 0])}
                           for s in (p.get("sizes") or ["均码"])]
-        for sz in L["sizes"]:  # 后来才有采购价（例如 Ozon 商品刚绑定了 1688 货源）：补上
+        for sz in L["sizes"]:  # 后来才有采购价（例如 Ozon / WB 商品刚绑定了 1688 货源）：补上
             if not sz.get("cny"):
                 sz["cny"] = max([c for c in (_cny(p, v["sku"], sz["label"]) for v in L["variants"]) if c] or
                                 [p.get("price_max") or p.get("price_min") or 0])
@@ -227,7 +229,7 @@ def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai", shop_id: str | No
     if frozen:
         return frozen
     src = re.sub(r"[^\w\-]", "", str(p.get("offer_id") or p["id"]))
-    src = {"pdd": "pdd", "ozon": "oz"}.get(p.get("source") or "", "") + src
+    src = {"pdd": "pdd", "ozon": "oz", "wb": "wb"}.get(p.get("source") or "", "") + src
     lg = "s" if L.get("key") == "src" else re.sub(r"[^\w]", "", L.get("logo_id") or "n")[:6]
     return f"{prefix}-{src}-{lg}-{v['index']}"[:72]
 
@@ -303,8 +305,13 @@ def normalize_all(L: dict, charc_meta: list[dict], dict_values: dict[str, list[s
         else:
             for var in L["variants"]:
                 v = (var.get("color") or "").strip()
-                if v and v not in low.values() and v.lower() in low:
-                    var["color"], changed = low[v.lower()], True
+                if not v or v in low.values():
+                    continue
+                # WB / Ozon 采集来的颜色名：大小写、ё、复合颜色（「черный, белый」「бежево-коричневый」）取第一个官方颜色
+                cands = [v, v.replace("ё", "е")] + [x.strip() for x in re.split(r"[,;/+]|\s-\s", v.replace("ё", "е")) if x.strip()]
+                hit = next((low[c.lower()] for c in cands if c.lower() in low), None)
+                if hit:
+                    var["color"], changed = hit, True
     return changed
 
 
@@ -429,6 +436,12 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
         errors.append(f"属性「{name}」的值「{bad}」不在 WB 官方列表里")
     errors += official_errors(L, charc_meta or [], official or {})
     errors += learned_errors(L, charc_meta or [])
+    sb = (p.get("brand_source") or "").strip()
+    if len(sb) >= 3 and sb.lower() != brand.lower() and not re.fullmatch(r"(?i)нет бренда|no ?brand|noname|без бренда", sb):
+        hit = [w for w, t in (("标题", title), ("说明", L.get("description") or ""))
+               if re.search(r"(?<![\w])" + re.escape(sb) + r"(?![\w])", t, re.I)]
+        if hit:  # 采集来的标题/说明里带着原卖家的品牌：用别人的商标上架会被投诉、封卡
+            errors.append(f"{'、'.join(hit)}里有原商品的品牌「{sb}」，请删掉（不能用别人的品牌上架）")
     if len(L.get("description") or "") < 100:
         warnings.append("商品说明太短（建议 800–1000 字符的完整俄文说明）")
     pr = L["pricing"]
@@ -447,8 +460,8 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
         if re.search(r"[\u4e00-\u9fff]", s.get("tech") or ""):
             errors.append(f"尺码「{s['label']}」的卖家尺码「{s['tech']}」含中文，请改成字母或数字（例如 XL、2XL、48）")
         if not (s.get("cny_override") or s.get("cny")):
-            errors.append(f"尺码「{s['label']}」没有采购价" + ("（Ozon 商品请先在商品页绑定 1688 货源，或在这里手动填进货价）"
-                                                       if p.get("source") == "ozon" else ""))
+            errors.append(f"尺码「{s['label']}」没有采购价" + ("（Ozon / WB 采集的商品请先在商品页绑定 1688 货源，或在这里手动填进货价）"
+                                                       if p.get("source") in ("ozon", "wb") else ""))
     techs = [s.get("tech") for s in sizes]
     if len(set(techs)) < len(techs):
         errors.append("有重复的卖家尺码")

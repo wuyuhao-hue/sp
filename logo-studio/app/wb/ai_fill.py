@@ -293,6 +293,7 @@ def fill_listing(pid: str, key: str, cli, auto_subject: bool = True) -> dict:
             if res.get(k):
                 LL[k] = res[k]
         LL.setdefault("charcs", {}).update(res.get("charcs") or {})
+        LL["charcs"].update(source_charcs(x, meta))  # 来源平台（WB / Ozon）同名属性的原值优先
         for v in LL["variants"]:
             r = (res.get("variants") or {}).get(v["sku"]) or {}
             if r.get("color"):
@@ -317,3 +318,27 @@ def _pos(v) -> bool:
         return float(v) > 0
     except (TypeError, ValueError):
         return False
+
+
+def source_charcs(p: dict, meta: list[dict]) -> dict:
+    """WB / Ozon 采集来的商品自带俄文属性：属性名和 WB 类目属性同名的，直接用原值（不用 AI 猜）。"""
+    attrs = p.get("attrs") or {}
+    if p.get("source") not in ("wb", "ozon") or not attrs:
+        return {}
+    low = {k.strip().lower(): v for k, v in attrs.items()}
+    out = {}
+    for c in meta:
+        name = c["name"].strip().lower()
+        if name in ("цвет", "бренд") or name.startswith("страна производства") or "тнвэд" in name.replace(" ", ""):
+            continue
+        v = low.get(name)
+        if not v:
+            continue
+        if c.get("charcType") == 4:
+            n = LS.to_number(v)
+            if n is not None:
+                out[str(c["charcID"])] = [n]
+        else:
+            vals = [x.strip() for x in re.split(r"[;,]\s*", v) if x.strip()]
+            out[str(c["charcID"])] = vals[: int(c.get("maxCount") or 1)]
+    return out
