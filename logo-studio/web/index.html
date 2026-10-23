@@ -554,7 +554,18 @@
           <div class="charc-grid">
             <div class="field" v-for="c in visibleCharcs" :key="c.charcID">
               <label>{{ c.name }}<span class="req" v-if="c.required"> *</span><span class="faint" v-if="c.unitName"> （{{ c.unitName }}）</span><span class="faint" v-if="(c.maxCount||1) > 1"> 最多 {{ c.maxCount }} 个，用逗号分开</span></label>
-              <input class="input sm" :value="charcText(c)" @change="setCharc(c, $event.target.value)" :type="c.charcType===4 ? 'number' : 'text'">
+              <select class="input sm" v-if="c.options && c.options.length && (c.maxCount || 1) === 1" :value="charcText(c)" @change="setCharc(c, $event.target.value)"
+                      :class="{bad: charcText(c) && !c.options.includes(charcText(c))}">
+                <option value="">（不填）</option>
+                <option v-if="charcText(c) && !c.options.includes(charcText(c))" :value="charcText(c)">⚠ {{ charcText(c) }}（不在 WB 官方列表）</option>
+                <option v-for="o in c.options" :key="o" :value="o">{{ o }}</option>
+              </select>
+              <template v-else>
+                <input class="input sm" :value="charcText(c)" @change="setCharc(c, $event.target.value)" :type="c.charcType===4 ? 'number' : 'text'"
+                       :list="c.options && c.options.length ? 'dl-c-' + c.charcID : null">
+                <datalist v-if="c.options && c.options.length" :id="'dl-c-' + c.charcID"><option v-for="o in c.options" :key="o" :value="o"></option></datalist>
+              </template>
+              <div class="faint" v-if="(c.rejected || []).length" style="color:#b45309">WB 拒绝过：{{ c.rejected.join('、') }}</div>
             </div>
           </div>
         </section>

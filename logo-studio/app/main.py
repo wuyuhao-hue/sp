@@ -548,7 +548,8 @@ def wb_charcs(subject_id: int, shop: str | None = None):
     cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
     meta = _wb_call(lambda: wb_upload.charc_meta(cli, subject_id))
     meta = sorted(meta, key=lambda c: (not c.get("required"), not c.get("popular"), c.get("name", "")))
-    return meta
+    dv = wb_upload.dict_values(cli, meta)  # 有官方目录的属性：编辑框里显示成下拉选择
+    return [{**c, "options": dv.get(str(c["charcID"])) or [], "rejected": wb_listing.learned_bad(c["name"])} for c in meta]
 
 
 @app.get("/api/wb/directory/{kind}")

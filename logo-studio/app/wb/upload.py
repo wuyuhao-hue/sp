@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import threading
 import time
 
@@ -169,33 +170,24 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 missing = [vc for vc in codes if vc not in existing]
 
         if missing:
-            sizes = [s for s in L["sizes"] if s.get("enabled")]
-            per = 1 if LS.one_size(L) else len(sizes)
-            _stage(pid, key, shop_id, job, "生成条码", 12)
-            bcs = cli.barcodes(len(missing) * per)
-            barcodes = {vc: bcs[i * per:(i + 1) * per] for i, vc in enumerate(missing)}
-            errors_before = {(e["vendorCode"], e["key"]) for e in cli.error_list()}
-            target = _main_imt(existing)
-            ambiguous = False
-            try:
-                if target and len(existing) + len(missing) <= 30:
-                    # 这张卡已经在 WB 上（之前上过其他颜色）：新颜色追加进原卡，不另建卡
-                    _stage(pid, key, shop_id, job, f"给已有商品卡追加 {len(missing)} 个新款式", 20)
-                    cli.upload_add(target, LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing), shop_id=shop_id))
-                else:
-                    _stage(pid, key, shop_id, job, "创建商品卡", 20)
-                    variants = LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing), shop_id=shop_id)
-                    cli.upload_cards([{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]}
-                                      for i in range(0, len(variants), 30)])
-            except WBError as e:
-                if not e.ambiguous:
-                    raise
-                ambiguous = True
-                _stage(pid, key, shop_id, job, f"创建请求结果不确定（{e.status}），不重发，按供应商编码回查", 22)
-            _update(pid, key, shop_id, lambda P: P.update(card_submitted=time.time()))
-            _stage(pid, key, shop_id, job, "等待商品卡生效", 30)
-            existing.update(_wait_cards(cli, missing, job, pid, key, errors_before=errors_before,
-                                        limit=POLL_AMBIGUOUS if ambiguous else None))
+            for attempt in range(2):
+                try:
+                    existing.update(_create(cli, p, L, meta, prefix, shop_id, pid, key, job, missing, existing))
+                    break
+                except CardRejected as e:
+                    healed = _heal(pid, key, L, meta, e.messages) if attempt == 0 else []
+                    if not healed:
+                        raise
+                    # 同一批里没被拒的款式已经被 WB 接受：等它们出现，绝不重建；只重新提交被拒的款式
+                    existing.update(e.found)
+                    accepted = [vc for vc in missing if vc not in e.codes and vc not in existing]
+                    if accepted:
+                        existing.update(_wait_cards(cli, accepted, job, pid, key))
+                    missing = [vc for vc in missing if vc not in existing]
+                    if not missing:
+                        break
+                    _stage(pid, key, shop_id, job, "WB 拒绝了这些可选属性值，已自动去掉并记住，重新提交一次："
+                           + "；".join(healed), 26)
             _stage(pid, key, shop_id, job, "等待 WB 新卡跨服务生效", 34)
             time.sleep(SYNC_WAIT)
 
@@ -286,6 +278,75 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             job.fail(msg[:300])
 
 
+class CardRejected(WBError):
+    def __init__(self, messages: list[str], codes: list[str] | None = None, found: dict | None = None):
+        super().__init__(400, "WB 拒绝了商品卡：" + "；".join(f"{m}{explain(m)}" for m in messages[:8]))
+        self.messages = messages
+        self.codes = codes or []   # 被拒绝的供应商编码
+        self.found = found or {}   # 同一批里已经出现的卡
+
+
+def _create(cli, p, L, meta, prefix, shop_id, pid, key, job, missing, existing) -> dict:
+    """生成条码 → 创建（或追加进已有卡）→ 等商品卡出现。创建请求只发 1 次。"""
+    sizes = [s for s in L["sizes"] if s.get("enabled")]
+    per = 1 if LS.one_size(L) else len(sizes)
+    _stage(pid, key, shop_id, job, "生成条码", 12)
+    bcs = cli.barcodes(len(missing) * per)
+    barcodes = {vc: bcs[i * per:(i + 1) * per] for i, vc in enumerate(missing)}
+    errors_before = {(e["vendorCode"], e["key"]) for e in cli.error_list()}
+    target = _main_imt(existing)
+    ambiguous = False
+    variants = LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing), shop_id=shop_id)
+    try:
+        if target and len(existing) + len(missing) <= 30:
+            # 这张卡已经在 WB 上（之前上过其他颜色）：新颜色追加进原卡，不另建卡
+            _stage(pid, key, shop_id, job, f"给已有商品卡追加 {len(missing)} 个新款式", 20)
+            cli.upload_add(target, variants)
+        else:
+            _stage(pid, key, shop_id, job, "创建商品卡", 20)
+            cli.upload_cards([{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]}
+                              for i in range(0, len(variants), 30)])
+    except WBError as e:
+        if not e.ambiguous:
+            raise
+        ambiguous = True
+        _stage(pid, key, shop_id, job, f"创建请求结果不确定（{e.status}），不重发，按供应商编码回查", 22)
+    _update(pid, key, shop_id, lambda P: P.update(card_submitted=time.time()))
+    _stage(pid, key, shop_id, job, "等待商品卡生效", 30)
+    return _wait_cards(cli, missing, job, pid, key, errors_before=errors_before,
+                       limit=POLL_AMBIGUOUS if ambiguous else None)
+
+
+REJECT_VALUE = re.compile(r"^\s*(?P<name>[^:：]{2,80}?)\s*[:：].*?недопустим\w*\s+значени\w*\s*[«\"“']?(?P<value>[^»\"”']*)", re.I)
+
+
+def _heal(pid: str, key: str, L: dict, meta: list[dict], messages: list[str]) -> list[str]:
+    """WB 拒绝的如果全是「非必填属性的值不合法」：去掉这些值、记进学习库，返回说明；有一条处理不了就返回 []。
+    被拒绝的卡并没有建成，所以去掉后重新提交不会重复建卡。"""
+    by_name = {c["name"].strip().lower(): c for c in meta}
+    fixes = []
+    for m in messages:
+        mt = REJECT_VALUE.match(m)
+        c = by_name.get(mt.group("name").strip().lower()) if mt else None
+        if not c or c.get("required"):
+            return []  # 必填属性、品牌、尺码等问题：需要人工处理
+        fixes.append((c, mt.group("value").strip()))
+    notes = []
+    for c, val in fixes:
+        cid = str(c["charcID"])
+        vals = [v for v in (L.get("charcs") or {}).get(cid) or [] if str(v).strip().lower() != val.lower()]
+        if not val:
+            vals = []
+        if vals:
+            L["charcs"][cid] = vals
+        else:
+            L.get("charcs", {}).pop(cid, None)
+        LS.learn(c["name"], val)
+        notes.append(f"{c['name']}「{val}」")
+    store.update_product(pid, lambda x: x["listings"][key].update(charcs=L.get("charcs") or {}))
+    return notes
+
+
 def _wait_cards(cli, codes: list[str], job, pid, key, limit: int | None = None, errors_before=None) -> dict:
     """按 vendorCode 轮询直到所有款式都出现；同时检查错误草稿（只看本轮新出现的错误）。"""
     found: dict[str, dict] = {}
@@ -301,8 +362,8 @@ def _wait_cards(cli, codes: list[str], job, pid, key, limit: int | None = None, 
             bad = [e for e in cli.error_list() if e["vendorCode"] in codes and e["vendorCode"] not in found
                    and (e["vendorCode"], e["key"]) not in errors_before]
             if bad:
-                msgs = sorted({m for e in bad for m in e["errors"]}) or ["未给出原因"]
-                raise WBError(400, "WB 拒绝了商品卡：" + "；".join(f"{m}{explain(m)}" for m in msgs[:8]))
+                raise CardRejected(sorted({m for e in bad for m in e["errors"]}) or ["未给出原因"],
+                                   sorted({e["vendorCode"] for e in bad}), dict(found))
         time.sleep(POLL_EVERY)
     raise WBError(0, f"等待商品卡超时：{len(found)}/{len(codes)} 个款式已出现。请稍后点「上架」续传（不会重复建卡）")
 

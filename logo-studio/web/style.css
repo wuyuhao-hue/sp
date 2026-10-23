@@ -381,3 +381,4 @@ pre.log-box { white-space: pre-wrap; max-height: 320px; }
 .tag.live { background: #e0f2fe; color: #0369a1; border-color: #bae6fd; }
 .stage-seg { display: flex; }
 .stage-seg button { flex: 1; padding: 3px 2px; font-size: 11px; white-space: nowrap; }
+.input.bad { border-color: var(--danger); color: var(--danger); }

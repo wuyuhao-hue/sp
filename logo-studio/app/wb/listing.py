@@ -307,15 +307,60 @@ def official_errors(L: dict, charc_meta: list[dict], official: dict) -> list[str
     return errs
 
 
+# 常见的同义写法 → WB 官方值（只有目标值确实在 WB 官方列表里时才替换，所以对任何类目都安全）
+SYNONYMS = {
+    "осень": "демисезон", "весна": "демисезон", "весна-осень": "демисезон", "осень-весна": "демисезон",
+    "осень-зима": "демисезон", "межсезонье": "демисезон", "демисезонный": "демисезон", "демисезонная": "демисезон",
+    "всесезон": "круглогодичный", "всесезонный": "круглогодичный", "круглый год": "круглогодичный",
+    "зимний": "зима", "зимняя": "зима", "летний": "лето", "летняя": "лето",
+    "мужская": "мужской", "мужские": "мужской", "женская": "женский", "женские": "женский",
+}
+
+
+def _official(v: str, low: dict[str, str]) -> str:
+    k = str(v).strip().lower()
+    if k in low:
+        return low[k]
+    syn = SYNONYMS.get(k)
+    return low.get(syn, v) if syn else v
+
+
+# ---------------- 从 WB 拒绝里学习 ----------------
+# WB 拒绝过的属性值（按属性名记，所有类目通用）：以后预检直接拦下，AI 填写时也会告诉它别用。
+LEARNED = store.DATA / "wb_learned.json"
+
+
+def learn(charc_name: str, value: str) -> None:
+    d = store._read(LEARNED, {})
+    k = charc_name.strip().lower()
+    if str(value).strip().lower() not in d.setdefault(k, []):
+        d[k].append(str(value).strip().lower())
+        store._write(LEARNED, d)
+
+
+def learned_bad(charc_name: str) -> list[str]:
+    return store._read(LEARNED, {}).get(charc_name.strip().lower(), [])
+
+
+def learned_errors(L: dict, charc_meta: list[dict]) -> list[str]:
+    errs = []
+    for c in charc_meta:
+        bad = set(learned_bad(c["name"]))
+        for v in (L.get("charcs") or {}).get(str(c["charcID"])) or []:
+            if str(v).strip().lower() in bad:
+                errs.append(f"属性「{c['name']}」的值「{v}」以前被 WB 拒绝过，请换一个值或清空")
+    return errs
+
+
 def normalize_charcs(L: dict, dict_values: dict[str, list[str]]) -> bool:
-    """把有官方目录的属性值改成官方写法（忽略大小写/空格匹配）。返回是否有改动。"""
+    """把有官方目录的属性值改成官方写法（忽略大小写；常见同义写法换成官方值）。返回是否有改动。"""
     changed = False
     for cid, official in dict_values.items():
         vals = (L.get("charcs") or {}).get(cid)
         if not vals or not official:
             continue
         low = {o.strip().lower(): o for o in official}
-        fixed = [low.get(str(v).strip().lower(), v) for v in vals]
+        fixed = list(dict.fromkeys(_official(v, low) for v in vals))
         if fixed != vals:
             L["charcs"][cid] = fixed
             changed = True
@@ -364,6 +409,7 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
     for name, bad in dict_errors(L, dict_values or {}, charc_meta or []):
         errors.append(f"属性「{name}」的值「{bad}」不在 WB 官方列表里")
     errors += official_errors(L, charc_meta or [], official or {})
+    errors += learned_errors(L, charc_meta or [])
     if len(L.get("description") or "") < 100:
         warnings.append("商品说明太短（建议 800–1000 字符的完整俄文说明）")
     pr = L["pricing"]

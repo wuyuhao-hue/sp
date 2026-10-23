@@ -18,7 +18,7 @@ MAIN_PROMPT = """你是 Wildberries 俄罗斯电商商品资料助手。只返�
 title 必须为俄文且不超过 60 字符；严禁出现任何性别信息或性别词，包括 женский/женская/мужской/для женщин/для мужчин/унисекс 等。
 description 必须是完整、连贯的俄文商品说明，目标 900 个字符，可在 820–1050 字符之间；不得中途截断，不得虚构认证、功效或材质。
 description 严禁出现尺码表、尺码列表、可选尺码、身高体重对应表、"购买前咨询卖家尺码"等尺码建议，也不得罗列 S/M/L/XL、数字服装尺码或鞋码。
-officialValues 非空时只能从该字段的候选原文中选择，禁止自行翻译、改写或跨字段挪用。可输出多个值，但不得超过 maxCount。无官方目录时可填有证据的自然俄文或数字。
+rejectedByWB 里的值以前被 WB 拒绝过，绝对不要再用。officialValues 非空时只能从该字段的候选原文中选择，禁止自行翻译、改写或跨字段挪用。可输出多个值，但不得超过 maxCount。无官方目录时可填有证据的自然俄文或数字。
 country 判断生产国并输出俄文国名；hsCode 必须直接从 hsOfficialCandidates 中选择一个候选原文，不得自造编码。
 不要识别规格颜色或规格标题，它们由独立的规格级任务处理。不要填写品牌。
 逐项审查所有字段，优先完成必填、热门字段。图片清楚表明没有纽扣/内衬/填充物时，可以填准确的"无"俄文值。不得编造材质比例、认证、税率或登记编号。性别、季节、用途必须各归其对应字段，不能错位。不能确认的字段在 notes 中说明原因。
@@ -160,7 +160,8 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
     fields = [{"id": c["charcID"], "name": c["name"], "required": bool(c.get("required")),
                "popular": bool(c.get("popular")), "maxCount": c.get("maxCount") or 1, "unit": c.get("unitName") or "",
                "number": c.get("charcType") == 4,
-               **({"officialValues": dict_values[str(c["charcID"])]} if dict_values.get(str(c["charcID"])) else {})}
+               **({"officialValues": dict_values[str(c["charcID"])]} if dict_values.get(str(c["charcID"])) else {}),
+               **({"rejectedByWB": LS.learned_bad(c["name"])} if LS.learned_bad(c["name"]) else {})}
               for c in meta if c["name"].strip().lower() not in ("цвет", "бренд")
               and not c["name"].lower().startswith("страна производства") and "ТНВЭД" not in c["name"].upper()]
     from ..studio import sku_list
