@@ -25,18 +25,19 @@ POLL_AMBIGUOUS = int(os.environ.get("WB_POLL_AMBIGUOUS", "12"))  # 建卡结果�
 STOCK_DELAYS = [float(x) for x in os.environ.get("WB_STOCK_DELAYS", "20,40,80,160,300,600,600").split(",")]
 
 
-def _update(pid: str, key: str, fn) -> dict:
+def _update(pid: str, key: str, shop_id: str, fn) -> dict:
+    """修改这张卡在某个店铺的上架记录（L["pub"][shop_id]）。"""
     def wrap(p):
-        fn(p["listings"][key])
+        fn(LS.pub(p["listings"][key], shop_id))
     return store.update_product(pid, wrap)
 
 
-def _stage(pid: str, key: str, job, text: str, pct: int) -> None:
-    def fn(L):
-        L["progress"] = {"stage": text, "pct": pct}
-        L.setdefault("log", []).append(f"{time.strftime('%H:%M:%S')} {text}")
-        del L["log"][:-80]
-    _update(pid, key, fn)
+def _stage(pid: str, key: str, shop_id: str, job, text: str, pct: int) -> None:
+    def fn(P):
+        P["progress"] = {"stage": text, "pct": pct}
+        P.setdefault("log", []).append(f"{time.strftime('%H:%M:%S')} {text}")
+        del P["log"][:-80]
+    _update(pid, key, shop_id, fn)
     if job:
         job.note(text)
 
@@ -69,6 +70,64 @@ def charc_meta(client, subject_id: int) -> list[dict]:
     return LS.cached(f"charcs-{subject_id}", lambda: client.characteristics(subject_id))
 
 
+def dict_values(client, meta: list[dict]) -> dict[str, list[str]]:
+    """有官方目录的属性（季节、性别…）的全部官方值，{charcID: [...]}；取不到时为空列表（不做校验）。"""
+    out = {}
+    for cid, kind in LS.dict_charc_ids(meta).items():
+        try:
+            out[cid] = LS.cached(kind, lambda kind=kind: client.directory(kind))
+        except Exception:  # noqa: BLE001
+            out[cid] = []
+    return out
+
+
+def brand_found(client, subject_id, brand: str) -> bool | None:
+    """在 WB 品牌库查品牌（结果缓存 1 天）。True 有 / False 没有 / None 查不了。"""
+    brand = (brand or "").strip()
+    if not brand or not subject_id:
+        return None
+    import hashlib as _h
+
+    name = f"brand-{subject_id}-{_h.md5(brand.lower().encode()).hexdigest()[:10]}"
+    try:
+        r = LS.cached(name, lambda: {"found": client.brand_exists(int(subject_id), brand)}, days=1)
+    except Exception:  # noqa: BLE001
+        return None
+    if r.get("found") is None:
+        (LS.CACHE / f"{name}.json").unlink(missing_ok=True)  # 查不了的结果不缓存
+    return r.get("found")
+
+
+def checks(client, p: dict, L: dict, shop: dict | None) -> dict:
+    """连 WB 的完整预检：类目属性、官方目录值（自动改成官方写法）、品牌库。"""
+    meta = charc_meta(client, int(L["subject_id"])) if L.get("subject_id") else []
+    dv = dict_values(client, meta)
+    official = official_lists(client, L.get("subject_id"))
+    if LS.normalize_all(L, meta, dv, official):  # 能自动修正的（大小写、单位、数量）直接改好并保存
+        store.update_product(p["id"], lambda x: x["listings"][L["key"]].update(
+            charcs=L["charcs"], variants=L["variants"], country=L.get("country")))
+    bf = brand_found(client, L.get("subject_id"), L.get("brand"))
+    return {"meta": meta, "preflight": LS.preflight(p, L, shop, meta, brand_found=bf, dict_values=dv, official=official)}
+
+
+def official_lists(client, subject_id) -> dict[str, list[str]]:
+    """WB 官方颜色、国家、当前类目的 ТН ВЭД（取不到的为空，不做校验）。"""
+    out = {}
+    for k, name, loader, field in (("colors", "colors", client.colors, "name"),
+                                   ("countries", "countries", client.countries, "name"),
+                                   ("tnved", f"tnved-{subject_id}", lambda: client.tnved(int(subject_id)), "tnved")):
+        if k == "tnved" and not subject_id:
+            continue
+        try:
+            rows = LS.cached(name, loader)
+        except Exception:  # noqa: BLE001
+            rows = []
+        if rows is LS.FALLBACK.get(name):
+            rows = []  # 只有内置兜底列表（WB 暂时取不到）时不拿来拦截
+        out[k] = [str(r.get(field)) for r in rows if isinstance(r, dict) and r.get(field)]
+    return out
+
+
 def upload(pid: str, key: str, shop_id: str, job) -> None:
     p = store.get_product(pid)
     L = p["listings"][key]
@@ -76,16 +135,16 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
     try:
         cli = shops.client(shop_id)
         prefix = (shop or {}).get("vendor_prefix") or "ai"
-        _update(pid, key, lambda L: L.update(status="uploading", shop_id=shop_id, error=""))
-        _stage(pid, key, job, "本地上传前检查", 4)
-        meta = charc_meta(cli, int(L["subject_id"])) if L.get("subject_id") else []
-        pf = LS.preflight(p, L, shop, meta)
+        _update(pid, key, shop_id, lambda P: P.update(status="uploading", error=""))
+        _stage(pid, key, shop_id, job, "本地上传前检查", 4)
+        ck = checks(cli, p, L, shop)
+        meta, pf = ck["meta"], ck["preflight"]
         if not pf["ok"]:
             raise WBError(0, "预检未通过：" + "；".join(pf["errors"]))
 
         variants = [v for v in L["variants"] if v.get("enabled")]
-        codes = {LS.vendor_code(p, L, v, prefix): v for v in variants}
-        _stage(pid, key, job, "准备本地图片", 6)
+        codes = {LS.vendor_code(p, L, v, prefix, shop_id): v for v in variants}
+        _stage(pid, key, shop_id, job, "准备本地图片", 6)
         media = {}
         for vc, v in codes.items():
             st = next(x for x in p["sets"] if x["id"] == v["sid"])
@@ -95,16 +154,16 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
 
         # 供应商编码第一次上架时固定下来，以后改前缀/重新采集都不会变 → 永远能按编码找回原卡
         frozen = {v["sku"]: vc for vc, v in codes.items()}
-        _update(pid, key, lambda L: L.update(codes={**(L.get("codes") or {}), **frozen}))
+        _update(pid, key, shop_id, lambda P: P.update(codes={**(P.get("codes") or {}), **frozen}))
 
         # 先按供应商编码查 WB 已有的卡：已存在的直接续传，不再新建
-        _stage(pid, key, job, "查询 WB 已有商品卡", 8)
+        _stage(pid, key, shop_id, job, "查询 WB 已有商品卡", 8)
         existing = {vc: c[0] for vc in codes if (c := cli.find_cards(vc))}
         missing = [vc for vc in codes if vc not in existing]
         if missing:  # 在回收站里的恢复原卡，不新建
             trash = {vc: c[0] for vc in missing if (c := cli.find_trash(vc))}
             if trash:
-                _stage(pid, key, job, f"恢复 WB 回收站中的原商品卡（{len(trash)} 个款式）", 10)
+                _stage(pid, key, shop_id, job, f"恢复 WB 回收站中的原商品卡（{len(trash)} 个款式）", 10)
                 cli.recover([c["nmID"] for c in trash.values()])
                 existing.update(_wait_cards(cli, list(trash), job, pid, key, limit=12))
                 missing = [vc for vc in codes if vc not in existing]
@@ -112,7 +171,7 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
         if missing:
             sizes = [s for s in L["sizes"] if s.get("enabled")]
             per = 1 if LS.one_size(L) else len(sizes)
-            _stage(pid, key, job, "生成条码", 12)
+            _stage(pid, key, shop_id, job, "生成条码", 12)
             bcs = cli.barcodes(len(missing) * per)
             barcodes = {vc: bcs[i * per:(i + 1) * per] for i, vc in enumerate(missing)}
             errors_before = {(e["vendorCode"], e["key"]) for e in cli.error_list()}
@@ -121,23 +180,23 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             try:
                 if target and len(existing) + len(missing) <= 30:
                     # 这张卡已经在 WB 上（之前上过其他颜色）：新颜色追加进原卡，不另建卡
-                    _stage(pid, key, job, f"给已有商品卡追加 {len(missing)} 个新款式", 20)
-                    cli.upload_add(target, LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing)))
+                    _stage(pid, key, shop_id, job, f"给已有商品卡追加 {len(missing)} 个新款式", 20)
+                    cli.upload_add(target, LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing), shop_id=shop_id))
                 else:
-                    _stage(pid, key, job, "创建商品卡", 20)
-                    variants = LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing))
+                    _stage(pid, key, shop_id, job, "创建商品卡", 20)
+                    variants = LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing), shop_id=shop_id)
                     cli.upload_cards([{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]}
                                       for i in range(0, len(variants), 30)])
             except WBError as e:
                 if not e.ambiguous:
                     raise
                 ambiguous = True
-                _stage(pid, key, job, f"创建请求结果不确定（{e.status}），不重发，按供应商编码回查", 22)
-            _update(pid, key, lambda L: L.update(card_submitted=time.time()))
-            _stage(pid, key, job, "等待商品卡生效", 30)
+                _stage(pid, key, shop_id, job, f"创建请求结果不确定（{e.status}），不重发，按供应商编码回查", 22)
+            _update(pid, key, shop_id, lambda P: P.update(card_submitted=time.time()))
+            _stage(pid, key, shop_id, job, "等待商品卡生效", 30)
             existing.update(_wait_cards(cli, missing, job, pid, key, errors_before=errors_before,
                                         limit=POLL_AMBIGUOUS if ambiguous else None))
-            _stage(pid, key, job, "等待 WB 新卡跨服务生效", 34)
+            _stage(pid, key, shop_id, job, "等待 WB 新卡跨服务生效", 34)
             time.sleep(SYNC_WAIT)
 
         # 同一商品的不同颜色应该在同一个 imtID 下（WB 上显示为一个商品的多个颜色）；分散了就合并
@@ -146,18 +205,18 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             target = _main_imt(existing)
             try:
                 cli.merge(target, [c["nmID"] for c in existing.values() if c.get("imtID") != target])
-                _stage(pid, key, job, f"已把 {len(existing)} 个款式合并到同一商品（imtID {target}）", 36)
+                _stage(pid, key, shop_id, job, f"已把 {len(existing)} 个款式合并到同一商品（imtID {target}）", 36)
             except WBError as e:
-                _stage(pid, key, job, f"款式合并没成功（不影响上架，可在 WB 后台手动合并）：{e}", 36)
+                _stage(pid, key, shop_id, job, f"款式合并没成功（不影响上架，可在 WB 后台手动合并）：{e}", 36)
 
         nm = {vc: c["nmID"] for vc, c in existing.items()}
-        _update(pid, key, lambda L: L.update(nm=nm))
+        _update(pid, key, shop_id, lambda P: P.update(nm=nm))
 
         # 图片：不同款式最多 4 个同时传，同一款式内按序号 1、2、3… 串行；每成功一张记断点，失败后可续传
         from concurrent.futures import ThreadPoolExecutor
 
-        _stage(pid, key, job, "上传图片", 38)
-        done = dict(store.get_product(pid)["listings"][key].get("media_done") or {})
+        _stage(pid, key, shop_id, job, "上传图片", 38)
+        done = dict(LS.pub(store.get_product(pid)["listings"][key], shop_id).get("media_done") or {})
         total = sum(len(m) for m in media.values()) or 1
         lock = threading.Lock()
 
@@ -168,7 +227,7 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 with lock:
                     done[vc] = n
                     sent = sum(min(done.get(k, 0), len(media[k])) for k in media)
-                    _update(pid, key, lambda L, d=dict(done), pct=38 + int(47 * sent / total): L.update(
+                    _update(pid, key, shop_id, lambda P, d=dict(done), pct=38 + int(47 * sent / total): P.update(
                         media_done=d, progress={"stage": f"上传图片 {sent}/{total}", "pct": pct}))
                 if job:
                     job.note(f"上传图片 {codes[vc]['sku']} 第 {n}/{len(imgs)} 张")
@@ -176,14 +235,15 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
         with ThreadPoolExecutor(max_workers=min(4, len(media))) as ex:
             list(ex.map(push, list(media)))
 
-        _stage(pid, key, job, "提交价格和折扣", 92)
+        _stage(pid, key, shop_id, job, "提交价格和折扣", 92)
         disc = max(0, min(99, int(float(L["pricing"].get("discount") or 0))))
         rows = [{"nmID": nm[vc], "price": LS.variant_price(p, L, v), "discount": disc} for vc, v in codes.items()]
         _set_prices(cli, rows)
+        rows_price = rows
 
         stock = int(L.get("stock") or 0)
         if stock > 0:
-            _stage(pid, key, job, "写入店铺仓库库存", 96)
+            _stage(pid, key, shop_id, job, "写入店铺仓库库存", 96)
             wh = (shop or {}).get("warehouse_id")
             if not wh:
                 whs = cli.warehouses()
@@ -200,26 +260,28 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 if e.status != 409:
                     raise
                 # 新卡的尺码还没同步到库存服务：转后台按 20/40/80… 秒延迟重试，不误报完成
-                _update(pid, key, lambda L: L.update(status="pending_stock",
+                _update(pid, key, shop_id, lambda P: P.update(status="pending_stock",
                                                      pending_stock={"warehouse": int(wh), "rows": rows, "step": 0}))
-                _stage(pid, key, job, "上架完成，库存同步中（WB 库存服务尚未识别新尺码，后台会自动重试）", 100)
+                _stage(pid, key, shop_id, job, "上架完成，库存同步中（WB 库存服务尚未识别新尺码，后台会自动重试）", 100)
                 threading.Thread(target=_stock_later, args=(pid, key, shop_id, int(wh), rows), daemon=True).start()
                 if job:
                     job.finish("商品卡和图片、价格已完成，库存在后台同步")
                 return
-        _update(pid, key, lambda L: L.update(status="uploaded", uploaded_at=time.time()))
-        _stage(pid, key, job, "完成", 100)
+        _update(pid, key, shop_id, lambda P: P.update(status="uploaded", uploaded_at=time.time(), error="",
+                                                     price={vc: r["price"] for vc, r in zip(codes, rows_price)},
+                                                     discount=disc))
+        _stage(pid, key, shop_id, job, "完成", 100)
         if job:
             job.finish("上架完成")
     except RateLimited as e:
-        _update(pid, key, lambda L: L.update(status="failed", error=str(e), retry_at=time.time() + e.retry_after))
-        _stage(pid, key, job, f"✗ {e}", 0)
+        _update(pid, key, shop_id, lambda P: P.update(status="failed", error=str(e), retry_at=time.time() + e.retry_after))
+        _stage(pid, key, shop_id, job, f"✗ {e}", 0)
         if job:
             job.fail(str(e))
     except Exception as e:  # noqa: BLE001
         msg = str(e)
-        _update(pid, key, lambda L: L.update(status="failed", error=msg[:500]))
-        _stage(pid, key, job, f"✗ {msg[:300]}", 0)
+        _update(pid, key, shop_id, lambda P: P.update(status="failed", error=msg[:500]))
+        _stage(pid, key, shop_id, job, f"✗ {msg[:300]}", 0)
         if job:
             job.fail(msg[:300])
 
@@ -239,10 +301,31 @@ def _wait_cards(cli, codes: list[str], job, pid, key, limit: int | None = None, 
             bad = [e for e in cli.error_list() if e["vendorCode"] in codes and e["vendorCode"] not in found
                    and (e["vendorCode"], e["key"]) not in errors_before]
             if bad:
-                raise WBError(400, "WB 拒绝了商品卡：" + "；".join(
-                    f"{e['vendorCode']}：{'; '.join(e['errors']) or '未给出原因'}" for e in bad[:5]))
+                msgs = sorted({m for e in bad for m in e["errors"]}) or ["未给出原因"]
+                raise WBError(400, "WB 拒绝了商品卡：" + "；".join(f"{m}{explain(m)}" for m in msgs[:8]))
         time.sleep(POLL_EVERY)
     raise WBError(0, f"等待商品卡超时：{len(found)}/{len(codes)} 个款式已出现。请稍后点「上架」续传（不会重复建卡）")
+
+
+HINTS = [  # WB 常见拒绝原因 → 怎么改
+    (("бренд", "не найден"), "→ 品牌没在 WB 注册：在编辑里改成你在 WB 注册的品牌，或清空品牌按无品牌上架"),
+    (("недопустимое значение",), "→ 这个值不在 WB 官方列表：在编辑里重新选（程序会自动改大小写，改不了的需要手动选）"),
+    (("обязательн",), "→ 缺少必填属性：在编辑「商品属性」里补上"),
+    (("тнвэд",), "→ 海关编码不对：从下拉候选里选"),
+    (("цвет",), "→ 颜色不对：从下拉的 WB 官方颜色里选"),
+    (("наименовани", "символ"), "→ 标题太长或含不允许的字符"),
+    (("баркод",), "→ 条码问题：重新点上架会生成新条码"),
+    (("габарит",), "→ 包装尺寸/重量不合理：检查长宽高和重量"),
+    (("размер",), "→ 尺码问题：检查卖家尺码和俄码"),
+]
+
+
+def explain(msg: str) -> str:
+    low = msg.lower()
+    for keys, hint in HINTS:
+        if all(k in low for k in keys):
+            return f"（{hint}）"
+    return ""
 
 
 def _main_imt(existing: dict) -> int | None:
@@ -271,28 +354,29 @@ def _stock_later(pid: str, key: str, shop_id: str, wh: int, rows: list[dict], st
     cli = shops.client(shop_id)
     for i in range(start, len(STOCK_DELAYS)):
         time.sleep(STOCK_DELAYS[i])
-        _update(pid, key, lambda L, i=i: L.setdefault("pending_stock", {}).update(step=i + 1))
+        _update(pid, key, shop_id, lambda P, i=i: P.setdefault("pending_stock", {}).update(step=i + 1))
         try:
             cli.set_stocks(wh, rows)
-            _update(pid, key, lambda L: L.update(status="uploaded", uploaded_at=time.time(), pending_stock=None))
-            _stage(pid, key, None, "库存已写入，上架全部完成", 100)
+            _update(pid, key, shop_id, lambda P: P.update(status="uploaded", uploaded_at=time.time(), pending_stock=None))
+            _stage(pid, key, shop_id, None, "库存已写入，上架全部完成", 100)
             return
         except WBError as e:
             if e.status not in (409, 429) and e.status < 500:
                 break
-    _update(pid, key, lambda L: L.update(status="uploaded", pending_stock=None,
+    _update(pid, key, shop_id, lambda P: P.update(status="uploaded", pending_stock=None,
                                          error="库存多次写入失败，请在 WB 后台手动设置库存"))
-    _stage(pid, key, None, "✗ 库存多次写入失败，请在 WB 后台手动设置", 100)
+    _stage(pid, key, shop_id, None, "✗ 库存多次写入失败，请在 WB 后台手动设置", 100)
 
 
 def resume_pending() -> None:
     """程序启动时恢复：库存后台重试接着跑；上次异常中断的"上架中"标为失败，可以再点上架安全续传。"""
     for p in store.list_products():
         for key, L in (p.get("listings") or {}).items():
-            ps = L.get("pending_stock")
-            if L.get("status") == "pending_stock" and ps and L.get("shop_id"):
-                threading.Thread(target=_stock_later, args=(p["id"], key, L["shop_id"], ps["warehouse"], ps["rows"],
-                                                            int(ps.get("step") or 0)), daemon=True).start()
-            elif L.get("status") == "uploading":
-                _update(p["id"], key, lambda L: L.update(
-                    status="failed", error="程序上次在上架中途关闭。再点「上架」会按供应商编码回查并从断点续传，不会重复建卡"))
+            for sid, P in (L.get("pub") or {}).items():
+                ps = P.get("pending_stock")
+                if P.get("status") == "pending_stock" and ps:
+                    threading.Thread(target=_stock_later, args=(p["id"], key, sid, ps["warehouse"], ps["rows"],
+                                                                int(ps.get("step") or 0)), daemon=True).start()
+                elif P.get("status") == "uploading":
+                    _update(p["id"], key, sid, lambda P: P.update(
+                        status="failed", error="程序上次在上架中途关闭。再点「上架」会按供应商编码回查并从断点续传，不会重复建卡"))

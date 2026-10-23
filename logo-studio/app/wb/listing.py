@@ -118,12 +118,17 @@ def sync(p: dict) -> dict:
         L = listings.setdefault(key, {
             "key": key, "logo_id": sets[0].get("logo_id"), "logo_name": sets[0].get("logo_name", ""),
             "subject_id": None, "subject_name": "", "title": clean_title(info.get("title_ru", "")), "description": "",
-            "brand": sets[0].get("logo_name", ""), "country": "Китай", "tnved": "", "charcs": {},
+            "brand": _logo_brand(sets[0].get("logo_id")), "country": "Китай", "tnved": "", "charcs": {},
             "variants": [], "sizes": [],
             "pricing": {"mode": "formula", "add": 0, "mul": 1, "add2": 0, "fixed": 0, "discount": 0, "configured": False},
             "package": {"length": None, "width": None, "height": None, "weight": None},
-            "stock": 0, "status": "draft", "nm": {}, "log": [],
+            "stock": 0, "pub": {},
         })
+        _migrate(L)
+        if L.get("brand") and L["brand"] == L.get("logo_name") and re.search(r"[\u4e00-\u9fff]", L["brand"]):
+            L["brand"] = _logo_brand(L.get("logo_id"))  # 旧版本把 logo 名当品牌：改成 Logo 库里的 WB 品牌名
+        if not L.get("brand") and not L.get("brand_user"):
+            L["brand"] = _logo_brand(L.get("logo_id"))
         have = {v["sku"]: v for v in L["variants"]}
         latest: dict[str, dict] = {}
         for st in sets:
@@ -149,15 +154,58 @@ def sync(p: dict) -> dict:
                           for s in (p.get("sizes") or ["均码"])]
     for key in list(listings):
         L = listings[key]
-        if key not in groups and L.get("status") in ("draft", None) and not L.get("nm") and not L.get("card_submitted"):
+        _migrate(L)
+        if key not in groups and not any_on_wb(L) and not busy(L):
             del listings[key]  # 已经全部移出待上架、也没上架过的上架单删掉
     return p
 
 
-def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai") -> str:
+def _logo_brand(logo_id: str | None) -> str:
+    """logo 在 Logo 库里填的「WB 品牌名」；没填就空（按无品牌上架）。logo 的显示名不能直接当品牌。"""
+    lg = store.get_logo(logo_id) if logo_id else None
+    return ((lg or {}).get("wb_brand") or "").strip()
+
+
+# ---------------- 每个店铺的上架记录 ----------------
+# 上架资料（标题、属性、价格…）每张卡一份；上架状态、nmID、供应商编码、图片断点等按店铺分开存在 L["pub"][店铺ID]，
+# 同一张卡可以上到多个店铺，每个店铺各有一份记录。
+PUB_KEYS = ("status", "progress", "error", "log", "nm", "codes", "media_done", "card_submitted", "pending_stock",
+            "uploaded_at", "retry_at")
+
+
+def pub(L: dict, shop_id: str | None) -> dict:
+    if not shop_id:
+        return {"status": "draft"}
+    return L.setdefault("pub", {}).setdefault(shop_id, {"status": "draft"})
+
+
+def pub_status(L: dict, shop_id: str | None) -> str:
+    return ((L.get("pub") or {}).get(shop_id) or {}).get("status") or "draft"
+
+
+def any_on_wb(L: dict) -> bool:
+    return any(P.get("nm") or P.get("card_submitted") for P in (L.get("pub") or {}).values())
+
+
+def busy(L: dict) -> bool:
+    return any(P.get("status") in ("uploading", "pending_stock") for P in (L.get("pub") or {}).values())
+
+
+def _migrate(L: dict) -> None:
+    """旧版本把上架状态直接存在上架单上：搬进 pub[店铺]。"""
+    if not any(k in L for k in PUB_KEYS):
+        return
+    sid = L.get("shop_id") or store.get_settings().get("wb_shop_id")
+    old = {k: L.pop(k) for k in PUB_KEYS if k in L}
+    if sid and (old.get("status") not in (None, "draft") or old.get("nm") or old.get("codes")):
+        L.setdefault("pub", {}).setdefault(sid, {}).update(old)
+    L.pop("shop_id", None)
+
+
+def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai", shop_id: str | None = None) -> str:
     """确定性供应商编码：同一商品 + 同一 logo + 同一颜色永远是同一个编码，是防重复建卡和回查的依据。
     第一次上架时会把编码固定保存在上架单里（L["codes"]），以后改前缀、重新采集都不会变。"""
-    frozen = (L.get("codes") or {}).get(v["sku"])
+    frozen = (((L.get("pub") or {}).get(shop_id) or {}).get("codes") or {}).get(v["sku"])
     if frozen:
         return frozen
     src = re.sub(r"[^\w\-]", "", str(p.get("offer_id") or p["id"]))
@@ -189,7 +237,105 @@ def variant_price(p: dict, L: dict, v: dict) -> int:
 
 
 # ---------------- 预检 ----------------
-def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None = None) -> dict:
+# 有官方目录的属性：值必须和目录里一字不差（包括大小写），例如 Сезон 要写 «осень» 而不是 «Осень»
+DICT_CHARCS = {"сезон": "seasons", "пол": "kinds"}
+
+
+def dict_charc_ids(charc_meta: list[dict]) -> dict[str, str]:
+    """{charcID: 目录名}"""
+    return {str(c["charcID"]): DICT_CHARCS[c["name"].strip().lower()] for c in charc_meta
+            if c["name"].strip().lower() in DICT_CHARCS}
+
+
+def to_number(v) -> str | None:
+    """「70 см」「0,8」→ 「70」「0.8」；不是数字返回 None。"""
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(v))
+    return m.group(0).replace(",", ".") if m else None
+
+
+def normalize_all(L: dict, charc_meta: list[dict], dict_values: dict[str, list[str]], official: dict) -> bool:
+    """上架前把能自动修正的都改成 WB 要的写法：官方目录值的大小写、数字属性里的单位、超出 maxCount 的值、
+    WB 颜色/生产国的大小写。返回是否有改动。"""
+    changed = normalize_charcs(L, dict_values)
+    meta = {str(c["charcID"]): c for c in charc_meta}
+    for cid, vals in list((L.get("charcs") or {}).items()):
+        c = meta.get(str(cid))
+        if not c or not vals:
+            continue
+        vals = vals if isinstance(vals, list) else [vals]
+        new = vals
+        if c.get("charcType") == 4:
+            n = to_number(vals[0])
+            new = [n] if n is not None else vals
+        mx = int(c.get("maxCount") or 0)
+        if mx and len(new) > mx:
+            new = new[:mx]
+        if new != vals:
+            L["charcs"][cid] = new
+            changed = True
+    for field, key in (("colors", None), ("countries", "country")):
+        low = {o.strip().lower(): o for o in official.get(field) or []}
+        if not low:
+            continue
+        if key:
+            v = (L.get(key) or "").strip()
+            if v and v not in low.values() and v.lower() in low:
+                L[key], changed = low[v.lower()], True
+        else:
+            for var in L["variants"]:
+                v = (var.get("color") or "").strip()
+                if v and v not in low.values() and v.lower() in low:
+                    var["color"], changed = low[v.lower()], True
+    return changed
+
+
+def official_errors(L: dict, charc_meta: list[dict], official: dict) -> list[str]:
+    """不能自动修正的问题：颜色/生产国/ТН ВЭД 不在官方列表、数字属性不是数字。"""
+    errs = []
+    colors, countries, tnved = (set(official.get(k) or []) for k in ("colors", "countries", "tnved"))
+    for v in L["variants"]:
+        if v.get("enabled") and v.get("color") and colors and v["color"] not in colors:
+            errs.append(f"款式「{v['sku']}」的颜色「{v['color']}」不在 WB 官方颜色列表")
+    if L.get("country") and countries and L["country"] not in countries:
+        errs.append(f"生产国「{L['country']}」不在 WB 官方国家列表")
+    if L.get("tnved") and tnved and str(L["tnved"]) not in tnved:
+        errs.append(f"ТН ВЭД「{L['tnved']}」不是这个类目可用的编码，请从下拉候选里选")
+    for c in charc_meta:
+        vals = (L.get("charcs") or {}).get(str(c["charcID"])) or []
+        if c.get("charcType") == 4 and vals and to_number(vals[0]) is None:
+            errs.append(f"数字属性「{c['name']}」的值「{vals[0]}」不是数字")
+    return errs
+
+
+def normalize_charcs(L: dict, dict_values: dict[str, list[str]]) -> bool:
+    """把有官方目录的属性值改成官方写法（忽略大小写/空格匹配）。返回是否有改动。"""
+    changed = False
+    for cid, official in dict_values.items():
+        vals = (L.get("charcs") or {}).get(cid)
+        if not vals or not official:
+            continue
+        low = {o.strip().lower(): o for o in official}
+        fixed = [low.get(str(v).strip().lower(), v) for v in vals]
+        if fixed != vals:
+            L["charcs"][cid] = fixed
+            changed = True
+    return changed
+
+
+def dict_errors(L: dict, dict_values: dict[str, list[str]], charc_meta: list[dict]) -> list[tuple[str, str]]:
+    names = {str(c["charcID"]): c["name"] for c in charc_meta}
+    out = []
+    for cid, official in dict_values.items():
+        if not official:
+            continue
+        for v in (L.get("charcs") or {}).get(cid) or []:
+            if v not in official:
+                out.append((names.get(cid, cid), v))
+    return out
+
+
+def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None = None,
+              brand_found: bool | None = None, dict_values: dict | None = None, official: dict | None = None) -> dict:
     """只读本地预检：errors 会阻断上架，warnings 只提示。"""
     errors, warnings = [], []
     if not shop:
@@ -206,8 +352,18 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
         errors.append("缺少俄文标题")
     if L.get("title") and GENDER.search(L["title"]):
         warnings.append("标题里的性别词会在上架时自动去掉")
-    if not (L.get("brand") or "").strip():
-        errors.append("缺少品牌（需要是你在 WB 上已注册的品牌）")
+    brand = (L.get("brand") or "").strip()
+    if not brand:
+        warnings.append("没有填品牌：将以「无品牌」上架（以后可以在 WB 后台补品牌）")
+    elif re.search(r"[\u4e00-\u9fff]", brand):
+        errors.append(f"品牌「{brand}」含中文：WB 品牌必须是你在 WB 注册的品牌名（拉丁/俄文），不知道就留空按无品牌上架")
+    elif brand_found is False:
+        errors.append(f"品牌「{brand}」在 WB 品牌库里找不到，WB 会拒绝这张卡。请改成你在 WB 注册/获授权的品牌，或留空按无品牌上架")
+    elif brand_found is None and charc_meta:
+        warnings.append(f"暂时没能查询 WB 品牌库，品牌「{brand}」请确认已在 WB 注册")
+    for name, bad in dict_errors(L, dict_values or {}, charc_meta or []):
+        errors.append(f"属性「{name}」的值「{bad}」不在 WB 官方列表里")
+    errors += official_errors(L, charc_meta or [], official or {})
     if len(L.get("description") or "") < 100:
         warnings.append("商品说明太短（建议 800–1000 字符的完整俄文说明）")
     pr = L["pricing"]
@@ -269,14 +425,15 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
 
 
 # ---------------- 请求体 ----------------
-def build_payload(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: list[dict], prefix: str) -> list[dict]:
+def build_payload(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: list[dict], prefix: str,
+                  shop_id: str | None = None) -> list[dict]:
     """barcodes: {vendorCode: [每个尺码一个条码]}。返回 /cards/upload 的请求体（每组最多 30 个款式，同组自动合并）。"""
-    variants = build_variants(p, L, barcodes, charc_meta, prefix)
+    variants = build_variants(p, L, barcodes, charc_meta, prefix, shop_id=shop_id)
     return [{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]} for i in range(0, len(variants), 30)]
 
 
 def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: list[dict], prefix: str,
-                   only: set[str] | None = None) -> list[dict]:
+                   only: set[str] | None = None, shop_id: str | None = None) -> list[dict]:
     """only：只生成这些供应商编码的款式（给已有商品卡追加新颜色时用）。"""
     color_id = next((c["charcID"] for c in charc_meta if c["name"].strip().lower() == "цвет"), COLOR_ID)
     country_id = next((c["charcID"] for c in charc_meta if c["name"].lower().startswith("страна производства")), COUNTRY_ID)
@@ -288,10 +445,10 @@ def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta:
         if not vals or int(k) in DROP_IDS or int(k) in (color_id, country_id, tnved_id):
             continue
         if k in numeric:
-            try:
-                base.append({"id": int(k), "value": float(vals[0])})
-            except ValueError:
+            n = to_number(vals[0])
+            if n is None:
                 continue
+            base.append({"id": int(k), "value": float(n) if "." in n else int(n)})
         else:
             base.append({"id": int(k), "value": vals})
     if L.get("country"):
@@ -307,7 +464,7 @@ def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta:
     for v in L["variants"]:
         if not v.get("enabled"):
             continue
-        vc = vendor_code(p, L, v, prefix)
+        vc = vendor_code(p, L, v, prefix, shop_id)
         if only is not None and vc not in only:
             continue
         price = variant_price(p, L, v)
@@ -316,7 +473,7 @@ def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta:
             "vendorCode": vc,
             "title": clean_title(v.get("title") or L["title"]),
             "description": (L.get("description") or "")[:5000],
-            "brand": L["brand"].strip(),
+            **({"brand": L["brand"].strip()} if (L.get("brand") or "").strip() else {}),
             "dimensions": dims,
             "characteristics": base + ([{"id": color_id, "value": [v["color"]]}] if v.get("color") else []),
             "sizes": [{"price": price, "skus": bc[:1]}] if single else

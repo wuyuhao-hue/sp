@@ -378,3 +378,6 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; line-height
 pre.log-box { white-space: pre-wrap; max-height: 320px; }
 .sub-block { border-top: 1px dashed var(--line); padding-top: 14px; }
 .set-sub { font-weight: 600; font-size: 13px; margin-bottom: 10px; }
+.tag.live { background: #e0f2fe; color: #0369a1; border-color: #bae6fd; }
+.stage-seg { display: flex; }
+.stage-seg button { flex: 1; padding: 3px 2px; font-size: 11px; white-space: nowrap; }

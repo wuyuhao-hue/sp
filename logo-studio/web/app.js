@@ -26,12 +26,13 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', dir: { colors: [], countries: [] },
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
       const q = this.query.trim().toLowerCase();
-      return q ? this.products.filter(p => (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q)) : this.products;
+      return this.products.filter(p => (!q || (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q))
+        && (this.pStage === 'all' || p.stage === this.pStage) && this.logoMatch(p));
     },
     allSelected() { return this.filtered.length && this.filtered.every(p => this.selected.includes(p.id)); },
     skus() {
@@ -106,7 +107,7 @@ createApp({
     tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } if (t === 'settings') this.loadAiCalls(); },
   },
   async mounted() {
-    await Promise.all([this.loadProducts(), this.loadLogos(), this.poll()]);
+    await Promise.all([this.loadProducts(), this.loadLogos(), this.poll(), this.loadShops().catch(() => {})]);
     if (this.products.length) this.openProduct(this.products[0].id);
     setInterval(this.poll, 1500);
   },
@@ -187,6 +188,20 @@ createApp({
       return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock')) || st === f;
     },
     listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f) && (!this.qLogo || l.key === this.qLogo)).length; },
+    logoMatch(p) {
+      const f = this.pLogo, ids = p.logo_ids || [];
+      if (!f) return true;
+      return f.startsWith('!') ? !ids.includes(f.slice(1)) : ids.includes(f);
+    },
+    stageCount(k) { return this.products.filter(p => (k === 'all' || p.stage === k) && this.logoMatch(p)).length; },
+    setLive(st) {
+      // 这套图在哪些店铺已上架（按上架记录里这个款式的 nmID）
+      const L = ((this.current && this.current.listings) || {})[st.logo_id || 'none'];
+      const v = L && L.variants.find(x => x.sid === st.id);
+      if (!v) return [];
+      return Object.entries(L.pub || {}).filter(([, P]) => P.status && P.status !== 'draft' && P.codes && P.nm && P.nm[P.codes[v.sku]])
+        .map(([sid, P]) => (this.shopName(sid) || '已删除的店铺') + (P.status === 'uploaded' ? '' : '（' + this.statusName(P.status) + '）'));
+    },
     lkey(l) { return `${l.pid}:${l.key}`; },
     toggleQ(id) { const i = this.qSel.indexOf(id); i >= 0 ? this.qSel.splice(i, 1) : this.qSel.push(id); },
 
@@ -238,7 +253,8 @@ createApp({
       this.loadProducts();
     },
     async deleteSet(st) {
-      if (!confirm(`删除「${st.sku}${st.logo_name ? ' / ' + st.logo_name : ''}」这套图？`)) return;
+      const live = this.setLive(st);
+      if (!confirm(`删除「${st.sku}${st.logo_name ? ' / ' + st.logo_name : ''}」这套图？` + (live.length ? `\n\n这套图已经上架到：${live.join('、')}。删除只删本机图片，不影响 WB 上的商品，但以后就不能用它再上到其他店铺了。` : ''))) return;
       this.current = await api(`/api/products/${this.current.id}/sets/${st.id}`, { method: 'DELETE' });
       this.loadProducts();
     },
@@ -319,7 +335,11 @@ createApp({
       this.shopTest[s.id] = { '测试中': '…' };
       try { this.shopTest[s.id] = await api(`/api/shops/${s.id}/test`, { body: {} }); } catch (e) { this.shopTest[s.id] = { '错误': e.message }; }
     },
-    async setCurrentShop(id) { await api(`/api/shops/${id}/current`, { body: {} }); this.shopCurrent = id; this.dir = { colors: [], countries: [] }; this._dirsTried = false; this.loadDirs(); },
+    async setCurrentShop(id) {
+      await api(`/api/shops/${id}/current`, { body: {} });
+      this.shopCurrent = id; this.dir = { colors: [], countries: [] }; this._dirsTried = false; this.loadDirs();
+      this.qSel = []; this.loadQueue(); this.loadProducts();  // 上架状态按店铺显示：切换后重新加载
+    },
     async deleteShop(s) {
       if (!confirm(`删除店铺「${s.name}」？只删除本机保存的令牌，不影响 WB 上的商品。`)) return;
       await api(`/api/shops/${s.id}`, { method: 'DELETE' });

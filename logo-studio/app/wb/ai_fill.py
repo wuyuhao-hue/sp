@@ -152,11 +152,15 @@ def match_official(value: str, candidates: list[str]) -> str | None:
     return None
 
 
-def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[str], tnved: list[str]) -> dict:
-    """返回要写进上架单的字段和 notes / rejected，不直接保存。"""
+def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[str], tnved: list[str],
+         dict_values: dict[str, list[str]] | None = None) -> dict:
+    """返回要写进上架单的字段和 notes / rejected，不直接保存。
+    dict_values：有官方目录的属性（季节、性别…）的官方值，会作为 officialValues 交给 AI，只能从里面选。"""
+    dict_values = dict_values or {}
     fields = [{"id": c["charcID"], "name": c["name"], "required": bool(c.get("required")),
                "popular": bool(c.get("popular")), "maxCount": c.get("maxCount") or 1, "unit": c.get("unitName") or "",
-               "number": c.get("charcType") == 4}
+               "number": c.get("charcType") == 4,
+               **({"officialValues": dict_values[str(c["charcID"])]} if dict_values.get(str(c["charcID"])) else {})}
               for c in meta if c["name"].strip().lower() not in ("цвет", "бренд")
               and not c["name"].lower().startswith("страна производства") and "ТНВЭД" not in c["name"].upper()]
     from ..studio import sku_list
@@ -198,7 +202,24 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
         if not f:
             continue
         vals = [str(x).strip() for x in (vals if isinstance(vals, list) else [vals]) if str(x).strip()]
-        out["charcs"][str(k)] = vals[: int(f["maxCount"] or 1)]
+        if f.get("officialValues"):  # 有官方目录：必须匹配到官方写法，匹配不上的丢弃
+            ok = []
+            for v in vals:
+                m = match_official(v, f["officialValues"])
+                if m:
+                    ok.append(m)
+                else:
+                    rejected.append(f"属性「{f['name']}」的值「{v}」不在 WB 官方列表")
+            vals = ok
+        if f["number"]:
+            num = LS.to_number(vals[0]) if vals else None
+            if num is None:
+                if vals:
+                    rejected.append(f"数字属性「{f['name']}」的值「{vals[0]}」不是数字")
+                continue
+            vals = [num]
+        if vals:
+            out["charcs"][str(k)] = vals[: int(f["maxCount"] or 1)]
     pe = res.get("packageEstimate") or {}
     if any(pe.get(k) for k in ("lengthCm", "widthCm", "heightCm", "weightKg")):
         out["package_estimate"] = pe
@@ -261,7 +282,9 @@ def fill_listing(pid: str, key: str, cli, auto_subject: bool = True) -> dict:
         tn = [str(r.get("tnved")) for r in LS.cached(f"tnved-{sid}", lambda: cli.tnved(sid)) if r.get("tnved")]
     except Exception:  # noqa: BLE001
         tn = []
-    res = fill(p, L, meta, colors, countries, tn)
+    from .upload import dict_values
+
+    res = fill(p, L, meta, colors, countries, tn, dict_values(cli, meta))
 
     def apply(x):
         LL = x["listings"][key]
