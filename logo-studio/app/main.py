@@ -377,17 +377,17 @@ def set_mode(mode: str = Body(..., embed=True)):
 
 @app.post("/api/products/{pid}/to-queue")
 def direct_to_queue(pid: str, skus: list[str] = Body(default_factory=list), main: list[str] | None = Body(None),
-                    include_detail: bool = Body(False)):
-    """采集上架：把选中颜色的货源原图下载下来，直接加入待上架。"""
+                    include_detail: bool = Body(False), force: bool = Body(False)):
+    """采集上架：把选中颜色的货源原图直接加入待上架。force：用户确认后，没匹配到 1688 同款的规格也加入（进货价到上架资料里手填）。"""
     from . import direct
 
     p = _product_or_404(pid)
     if (p.get("mode") or "logo") != "direct":
-        raise HTTPException(400, "这个商品在「采集印标」模式里，请生成套图后移入待上架")
-    if p.get("source") in sources.MARKET and not any(u["status"] == "matched" for u in p.get("units") or []):
-        raise HTTPException(400, "还没有找到 1688 同款的规格：Ozon / WB 商品要先「找 1688 同款」，只有匹配成功的规格能加入待上架")
+        raise HTTPException(400, "这个商品在「生图上架」板块里，请生成套图后移入待上架")
+    if p.get("source") in sources.MARKET and not force and not any(u["status"] == "matched" for u in p.get("units") or []):
+        raise HTTPException(409, "还没有找到 1688 同款的规格")
     job = jobs.Job("direct", f"加入待上架：{(p.get('title') or '')[:20]}")
-    jobs.run_in_thread(job, direct.to_queue, pid, skus, main, include_detail)
+    jobs.run_in_thread(job, direct.to_queue, pid, skus, main, include_detail, force)
     return job.to_dict()
 
 
@@ -988,7 +988,8 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     max_pages = max(1, min(max_pages, 50))
     s = store.get_settings()
     # 拼多多 / Ozon / WB 链接只有采集助手能采
-    if s.get("scrape_mode") == "extension" or s.get("work_mode") == "direct" or sources.parse_links(links):
+    if s.get("scrape_mode") == "extension" or s.get("work_mode") == "direct" or sources.parse_links(links) \
+            or any("ozon." in x for x in shop_lines):
         return extbridge.start_job(link_lines, shop_lines, max_pages).to_dict()
     job = jobs.Job("scrape", f"采集 {len(link_lines)} 个链接 / {len(shop_lines)} 个店铺")
     browser.submit(run_scrape, link_lines, shop_lines, max_pages, job)

@@ -27,7 +27,8 @@ def _images_for(p: dict, sku: dict, main: list[str], include_detail: bool) -> li
     return out[:MAX_IMAGES]
 
 
-def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_detail: bool, job: jobs.Job) -> None:
+def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_detail: bool, force: bool = False,
+             job: jobs.Job | None = None) -> None:
     p = store.get_product(pid)
     referer = REFERER.get(p.get("source") or "1688", "")
     main = list(main if main is not None else (p.get("main_images") or []))
@@ -35,7 +36,7 @@ def to_queue(pid: str, sku_names: list[str], main: list[str] | None, include_det
     if p.get("source") in MARKET:
         # Ozon / WB：每个颜色只用它自己的图库（混入共享主图会串色）；只有找到 1688 同款的规格才能上架
         main = []
-        ok = {u["key"] for u in p.get("units") or [] if u["status"] == "matched"}
+        ok = {k["name"] for k in skus} if force else {u["key"] for u in p.get("units") or [] if u["status"] == "matched"}
         skipped = [k["name"] for k in skus if k["name"] not in ok and not (k["name"] == "默认" and "默认" in ok)]
         if skipped:
             job.note(f"跳过 {len(skipped)} 个还没找到 1688 同款的规格：{'、'.join(skipped[:6])}")

@@ -410,8 +410,13 @@ def normalize_wb(raw: dict, nm: str) -> dict:
     }
 
 
-def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
-    """保存一个采集上架商品。重新采集时更新信息，保留已加入待上架的图和上架记录。"""
+def pid_for(platform: str, item_id: str, mode: str = "direct") -> str:
+    """采集上架：ozon-…；生图上架：gozon-…（同一个商品两个板块各存一份，互不影响）。"""
+    return f"{platform}-{item_id}" if mode == "direct" else f"g{platform}-{item_id}"
+
+
+def save(platform: str, raw: dict, item_id: str, job=None, mode: str = "direct") -> dict | None:
+    """保存一个拼多多 / Ozon / WB 商品。重新采集时更新信息，保留已有的套图、匹配结果和上架记录。"""
     try:
         info = {"pdd": normalize_pdd, "ozon": normalize_ozon, "wb": normalize_wb}[platform](raw, item_id)
     except Exception as e:  # noqa: BLE001
@@ -419,7 +424,7 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
         if job:
             job.note(f"✗ {PLATFORM_NAME[platform]} {item_id} 解析失败：{e}。已保存调试文件 data/debug/{name}，请发给开发者")
         return None
-    pid = f"{platform}-{item_id}"
+    pid = pid_for(platform, item_id, mode)
     from . import runlog
     runlog.log("采集", f"{PLATFORM_NAME[platform]} {item_id} 解析完成", colors=[v["name"] for v in (info["sku_props"][:1] or [{"values": []}])[0]["values"]],
                skus=len(info.get("skus") or []), sizes=info.get("sizes"), capture=info.get("capture"),
@@ -427,7 +432,7 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
     old = store.get_product(pid)
     keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "units", "match_offers", "match_wait", "created")
             if old and k in old}
-    product = {"id": pid, "source": platform, "mode": "direct", "created": time.time(), "sets": [], "ai": {},
+    product = {"id": pid, "source": platform, "mode": mode, "created": time.time(), "sets": [], "ai": {},
                **info, **keep}
     if product.get("units"):  # 重新采集：按颜色沿用之前的匹配结果（1688 进货价、无同款删除），新出现的颜色标「未匹配」
         from . import skumatch

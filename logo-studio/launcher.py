@@ -128,7 +128,7 @@ def main() -> None:
         venv.create(VENV, with_pip=True)
     pip_install(py)
     print("=" * 52)
-    print(f"  印标工作台已启动： http://127.0.0.1:{PORT}")
+    print(f"  AI 套图工作台已启动： http://127.0.0.1:{PORT}")
     print("  使用期间请不要关闭这个黑色窗口，关闭即退出程序。")
     print("=" * 52)
     os.chdir(ROOT)

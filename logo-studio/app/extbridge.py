@@ -107,6 +107,7 @@ def queue_login(platform: str) -> jobs.Job:
 def start_tabs_job() -> jobs.Job:
     job = jobs.Job("scrape", "采集 Chrome 中已打开的商品页")
     job.status = "running"
+    job.mode = _mode()
     with _lock:
         _new_task(job, "tabs")
     return job
@@ -115,7 +116,7 @@ def start_tabs_job() -> jobs.Job:
 def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False) -> None:
     """skip_existing：整店采集时跳过已有商品；手动给的链接则重新采集（更新信息，保留套图）。"""
     for oid in ids:
-        if skip_existing and store.get_product(f"1688-{oid}"):
+        if skip_existing and store.get_product(f"d1688-{oid}" if getattr(job, "mode", "logo") == "direct" else f"1688-{oid}"):
             job.note(f"{oid} 已采集过，跳过")
             continue
         job.total += 1
@@ -247,7 +248,7 @@ def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "168
         if platform == "1688":
             p = save_offer(None, raw, offer_id, job, getattr(job, "mode", "logo"))
         else:
-            p = sources.save(platform, raw, offer_id, job)
+            p = sources.save(platform, raw, offer_id, job, getattr(job, "mode", "direct"))
         if p:
             job.results.append(p["id"])
     except Exception as e:  # noqa: BLE001
@@ -293,7 +294,7 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             ids = [i for i in data.get("ids", []) if isinstance(i, str)]
             job.note(f"店铺共发现 {len(ids)} 个商品")
             if t.get("platform") == "ozon":
-                new = [i for i in ids if not store.get_product(f"ozon-{i}")]
+                new = [i for i in ids if not store.get_product(sources.pid_for("ozon", i, getattr(job, "mode", "direct")))]
                 if len(new) < len(ids):
                     job.note(f"{len(ids) - len(new)} 个已采集过，跳过")
                 for i in new:
@@ -328,11 +329,11 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
 
 
 def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
-    """商品页上的「采集到工作台」按钮。1688 按工作台当前模式存；拼多多/Ozon/WB 进「采集上架」。"""
+    """商品页上的「采集到工作台」按钮：按工作台当前所在的板块存。"""
     global _manual_job
     state["last_seen"] = time.time()
-    mode = _mode() if platform == "1688" else "direct"
-    pid = (f"d1688-{offer_id}" if mode == "direct" else f"1688-{offer_id}") if platform == "1688" else f"{platform}-{offer_id}"
+    mode = _mode()
+    pid = (f"d1688-{offer_id}" if mode == "direct" else f"1688-{offer_id}") if platform == "1688" else sources.pid_for(platform, offer_id, mode)
     existed = store.get_product(pid) is not None
     with _lock:
         if _manual_job is None or _manual_job.status != "running" or jobs.get(_manual_job.id) is None:
@@ -344,7 +345,7 @@ def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
         job.total += 1
         job.inflight += 1
     _workers.submit(_process_offer, job, offer_id, raw, platform)
-    where = "采集上架" if mode == "direct" else "采集印标"
+    where = "采集上架" if mode == "direct" else "生图上架"
     return f"已更新到工作台（{where}）" if existed else f"已发送到工作台（{where}）"
 
 
