@@ -63,9 +63,31 @@ def cached(name: str, loader, days: float = 7):
     f = CACHE / f"{name}.json"
     if f.exists() and time.time() - f.stat().st_mtime < days * 86400:
         return json.loads(f.read_text("utf-8"))
-    data = loader()
+    try:
+        data = loader()
+    except Exception:
+        if f.exists():  # WB 暂时不可用（限流/网络）：先用过期的缓存
+            return json.loads(f.read_text("utf-8"))
+        if name in FALLBACK:
+            return FALLBACK[name]
+        raise
     f.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
     return data
+
+
+def is_cached(name: str) -> bool:
+    return (CACHE / f"{name}.json").exists()
+
+
+# 第一次使用时 WB 目录接口被限流的兜底：WB 最常用的官方颜色名 / 性别（只在没有缓存时用）
+FALLBACK = {
+    "colors": [{"name": n} for n in (
+        "черный", "белый", "серый", "светло-серый", "темно-серый", "синий", "темно-синий", "голубой", "зеленый",
+        "темно-зеленый", "хаки", "оливковый", "бежевый", "коричневый", "красный", "бордовый", "розовый",
+        "фиолетовый", "желтый", "оранжевый", "молочный")],
+    "kinds": ["Мужской", "Женский", "Детский", "Для мальчиков", "Для девочек", "Унисекс"],
+    "countries": [{"name": "Китай"}, {"name": "Россия"}],
+}
 
 
 # ---------------- 生成 / 同步上架单 ----------------
@@ -219,13 +241,17 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
     except (TypeError, ValueError):
         errors.append("包装重量格式不对")
     pdir = store.product_dir(p["id"])
+    color_required = any(c.get("required") and c["name"].strip().lower() == "цвет" for c in charc_meta or [])
     for v in variants:
         st = next((x for x in p.get("sets") or [] if x["id"] == v["sid"]), None)
         imgs = [i for i in (st or {}).get("images", []) if i.get("file") and (pdir / i["file"]).exists()]
         if not imgs:
             errors.append(f"款式「{v['sku']}」没有可用的图片")
         if not v.get("color"):
-            errors.append(f"款式「{v['sku']}」没有选择 WB 颜色")
+            if color_required:
+                errors.append(f"款式「{v['sku']}」没有选择 WB 颜色（这个类目颜色是必填）")
+            else:
+                warnings.append(f"款式「{v['sku']}」没填颜色（这个类目不是必填，可以不填）")
         if not clean_title(v.get("title") or title):
             errors.append(f"款式「{v['sku']}」没有俄文标题")
     if charc_meta:
@@ -292,7 +318,7 @@ def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta:
             "description": (L.get("description") or "")[:5000],
             "brand": L["brand"].strip(),
             "dimensions": dims,
-            "characteristics": base + [{"id": color_id, "value": [v["color"]]}],
+            "characteristics": base + ([{"id": color_id, "value": [v["color"]]}] if v.get("color") else []),
             "sizes": [{"price": price, "skus": bc[:1]}] if single else
                      [{"techSize": s["tech"], "wbSize": s["wb"], "price": price, "skus": [bc[i]] if i < len(bc) else []}
                       for i, s in enumerate(sizes)],

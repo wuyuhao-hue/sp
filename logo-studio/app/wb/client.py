@@ -28,6 +28,18 @@ INTERVAL = {k: v * _SCALE for k, v in
 _locks: dict[str, threading.Lock] = {}
 _last: dict[str, float] = {}
 _glock = threading.Lock()
+_cooldown: dict[str, float] = {}  # 被 WB 长时间限流的接口：冷却结束前本地直接拒绝，不再去撞 WB（撞多了限流会越来越长）
+_http: httpx.Client | None = None
+
+
+def _client() -> httpx.Client:
+    """全程复用同一个连接池（keep-alive）：不用每个请求都重新握手，到 WB 的线路慢时差别很大。"""
+    global _http
+    with _glock:
+        if _http is None:
+            _http = httpx.Client(timeout=30, limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+                                 http2=False)
+        return _http
 
 
 def fingerprint(token: str) -> str:
@@ -42,8 +54,9 @@ class WBError(RuntimeError):
 
 
 class RateLimited(WBError):
-    def __init__(self, retry_after: float):
-        super().__init__(429, f"请求过于频繁，约 {int(retry_after)} 秒后可继续")
+    def __init__(self, retry_after: float, info: str = ""):
+        mins = f"{int(retry_after // 60)} 分钟" if retry_after >= 120 else f"{int(retry_after)} 秒"
+        super().__init__(429, f"WB 限流，约 {mins}后可继续" + (f"（{info}）" if info else ""))
         self.retry_after = retry_after
 
 
@@ -68,10 +81,14 @@ class WBClient:
     def _req(self, method: str, url: str, bucket: str, *, json=None, params=None, files=None, headers=None,
              timeout: float = 30, retries: int = 3, idempotent: bool = True):
         h = {"Authorization": self.token, **(headers or {})}
+        ck = f"{self.fp}:{method}:{url.split('?')[0]}"
+        left = _cooldown.get(ck, 0) - time.time()
+        if left > 0:
+            raise RateLimited(left, "本地冷却中，没有发请求")
         for attempt in range(1, retries + 1):
             self._pace(bucket)
             try:
-                r = httpx.request(method, url, json=json, params=params, files=files, headers=h, timeout=timeout)
+                r = _client().request(method, url, json=json, params=params, files=files, headers=h, timeout=timeout)
             except httpx.TransportError as e:
                 if not idempotent:
                     raise WBError(0, f"网络中断，结果不确定：{type(e).__name__}", ambiguous=True) from e
@@ -84,7 +101,11 @@ class WBClient:
                 wait = float(ra) if ra and ra.replace(".", "", 1).isdigit() else min(30 * 2 ** (attempt - 1), 300)
                 wait += 1 + random.random()
                 if wait > 60 or attempt == retries or not idempotent:
-                    raise RateLimited(wait)
+                    if wait > 60:
+                        _cooldown[ck] = time.time() + wait
+                    info = " ".join(f"{k[12:]}={r.headers[k]}" for k in ("X-Ratelimit-Limit", "X-Ratelimit-Remaining",
+                                                                        "X-Ratelimit-Reset") if r.headers.get(k))
+                    raise RateLimited(wait, info)
                 time.sleep(wait)
                 continue
             if r.status_code >= 500 or r.status_code == 409:

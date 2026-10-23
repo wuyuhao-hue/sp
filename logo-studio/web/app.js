@@ -275,9 +275,10 @@ createApp({
     async loadShops() {
       const r = await api('/api/shops');
       this.shops = r.shops; this.shopCurrent = r.current || (r.shops[0] || {}).id || '';
-      if (this.shops.length && !this.dir.colors.length) this.loadDirs();
+      if (this.shops.length && !this._dirsTried) this.loadDirs();  // 每个店铺只取一次，失败也不反复请求
     },
     async loadDirs() {
+      this._dirsTried = true;
       try {
         const [colors, countries] = await Promise.all([api('/api/wb/directory/colors'), api('/api/wb/directory/countries')]);
         this.dir = { colors, countries };
@@ -318,7 +319,7 @@ createApp({
       this.shopTest[s.id] = { '测试中': '…' };
       try { this.shopTest[s.id] = await api(`/api/shops/${s.id}/test`, { body: {} }); } catch (e) { this.shopTest[s.id] = { '错误': e.message }; }
     },
-    async setCurrentShop(id) { await api(`/api/shops/${id}/current`, { body: {} }); this.shopCurrent = id; this.dir = { colors: [], countries: [] }; this.loadDirs(); },
+    async setCurrentShop(id) { await api(`/api/shops/${id}/current`, { body: {} }); this.shopCurrent = id; this.dir = { colors: [], countries: [] }; this._dirsTried = false; this.loadDirs(); },
     async deleteShop(s) {
       if (!confirm(`删除店铺「${s.name}」？只删除本机保存的令牌，不影响 WB 上的商品。`)) return;
       await api(`/api/shops/${s.id}`, { method: 'DELETE' });
@@ -454,7 +455,7 @@ createApp({
       try { this.jobs.unshift(await api('/api/listings/batch-ai', { body: { items: this.selectedListings() } })); this.toast('已开始，进度在右下角'); }
       catch (e) { this.toast(e.message, true); }
     },
-    openBatchEdit() { this.bulk = { mode: '', add: 0, mul: 12, add2: 0, fixed: '', discount: '', length: '', width: '', height: '', weight: '', stock: '' }; },
+    openBatchEdit() { this.bulk = { mode: '', add: 0, mul: 12, add2: 0, fixed: '', discount: '', length: '', width: '', height: '', weight: '', stock: '', push: true }; },
     async applyBulk() {
       const b = this.bulk, patch = { pricing: {}, package: {} };
       if (b.mode === 'formula') Object.assign(patch.pricing, { mode: 'formula', add: b.add || 0, mul: b.mul || 1, add2: b.add2 || 0 });
@@ -463,8 +464,10 @@ createApp({
       for (const k of ['length', 'width', 'height', 'weight']) if (b[k] !== '') patch.package[k] = Number(b[k]);
       if (b.stock !== '') patch.stock = Number(b.stock);
       try {
-        const r = await api('/api/listings/batch-edit', { body: { items: this.selectedListings(), patch } });
-        this.toast(`已修改 ${r.count} 张`); this.bulk = null; this.loadQueue();
+        if (b.discount !== '' && (Number(b.discount) < 0 || Number(b.discount) > 99)) { this.toast('折扣率要在 0–99 之间', true); return; }
+        const r = await api('/api/listings/batch-edit', { body: { items: this.selectedListings(), patch, push_prices: b.push } });
+        if (r.job) this.jobs.unshift(r.job);
+        this.toast(`已修改 ${r.count} 张` + (r.job ? '，正在把价格和折扣同步到 WB' : '')); this.bulk = null; this.loadQueue();
       } catch (e) { this.toast(e.message, true); }
     },
     diagText(d) {
@@ -492,6 +495,11 @@ createApp({
         } else this.ed.sugReason = '没能自动匹配，请从候选里选或搜索。';
       } catch (e) { this.toast(e.message, true); }
       if (this.ed) this.ed.busy = '';
+    },
+    async pushPrices() {
+      if (!(await this.saveListing(true))) return;
+      try { this.jobs.unshift(await api(`/api/listings/${this.ed.summary.pid}/${this.ed.summary.key}/push-prices`, { body: {} })); this.toast('正在同步价格和折扣到 WB'); }
+      catch (e) { this.toast(e.message, true); }
     },
     async removeListing(l) {
       if (!confirm('把这张卡移出待上架？套图会保留在商品页，可以再移回来。')) return;

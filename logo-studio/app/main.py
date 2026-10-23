@@ -433,12 +433,28 @@ def shop_diagnose(sid: str, pid: str | None = Body(None), key: str | None = Body
             steps.append({"name": name, "ok": False, "detail": str(e)[:400], "ms": int((time.time() - t) * 1000)})
             return False
 
-    step("Content 连通", lambda: cli.ping())
+    def dirs(name, loader, fmt):
+        had = wb_listing.is_cached(name)
+        err = []
+
+        def load():
+            try:
+                return loader()
+            except WBError as e:
+                err.append(str(e))
+                raise
+        rows = wb_listing.cached(name, load)
+        if err:
+            return f"{fmt(rows)}（WB 暂时取不到：{err[0]}；先用{'旧缓存' if had else '内置常用列表'}）"
+        return f"{fmt(rows)}（来自{'缓存' if had else 'WB'}）"
+
+    step("Content 连通（首次，含建立连接）", lambda: cli.ping())
+    step("Content 连通（复用连接）", lambda: cli.ping())
     step("类目搜索 Куртки", lambda: [f"{r.get('subjectID')} {r.get('subjectName')}" for r in cli.subjects("Куртки", limit=5)])
-    step("全部类目", lambda: f"{len(category.all_subjects(cli))} 个")
-    step("颜色目录", lambda: f"{len(cli.colors())} 个")
-    step("国家目录", lambda: f"{len(cli.countries())} 个")
-    step("性别目录", lambda: cli.directory("kinds")[:6])
+    step("全部类目", lambda: dirs("subjects-all", cli.subjects_all, lambda x: f"{len(x)} 个"))
+    step("颜色目录", lambda: dirs("colors", cli.colors, lambda x: f"{len(x)} 个"))
+    step("国家目录", lambda: dirs("countries", cli.countries, lambda x: f"{len(x)} 个"))
+    step("性别目录", lambda: dirs("kinds", lambda: cli.directory("kinds"), lambda x: "、".join(x[:6])))
     step("商品卡数量", lambda: f"{cli.cards_total()} 张")
     step("错误草稿列表", lambda: [f"{e['vendorCode']}: {'; '.join(e['errors'])[:120]}" for e in cli.error_list(strict=True)[:10]])
     step("价格接口", lambda: cli.prices_ping() and "正常")
@@ -473,7 +489,14 @@ def shop_diagnose(sid: str, pid: str | None = Body(None), key: str | None = Body
             fake = {wb_listing.vendor_code(p, L, v, prefix): [f"<条码{i + 1}>" for i in range(n)]
                     for v in L["variants"] if v.get("enabled")}
             preview = wb_listing.build_payload(p, L, fake, meta, prefix)
-    report = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "version": VERSION, "shop": wb_shops.get(sid)["name"],
+    hints = []
+    if any(x["detail"] and "429" in str(x["detail"]) for x in steps if not x["ok"]):
+        hints.append("有接口被 WB 限流：程序会在冷却时间内不再请求这个接口（避免越撞越久），已缓存的目录照常可用。等提示的时间过后再诊断一次即可，不影响其他接口。")
+    first = next((x for x in steps if x["name"].startswith("Content 连通（首次")), None)
+    second = next((x for x in steps if x["name"].startswith("Content 连通（复用")), None)
+    if first and second and second.get("ms", 0) > 3000:
+        hints.append(f"到 WB 的单次请求很慢（复用连接后仍要 {second['ms']} ms）：多半是网络线路/代理慢。上架能用，只是会慢一些；如果开着加速器/代理，可以试试关掉或换线路。")
+    report = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "version": VERSION, "hints": hints, "shop": wb_shops.get(sid)["name"],
               "token_fingerprint": wb_shops.get(sid)["fingerprint"], "steps": steps, "payload_preview": preview}
     d = store.DATA / "wb_diag"
     d.mkdir(exist_ok=True)
@@ -536,6 +559,7 @@ def _listing_summary(p: dict, L: dict) -> dict:
             "status": L.get("status", "draft"), "progress": L.get("progress"), "error": L.get("error", ""),
             "nm": L.get("nm") or {}, "variants": vs, "shop_id": L.get("shop_id"), "logo_id": L.get("logo_id"),
             "ai_filled": bool(L.get("ai_filled")), "stock": L.get("stock") or 0,
+            "discount": int(float((L.get("pricing") or {}).get("discount") or 0)),
             "price": max([wb_listing.variant_price(p, L, v) for v in L["variants"] if v.get("enabled")] or [0])
             if (L.get("pricing") or {}).get("configured") else 0}
 
@@ -684,8 +708,10 @@ def listings_batch_ai(items: list[dict] = Body(..., embed=True), shop: str | Non
 
 
 @app.post("/api/listings/batch-edit")
-def listings_batch_edit(items: list[dict] = Body(..., embed=True), patch: dict = Body(...)):
-    """批量修改价格公式/固定价/折扣、包装尺寸重量、库存。patch 里没填的项不改。"""
+def listings_batch_edit(items: list[dict] = Body(..., embed=True), patch: dict = Body(...),
+                        push_prices: bool = Body(False), shop: str | None = Body(None)):
+    """批量修改价格公式/固定价/折扣、包装尺寸重量、库存。patch 里没填的项不改。
+    push_prices：已上架的卡，把新的价格和折扣同步到 WB。"""
     n = 0
     for it in items:
         def fn(p):
@@ -705,7 +731,50 @@ def listings_batch_edit(items: list[dict] = Body(..., embed=True), patch: dict =
                 L["status"] = "draft"
             n += 1
         store.update_product(it["pid"], fn)
-    return {"count": n}
+    out = {"count": n}
+    if push_prices and patch.get("pricing"):
+        out["job"] = _push_prices_job(items, shop)
+    return out
+
+
+def _push_prices_job(items: list[dict], shop: str | None) -> dict | None:
+    """把已上架商品卡的价格和折扣同步到 WB（后台任务）。"""
+    todo = []
+    for it in items:
+        p = store.get_product(it["pid"]) or {}
+        L = (p.get("listings") or {}).get(it["key"])
+        if L and L.get("nm"):
+            todo.append((p, L))
+    if not todo:
+        return None
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    job = jobs.Job("wb", f"同步价格和折扣到 WB（{len(todo)} 张卡）")
+    job.total = len(todo)
+
+    def run(j):
+        for p, L in todo:
+            disc = max(0, min(99, int(float(L["pricing"].get("discount") or 0))))
+            by_sku = {v["sku"]: v for v in L["variants"]}
+            rows = [{"nmID": nm, "price": wb_listing.variant_price(p, L, by_sku[sku]), "discount": disc}
+                    for sku, vc in (L.get("codes") or {}).items() if sku in by_sku and (nm := L["nm"].get(vc))]
+            try:
+                wb_upload._set_prices(cli, rows)
+                j.note(f"✓ {(L.get('title') or p.get('title') or '')[:20]}：{len(rows)} 个款式")
+            except WBError as e:
+                j.note(f"✗ {(L.get('title') or '')[:20]}：{str(e)[:100]}")
+            j.done += 1
+        j.finish("价格和折扣同步完成")
+    jobs.run_in_thread(job, run)
+    return job.to_dict()
+
+
+@app.post("/api/listings/{pid}/{key}/push-prices")
+def listing_push_prices(pid: str, key: str, shop: str | None = Body(None, embed=True)):
+    _listing(pid, key)
+    job = _push_prices_job([{"pid": pid, "key": key}], shop)
+    if not job:
+        raise HTTPException(400, "这张卡还没上架到 WB")
+    return job
 
 
 @app.post("/api/listings/{pid}/{key}/upload")
