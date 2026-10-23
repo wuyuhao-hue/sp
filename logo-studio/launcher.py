@@ -1,9 +1,13 @@
 """一键启动：创建独立虚拟环境 → 安装依赖（失败自动换国内镜像）→ 启动服务并打开浏览器。"""
 import hashlib
+import json
 import os
+import re
 import socket
 import subprocess
 import sys
+import time
+import urllib.request
 import venv
 import webbrowser
 from pathlib import Path
@@ -63,14 +67,56 @@ def disable_quick_edit() -> None:
         pass
 
 
+_direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # 访问本机不走系统代理
+
+
+def local_version() -> str:
+    m = re.search(r'VERSION\s*=\s*"([^"]+)"', (ROOT / "app" / "__init__.py").read_text("utf-8"))
+    return m.group(1) if m else ""
+
+
+def running_version() -> str:
+    try:
+        with _direct.open(f"http://127.0.0.1:{PORT}/api/version", timeout=3) as r:
+            return json.loads(r.read()).get("version", "")
+    except Exception:  # noqa: BLE001
+        return ""  # 旧版本没有这个接口
+
+
+def stop_old() -> None:
+    """关掉占用端口的旧版本：新版本有关闭接口；更早的版本没有，就按端口找到进程结束它。"""
+    try:
+        _direct.open(urllib.request.Request(f"http://127.0.0.1:{PORT}/api/shutdown", method="POST"), timeout=3)
+    except Exception:  # noqa: BLE001
+        pass
+    for _ in range(10):
+        if not port_in_use():
+            return
+        time.sleep(0.5)
+    if os.name == "nt":
+        out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True, errors="ignore").stdout
+        pids = {line.split()[-1] for line in out.splitlines()
+                if f":{PORT} " in line and "LISTENING" in line.upper()}
+        for pid in pids:
+            subprocess.run(["taskkill", "/PID", pid, "/T", "/F"], capture_output=True)
+    for _ in range(20):
+        if not port_in_use():
+            return
+        time.sleep(0.5)
+    raise SystemExit(f"端口 {PORT} 被占用，请关闭之前打开的黑色窗口后重新双击启动。")
+
+
 def main() -> None:
     disable_quick_edit()
     if sys.version_info < (3, 9):
         raise SystemExit(f"需要 Python 3.9 或更高版本，当前是 {sys.version.split()[0]}")
     if port_in_use():
-        print("工具已经在运行，直接打开页面。")
-        webbrowser.open(f"http://127.0.0.1:{PORT}")
-        return
+        if running_version() == local_version():
+            print("工具已经在运行，直接打开页面。")
+            webbrowser.open(f"http://127.0.0.1:{PORT}")
+            return
+        print("检测到旧版本还在运行，正在关闭它并启动新版本…")
+        stop_old()
     py = venv_python()
     if not py.exists():
         print("正在创建运行环境…")

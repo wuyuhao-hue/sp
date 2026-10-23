@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 
-from . import ai, extbridge, jobs, store, studio
+from . import VERSION, ai, extbridge, jobs, store, studio
 from .export import export_sets
 from .scraper import browser, run_scrape, run_scrape_tabs
 
@@ -77,7 +77,22 @@ def state():
            "status": extbridge.state["status"], "message": extbridge.state["message"]}
     return {"browser": {"state": browser.state, "message": browser.message}, "ext": ext,
             "jobs": jobs.list_jobs(), "settings": s,
-            "shot_types": store.SHOT_TYPES, "can_logo": sorted(studio.CAN_LOGO)}
+            "shot_types": {**store.SHOT_TYPES, "size_chart": "尺码表（本地生成）"},
+            "can_logo": sorted(studio.CAN_LOGO), "default_shots": store.DEFAULT_SHOTS, "version": VERSION}
+
+
+@app.get("/api/version")
+def version():
+    return {"version": VERSION}
+
+
+@app.post("/api/shutdown")
+def shutdown():
+    """启动新版本时用来关掉还在运行的旧版本。"""
+    import threading
+
+    threading.Timer(0.5, lambda: os._exit(0)).start()
+    return {"ok": True}
 
 
 # ---------------- 商品 ----------------
@@ -203,6 +218,17 @@ def regen(pid: str, sid: str, idx: int, extra: str | None = Body(None, embed=Tru
         raise HTTPException(404)
     job = jobs.Job("generate", f"重新生成：{st['sku']} 第 {idx + 1} 张")
     jobs.run_in_thread(job, studio.regen_image, pid, sid, idx, extra)
+    return job.to_dict()
+
+
+@app.post("/api/products/{pid}/sets/{sid}/size-chart")
+def add_size_chart(pid: str, sid: str):
+    p = _product_or_404(pid)
+    st = _set(p, sid)
+    if not ((p.get("ai") or {}).get("size_table") or {}).get("rows"):
+        raise HTTPException(400, "还没有尺码数据：请先在右侧「尺码表」里填写")
+    job = jobs.Job("generate", f"尺码表：{st['sku']}")
+    jobs.run_in_thread(job, studio.size_chart, pid, sid)
     return job.to_dict()
 
 

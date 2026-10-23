@@ -17,7 +17,7 @@ createApp({
     tab: 'products',
     products: [], logos: [], current: null, queue: [],
     query: '', selected: [], skuSel: [], genLogo: null, showRefs: false,
-    settings: {}, shotTypes: {}, canLogoTypes: [], models: [],
+    settings: {}, shotTypes: {}, canLogoTypes: [], defaultShots: [], models: [],
     browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
     extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'),
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
@@ -46,6 +46,7 @@ createApp({
       const t = this.aiInfo.size_table;
       return t && t.header ? [t.header, ...t.rows].map(r => r.join(' | ')).join('\n') : '';
     },
+    shotTypeOptions() { const o = { ...this.shotTypes }; delete o.size_chart; return o; },
     lang() { return this.settings.copy_lang || 'ru'; },
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },
@@ -106,7 +107,7 @@ createApp({
         this.browserState = s.browser;
         this.ext = s.ext || {};
         this.extInstalled = this.extInstalled || !!document.documentElement.getAttribute('data-logo-studio-ext');
-        this.shotTypes = s.shot_types; this.canLogoTypes = s.can_logo;
+        this.shotTypes = s.shot_types; this.canLogoTypes = s.can_logo; this.defaultShots = s.default_shots;
         if (!this.settingsLoaded) { this.settings = s.settings; this.settingsLoaded = true; }
         const sig = s.jobs.map(j => `${j.id}:${j.done}:${j.status}`).join('|');
         const running = s.jobs.some(j => j.status === 'running');
@@ -170,6 +171,18 @@ createApp({
         this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/images/${i}/regen`, { body: { extra: extra || null } }));
         setTimeout(this.refreshCurrent, 400);
       } catch (e) { this.toast(e.message, true); }
+    },
+    async sizeChart(st) {
+      try {
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/size-chart`, { body: {} }));
+        setTimeout(this.refreshCurrent, 600);
+      } catch (e) { this.toast(e.message, true); }
+    },
+    resetShots() {
+      this.settings.shots = this.defaultShots.map(x => ({ ...x }));
+      this.settings.shot_count = 6;
+      this.settings.size_chart_auto = true;
+      this.toast('已恢复推荐模板，记得点「保存设置」');
     },
     async setQueued(st, queued) {
       this.current = await api(`/api/products/${this.current.id}/sets/${st.id}/queue`, { body: { queued } });

@@ -33,19 +33,20 @@ SHOT_TYPES = {
     "detail_collage": "细节拼图（大图+3个局部+说明）",
     "detail_fabric": "面料特写（无文字）",
     "lifestyle": "街拍场景",
-    "size_chart": "尺码表（本地生成，数字准确，不耗费用）",
 }
 
+# 推荐模板（参照 WB 头部商品）。张数选 6 时用前 6 个；尺码表另外固定加在每套最后，不占张数
 DEFAULT_SHOTS = [
-    {"type": "hero", "logo": True},
-    {"type": "model_front", "logo": True},
-    {"type": "back_info", "logo": False},
-    {"type": "material_info", "logo": False},
-    {"type": "detail_collage", "logo": False},
-    {"type": "size_chart", "logo": False},
-    {"type": "model_side", "logo": False},
-    {"type": "lifestyle", "logo": False},
+    {"type": "hero", "logo": True, "extra": ""},
+    {"type": "model_front", "logo": True, "extra": ""},
+    {"type": "back_info", "logo": False, "extra": ""},
+    {"type": "material_info", "logo": False, "extra": ""},
+    {"type": "detail_collage", "logo": False, "extra": ""},
+    {"type": "model_side", "logo": False, "extra": ""},
+    {"type": "flat_front", "logo": True, "extra": ""},
+    {"type": "lifestyle", "logo": False, "extra": ""},
 ]
+SHOTS_VERSION = 3
 
 DEFAULT_SETTINGS = {
     "api_base": "",
@@ -59,6 +60,8 @@ DEFAULT_SETTINGS = {
     "concurrency": 3,
     "shot_count": 6,
     "shots": DEFAULT_SHOTS,
+    "shots_version": SHOTS_VERSION,
+    "size_chart_auto": True,   # 每套最后自动加一张本地生成的尺码表
     "copy_lang": "ru",         # 首图卖点文字语言
     "style_refs": [],          # 风格参考图文件名（data/style_refs/ 下）
     "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）
@@ -99,9 +102,12 @@ def new_id() -> str:
 
 # ---------- 设置 ----------
 def get_settings() -> dict:
-    s = {**DEFAULT_SETTINGS, **_read(SETTINGS_FILE, {})}
+    saved = _read(SETTINGS_FILE, {})
+    s = {**DEFAULT_SETTINGS, **saved}
+    if saved.get("shots_version") != SHOTS_VERSION:  # 旧版本保存的模板：换成新的推荐模板
+        s["shots"], s["shots_version"] = [dict(x) for x in DEFAULT_SHOTS], SHOTS_VERSION
     shots = [sh for sh in s.get("shots") or [] if sh.get("type") in SHOT_TYPES]
-    s["shots"] = (shots + DEFAULT_SHOTS[len(shots):])[:8] if shots else DEFAULT_SHOTS
+    s["shots"] = (shots + [dict(x) for x in DEFAULT_SHOTS[len(shots):]])[:8]
     return s
 
 

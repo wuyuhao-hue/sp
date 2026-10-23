@@ -311,6 +311,11 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
             store.update_product(pid, lambda x: x.__setitem__("ai", info))
         except Exception as e:  # noqa: BLE001
             job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
+    p = store.get_product(pid)
+    has_size = bool(((p.get("ai") or {}).get("size_table") or {}).get("rows"))
+    add_size = s.get("size_chart_auto", True) and has_size
+    if s.get("size_chart_auto", True) and not has_size:
+        job.note("没有尺码数据，这次不加尺码表；填好右侧尺码表后可在套图上点「生成尺码表」补上")
     skus = {k["name"]: k for k in sku_list(p)}
     tasks = []
     for name in sku_names:
@@ -324,9 +329,11 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
               "queued": False, "parent": None,
               "images": [{"type": sh["type"], "logo": bool(sh.get("logo") and logo and sh["type"] in CAN_LOGO),
                           "extra": sh.get("extra", ""), "status": "pending", "file": None, "error": ""}
-                         for sh in shots]}
+                         for sh in shots]
+                        + ([{"type": "size_chart", "logo": False, "extra": "", "status": "pending", "file": None,
+                             "error": ""}] if add_size else [])}
         store.update_product(pid, lambda x, st=st: x.setdefault("sets", []).append(st))
-        tasks += [(pid, sid, i) for i in range(len(shots))]
+        tasks += [(pid, sid, i) for i in range(len(st["images"]))]
     job.note(f"开始生成 {len(tasks)} 张图…")
     _run(tasks, job)
 
@@ -355,6 +362,19 @@ def swap_logo(pid: str, src_sid: str, logo_id: str, job) -> None:
     store.update_product(pid, lambda x: x.setdefault("sets", []).append(st))
     job.note(f"换标：重做 {len(tasks)} 张印标图，复用 {len(images) - len(tasks)} 张")
     _run(tasks, job)
+
+
+def size_chart(pid: str, sid: str, job) -> None:
+    """给套图补上 / 更新尺码表（固定在最后一张）。"""
+    def fn(p):
+        st = next(x for x in p["sets"] if x["id"] == sid)
+        if not any(i["type"] == "size_chart" for i in st["images"]):
+            st["images"].append({"type": "size_chart", "logo": False, "extra": "", "status": "pending", "file": None,
+                                 "error": ""})
+    p = store.update_product(pid, fn)
+    st = next(x for x in p["sets"] if x["id"] == sid)
+    idx = next(i for i, im in enumerate(st["images"]) if im["type"] == "size_chart")
+    _run([(pid, sid, idx)], job)
 
 
 def regen_image(pid: str, sid: str, idx: int, extra: str | None, job) -> None:
