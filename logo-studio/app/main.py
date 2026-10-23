@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import json
+import re
 import os
 import subprocess
 import sys
@@ -329,6 +331,314 @@ def batch_queue(ids: list[str] = Body(..., embed=True)):
     return {"count": n}
 
 
+# ---------------- WB 店铺与上架 ----------------
+from .wb import listing as wb_listing  # noqa: E402
+from .wb import shops as wb_shops  # noqa: E402
+from .wb import upload as wb_upload  # noqa: E402
+from .wb.client import WBError  # noqa: E402
+
+
+def _wb_call(fn):
+    try:
+        return fn()
+    except KeyError as e:
+        raise HTTPException(400, str(e).strip("'")) from e
+    except WBError as e:
+        raise HTTPException(400, str(e)) from e
+
+
+@app.get("/api/shops")
+def shop_list():
+    return {"shops": wb_shops.list_shops(), "current": store.get_settings().get("wb_shop_id")}
+
+
+@app.post("/api/shops")
+def shop_add(name: str = Body(""), token: str = Body(...)):
+    from .wb.client import WBClient
+
+    cli = WBClient(token.strip())
+    try:
+        whs = cli.warehouses()  # 顺便验证令牌（需要 Marketplace 权限）
+    except WBError as e:
+        if e.status in (401, 403):
+            raise HTTPException(400, f"令牌无效或没有 Marketplace 权限：{e}") from e
+        whs = []
+    try:
+        shop = wb_shops.add(name, token)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    if whs:
+        shop = wb_shops.update(shop["id"], {"warehouse_id": whs[0]["id"], "warehouse_name": whs[0].get("name", "")})
+    if not store.get_settings().get("wb_shop_id"):
+        store.save_settings({"wb_shop_id": shop["id"]})
+    return {"shop": shop, "warehouses": whs}
+
+
+@app.post("/api/shops/{sid}")
+def shop_update(sid: str, patch: dict = Body(...)):
+    return _wb_call(lambda: wb_shops.update(sid, patch))
+
+
+@app.delete("/api/shops/{sid}")
+def shop_delete(sid: str):
+    wb_shops.remove(sid)
+    if store.get_settings().get("wb_shop_id") == sid:
+        rest = wb_shops.list_shops()
+        store.save_settings({"wb_shop_id": rest[0]["id"] if rest else ""})
+    return {"ok": True}
+
+
+@app.post("/api/shops/{sid}/current")
+def shop_current(sid: str):
+    store.save_settings({"wb_shop_id": sid})
+    return {"ok": True}
+
+
+@app.get("/api/shops/{sid}/warehouses")
+def shop_warehouses(sid: str):
+    return _wb_call(lambda: wb_shops.client(sid).warehouses())
+
+
+@app.post("/api/shops/{sid}/test")
+def shop_test(sid: str):
+    cli = _wb_call(lambda: wb_shops.client(sid))
+    out = {}
+    for name, fn in (("商品（Content）", lambda: cli.subjects("Куртки", limit=1)),
+                     ("价格（Prices）", cli.prices_ping),
+                     ("仓库库存（Marketplace）", cli.warehouses)):
+        try:
+            fn()
+            out[name] = "正常"
+        except WBError as e:
+            out[name] = str(e)[:120]
+    return out
+
+
+def _shop_or_current(shop: str | None) -> str:
+    sid = shop or store.get_settings().get("wb_shop_id")
+    if not sid or not wb_shops.get(sid):
+        raise HTTPException(400, "请先在「待上架 → 店铺」里绑定 WB 店铺")
+    return sid
+
+
+@app.get("/api/wb/subjects")
+def wb_subjects(q: str = "", shop: str | None = None):
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    locale = "zh" if re.search(r"[\u4e00-\u9fff]", q) else "ru"
+    rows = _wb_call(lambda: cli.subjects(q.strip(), locale=locale, limit=60))
+    return [{"id": r.get("subjectID"), "name": r.get("subjectName"), "parent": r.get("parentName")} for r in rows]
+
+
+@app.get("/api/wb/charcs/{subject_id}")
+def wb_charcs(subject_id: int, shop: str | None = None):
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    meta = _wb_call(lambda: wb_upload.charc_meta(cli, subject_id))
+    meta = sorted(meta, key=lambda c: (not c.get("required"), not c.get("popular"), c.get("name", "")))
+    return meta
+
+
+@app.get("/api/wb/directory/{kind}")
+def wb_directory(kind: str, subject: int | None = None, shop: str | None = None):
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    if kind == "colors":
+        rows = _wb_call(lambda: wb_listing.cached("colors", cli.colors))
+        return sorted({r.get("name") for r in rows if r.get("name")})
+    if kind == "countries":
+        rows = _wb_call(lambda: wb_listing.cached("countries", cli.countries))
+        return sorted({r.get("name") for r in rows if r.get("name")})
+    if kind in ("seasons", "kinds"):
+        rows = _wb_call(lambda: wb_listing.cached(kind, lambda: cli.directory(kind)))
+        return sorted({r.get("name") for r in rows if r.get("name")})
+    if kind == "tnved" and subject:
+        rows = _wb_call(lambda: wb_listing.cached(f"tnved-{subject}", lambda: cli.tnved(subject)))
+        return [str(r.get("tnved")) for r in rows if r.get("tnved")]
+    raise HTTPException(404)
+
+
+def _listing_summary(p: dict, L: dict) -> dict:
+    sets = {s["id"]: s for s in p.get("sets") or []}
+    vs = []
+    for v in L["variants"]:
+        st = sets.get(v["sid"]) or {}
+        cover = next((i for i in st.get("images", []) if i.get("file")), None)
+        vs.append({**v, "cover": f"/data/products/{p['id']}/{cover['file']}?v={cover.get('v', 0)}" if cover else ""})
+    return {"pid": p["id"], "key": L["key"], "product_title": p.get("title", ""), "offer_id": p.get("offer_id"),
+            "title": L.get("title", ""), "logo_name": L.get("logo_name", ""), "subject_name": L.get("subject_name", ""),
+            "status": L.get("status", "draft"), "progress": L.get("progress"), "error": L.get("error", ""),
+            "nm": L.get("nm") or {}, "variants": vs, "shop_id": L.get("shop_id")}
+
+
+@app.get("/api/listings")
+def listings():
+    out = []
+    for p in store.list_products():
+        if not p.get("listings") and not any(st.get("queued") for st in p.get("sets") or []):
+            continue
+        before = json.dumps(p.get("listings") or {}, sort_keys=True)
+        wb_listing.sync(p)
+        if json.dumps(p.get("listings") or {}, sort_keys=True) != before:
+            p = store.update_product(p["id"], lambda x: wb_listing.sync(x))
+        for L in (p.get("listings") or {}).values():
+            out.append(_listing_summary(p, L))
+    return out
+
+
+def _listing(pid: str, key: str) -> tuple[dict, dict]:
+    p = store.update_product(pid, lambda x: wb_listing.sync(x)) or _product_or_404(pid)
+    L = (p.get("listings") or {}).get(key)
+    if not L:
+        raise HTTPException(404, "上架单不存在（套图可能已移出待上架）")
+    return p, L
+
+
+@app.get("/api/listings/{pid}/{key}")
+def listing_get(pid: str, key: str):
+    p, L = _listing(pid, key)
+    shop = wb_shops.get(store.get_settings().get("wb_shop_id") or "")
+    prefix = (shop or {}).get("vendor_prefix") or "ai"
+    sets = [s for s in p.get("sets") or [] if s.get("queued") and wb_listing.logo_key(s.get("logo_id")) == key]
+    options = {}
+    for st in sets:
+        cover = next((i for i in st.get("images", []) if i.get("file")), None)
+        options.setdefault(st["sku"], []).append({"sid": st["id"], "style": st.get("style"), "created": st["created"],
+                                                  "cover": f"/data/products/{pid}/{cover['file']}" if cover else ""})
+    prices = {v["sku"]: wb_listing.variant_price(p, L, v) for v in L["variants"]}
+    codes = {v["sku"]: wb_listing.vendor_code(p, L, v, prefix) for v in L["variants"]}
+    return {"listing": L, "summary": _listing_summary(p, L), "set_options": options, "prices": prices, "codes": codes,
+            "product": {"title": p.get("title"), "url": p.get("url"), "sizes": p.get("sizes"),
+                        "price_min": p.get("price_min"), "price_max": p.get("price_max")}}
+
+
+@app.post("/api/listings/{pid}/{key}")
+def listing_save(pid: str, key: str, patch: dict = Body(...)):
+    keys = ("subject_id", "subject_name", "title", "description", "brand", "country", "tnved", "charcs", "variants",
+            "sizes", "pricing", "package", "stock")
+
+    def fn(p):
+        L = p["listings"][key]
+        if L.get("status") == "uploading":
+            raise HTTPException(400, "正在上架中，请等完成后再修改")
+        for k in keys:
+            if k in patch:
+                L[k] = patch[k]
+        if "pricing" in patch:
+            L["pricing"]["configured"] = True
+        if L.get("status") in ("failed",):
+            L["status"] = "draft"
+    _listing(pid, key)
+    store.update_product(pid, fn)
+    return listing_get(pid, key)
+
+
+@app.post("/api/listings/{pid}/{key}/preflight")
+def listing_preflight(pid: str, key: str, shop: str | None = Body(None, embed=True)):
+    p, L = _listing(pid, key)
+    sid = _shop_or_current(shop)
+    meta = []
+    if L.get("subject_id"):
+        try:
+            meta = wb_upload.charc_meta(wb_shops.client(sid), int(L["subject_id"]))
+        except WBError:
+            meta = []
+    res = wb_listing.preflight(p, L, wb_shops.get(sid), meta)
+    if L.get("subject_id") and (L.get("brand") or "").strip():
+        found = wb_shops.client(sid).brand_exists(int(L["subject_id"]), L["brand"])
+        if found is False:
+            res["warnings"].append(f"品牌「{L['brand']}」没有在 WB 品牌库里找到：需要先在 WB 后台注册/申请品牌，否则商品卡会被拒")
+    return res
+
+
+@app.post("/api/listings/{pid}/{key}/ai-fill")
+def listing_ai_fill(pid: str, key: str, shop: str | None = Body(None, embed=True)):
+    from .wb import ai_fill
+
+    p, L = _listing(pid, key)
+    if not L.get("subject_id"):
+        raise HTTPException(400, "请先选择 WB 类目")
+    sid = _shop_or_current(shop)
+    cli = wb_shops.client(sid)
+    meta = _wb_call(lambda: wb_upload.charc_meta(cli, int(L["subject_id"])))
+    colors = wb_directory("colors", shop=sid)
+    countries = wb_directory("countries", shop=sid)
+    try:
+        tn = wb_directory("tnved", subject=int(L["subject_id"]), shop=sid)
+    except HTTPException:
+        tn = []
+    try:
+        res = ai_fill.fill(p, L, meta, colors, countries, tn)
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"AI 填写失败：{e}") from e
+
+    def fn(x):
+        LL = x["listings"][key]
+        for k in ("title", "description", "country", "tnved"):
+            if res.get(k):
+                LL[k] = res[k]
+        LL.setdefault("charcs", {}).update(res.get("charcs") or {})
+        for v in LL["variants"]:
+            r = (res.get("variants") or {}).get(v["sku"]) or {}
+            if r.get("color"):
+                v["color"] = r["color"]
+            if r.get("title"):
+                v["title"] = r["title"]
+        if res.get("package_estimate"):
+            LL["package_estimate"] = res["package_estimate"]
+    store.update_product(pid, fn)
+    out = listing_get(pid, key)
+    out["ai_notes"] = res.get("notes") or []
+    out["ai_rejected"] = res.get("rejected") or []
+    return out
+
+
+@app.post("/api/listings/{pid}/{key}/upload")
+def listing_upload(pid: str, key: str, shop: str | None = Body(None, embed=True)):
+    p, L = _listing(pid, key)
+    if L.get("status") == "uploading":
+        raise HTTPException(400, "已经在上架中")
+    sid = _shop_or_current(shop)
+    job = jobs.Job("wb", f"上架到 WB：{(L.get('title') or p.get('title') or '')[:20]}")
+    jobs.run_in_thread(job, lambda a, b, c, j: wb_upload.upload(a, b, c, j), pid, key, sid)
+    return job.to_dict()
+
+
+@app.post("/api/listings/{pid}/{key}/remove")
+def listing_remove(pid: str, key: str):
+    """整张上架单移出待上架（套图本身保留在商品页）。"""
+    def fn(p):
+        for st in p.get("sets") or []:
+            if st.get("queued") and wb_listing.logo_key(st.get("logo_id")) == key:
+                st["queued"] = False
+        L = (p.get("listings") or {}).get(key)
+        if L and L.get("status") in ("uploading", "pending_stock"):
+            raise HTTPException(400, "正在上架/同步库存中，请等完成后再移出")
+        if L and (L.get("nm") or L.get("card_submitted")):  # 已在 WB 建过卡的留个记录，不影响 WB 上的商品
+            p.setdefault("listings_done", {})[f"{key}-{int(time.time())}"] = p["listings"].pop(key)
+        wb_listing.sync(p)
+    _product_or_404(pid)
+    store.update_product(pid, fn)
+    return {"ok": True}
+
+
+@app.post("/api/listings/batch-upload")
+def listings_batch_upload(items: list[dict] = Body(..., embed=True), shop: str | None = Body(None)):
+    sid = _shop_or_current(shop)
+    job = jobs.Job("wb", f"批量上架 {len(items)} 张商品卡")
+
+    def run(j):
+        for k, it in enumerate(items):
+            if j.cancelled:
+                break
+            j.note(f"[{k + 1}/{len(items)}] 开始上架")
+            sub = jobs.Job("wb", "批量上架子任务", register=False)
+            wb_upload.upload(it["pid"], it["key"], sid, sub)
+            j.note(f"[{k + 1}/{len(items)}] " + (sub.log[-1] if sub.log else ""))
+            j.done += 1
+        j.finish(f"批量上架结束：{j.done}/{len(items)}")
+    job.total = len(items)
+    jobs.run_in_thread(job, run)
+    return job.to_dict()
+
+
 # ---------------- 采集 ----------------
 @app.post("/api/scrape")
 def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5)):
@@ -524,6 +834,16 @@ app.mount("/data/products", StaticFiles(directory=store.PRODUCTS), name="product
 app.mount("/data/logos", StaticFiles(directory=store.LOGOS), name="logos")
 app.mount("/data/style_refs", StaticFiles(directory=store.STYLE_REFS), name="style_refs")
 app.mount("/static", StaticFiles(directory=WEB), name="static")
+
+
+@app.on_event("startup")
+def _resume_wb():
+    from .wb import upload as _u
+
+    try:
+        _u.resume_pending()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @app.middleware("http")

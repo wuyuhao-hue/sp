@@ -126,6 +126,7 @@ DEFAULT_SETTINGS = {
     "overlay_word": True,      # 底部半透明大字
     "copy_lang": "ru",         # 首图卖点文字语言
     "style_refs": [],          # 风格参考图文件名（data/style_refs/ 下）
+    "wb_shop_id": "",          # 当前选中的 WB 店铺
     "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）
     "browser": "chrome",  # chrome / edge
     "scrape_delay": 3.0,

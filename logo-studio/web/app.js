@@ -24,6 +24,9 @@ createApp({
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
     generating: false, analyzing: false, readingSize: false, lightbox: null, qSel: [],
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
+    // WB 上架
+    listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -57,6 +60,21 @@ createApp({
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },
     apiReady() { return !!(this.settings.api_base && this.settings.api_key); },
+    shownListings() { return this.listings.filter(l => this.listingMatch(l, this.qFilter)); },
+    visibleCharcs() {
+      if (!this.ed) return [];
+      const skip = c => /^(цвет|бренд)$/i.test(c.name.trim()) || /^страна производства/i.test(c.name) || /ТНВЭД/i.test(c.name.replace(/\s/g, '')) || c.charcID === 88952;
+      return this.ed.meta.filter(c => !skip(c) && (this.ed.allCharcs || c.required || c.popular || (this.ed.L.charcs[c.charcID] || []).length));
+    },
+    charcFilled() { return this.visibleCharcs.filter(c => (this.ed.L.charcs[c.charcID] || []).length).length; },
+    pricePreview() {
+      const L = this.ed && this.ed.L;
+      if (!L) return {};
+      const pr = L.pricing;
+      const calc = cny => pr.mode === 'fixed' && pr.fixed > 0 ? Math.round(pr.fixed) : Math.max(1, Math.round((Number(cny) + Number(pr.add || 0)) * Number(pr.mul || 1) + Number(pr.add2 || 0)));
+      const full = Math.max(0, ...L.sizes.filter(s => s.enabled).map(s => calc(s.cny_override || s.cny || 0)));
+      return { full, sale: Math.round(full * (100 - Math.min(99, Math.max(0, pr.discount || 0))) / 100) };
+    },
     queueCount() { return this.products.reduce((n, p) => n + (p.queued || 0), 0); },
     visibleJobs() { return this.jobs.filter(j => !this.hiddenJobs.includes(j.id)).slice(0, 3); },
     extMode() { return (this.settings.scrape_mode || 'extension') === 'extension'; },
@@ -75,7 +93,7 @@ createApp({
     },
   },
   watch: {
-    tab(t) { if (t === 'queue') this.loadQueue(); },
+    tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll()]);
@@ -105,8 +123,15 @@ createApp({
     async loadProducts() { this.products = await api('/api/products'); },
     async loadLogos() { this.logos = await api('/api/logos'); },
     async loadQueue() {
-      this.queue = await api('/api/queue');
-      this.qSel = this.qSel.filter(id => this.queue.some(q => q.set.id === id));
+      this.listings = await api('/api/listings');
+      this.qSel = this.qSel.filter(k => this.shownListings.some(l => this.lkey(l) === k));
+      if (this.ed) {  // 编辑框开着时只同步上架状态，不覆盖正在编辑的内容
+        const l = this.listings.find(x => this.lkey(x) === this.lkey(this.ed.summary));
+        if (l && (l.status !== this.ed.L.status || JSON.stringify(l.progress) !== JSON.stringify(this.ed.L.progress))) {
+          const r = await api(`/api/listings/${l.pid}/${l.key}`).catch(() => null);
+          if (r && this.ed) Object.assign(this.ed.L, { status: r.listing.status, progress: r.listing.progress, error: r.listing.error, log: r.listing.log, nm: r.listing.nm });
+        }
+      }
     },
     async poll() {
       try {
@@ -133,7 +158,7 @@ createApp({
           await this.loadProducts();
           if (this.current) await this.refreshCurrent();
           if (this.tab === 'queue') await this.loadQueue();
-        }
+        } else if (this.tab === 'queue' && this.listings.some(l => l.status === 'pending_stock' || l.status === 'uploading')) await this.loadQueue();
       } catch (e) { /* 服务未就绪时忽略 */ }
     },
     async openProduct(id) {
@@ -147,6 +172,12 @@ createApp({
     toggleSel(id) { const i = this.selected.indexOf(id); i >= 0 ? this.selected.splice(i, 1) : this.selected.push(id); },
     toggleAll() { this.selected = this.allSelected ? [] : this.filtered.map(p => p.id); },
     toggleSku(name) { const i = this.skuSel.indexOf(name); i >= 0 ? this.skuSel.splice(i, 1) : this.skuSel.push(name); },
+    listingMatch(l, f) {
+      const st = l.status || 'draft';
+      return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock')) || st === f;
+    },
+    listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f)).length; },
+    lkey(l) { return `${l.pid}:${l.key}`; },
     toggleQ(id) { const i = this.qSel.indexOf(id); i >= 0 ? this.qSel.splice(i, 1) : this.qSel.push(id); },
 
     // ---------- 生成 ----------
@@ -228,14 +259,191 @@ createApp({
       this.analyzing = false;
     },
 
-    // ---------- 待上架 ----------
-    async unqueue(q) {
-      await api(`/api/products/${q.pid}/sets/${q.set.id}/queue`, { body: { queued: false } });
-      this.loadQueue(); this.loadProducts();
+    // ---------- 待上架 / WB ----------
+    statusName(st) { return { draft: '草稿', uploading: '上架中', pending_stock: '库存同步中', uploaded: '已上架', failed: '失败' }[st || 'draft'] || st; },
+    shopName(id) { return (this.shops.find(s => s.id === id) || {}).name; },
+    async loadShops() {
+      const r = await api('/api/shops');
+      this.shops = r.shops; this.shopCurrent = r.current || (r.shops[0] || {}).id || '';
+      if (this.shops.length && !this.dir.colors.length) this.loadDirs();
     },
-    async gotoSet(q) { this.tab = 'products'; await this.openProduct(q.pid); },
+    async loadDirs() {
+      try {
+        const [colors, countries] = await Promise.all([api('/api/wb/directory/colors'), api('/api/wb/directory/countries')]);
+        this.dir = { colors, countries };
+      } catch (e) { /* 令牌没有 Content 权限时目录为空，手动填写 */ }
+    },
+    openShops() { this.showShops = true; this.shopTest = {}; this.loadShops(); },
+    async addShop() {
+      this.shopBusy = true;
+      try {
+        const r = await api('/api/shops', { body: this.shopForm });
+        this.shopForm = { name: '', token: '' };
+        this.warehouses[r.shop.id] = r.warehouses;
+        await this.loadShops();
+        this.toast(r.warehouses.length ? `已绑定，找到 ${r.warehouses.length} 个仓库` : '已绑定（没读到仓库，库存写入前请确认令牌有 Marketplace 权限）');
+      } catch (e) { this.toast(e.message, true); }
+      this.shopBusy = false;
+    },
+    async saveShop(s, patch) {
+      try { await api(`/api/shops/${s.id}`, { body: patch }); this.toast('已保存'); } catch (e) { this.toast(e.message, true); }
+    },
+    async replaceToken(s, e) {
+      const token = e.target.value.trim();
+      if (!token) return;
+      await this.saveShop(s, { token });
+      e.target.value = '';
+      this.loadShops();
+    },
+    async loadWarehouses(s) {
+      try { this.warehouses[s.id] = await api(`/api/shops/${s.id}/warehouses`); this.toast(`读到 ${this.warehouses[s.id].length} 个仓库`); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async pickWarehouse(s, id) {
+      const w = (this.warehouses[s.id] || []).find(x => String(x.id) === String(id));
+      await this.saveShop(s, { warehouse_id: w ? w.id : null, warehouse_name: w ? w.name : '' });
+      this.loadShops();
+    },
+    async testShop(s) {
+      this.shopTest[s.id] = { '测试中': '…' };
+      try { this.shopTest[s.id] = await api(`/api/shops/${s.id}/test`, { body: {} }); } catch (e) { this.shopTest[s.id] = { '错误': e.message }; }
+    },
+    async setCurrentShop(id) { await api(`/api/shops/${id}/current`, { body: {} }); this.shopCurrent = id; this.dir = { colors: [], countries: [] }; this.loadDirs(); },
+    async deleteShop(s) {
+      if (!confirm(`删除店铺「${s.name}」？只删除本机保存的令牌，不影响 WB 上的商品。`)) return;
+      await api(`/api/shops/${s.id}`, { method: 'DELETE' });
+      this.loadShops();
+    },
+
+    async openEditor(l) {
+      try {
+        const r = await api(`/api/listings/${l.pid}/${l.key}`);
+        this.ed = { ...this.edFrom(r), meta: [], tnved: [], subjQ: '', subjResults: [], pf: null, aiNotes: [], aiRejected: [], allCharcs: false, busy: '' };
+        if (this.ed.L.subject_id) this.loadSubjectData();
+      } catch (e) { this.toast(e.message, true); }
+    },
+    edFrom(r) {
+      const L = JSON.parse(JSON.stringify(r.listing));
+      L.charcs = L.charcs || {};
+      return { L, summary: r.summary, options: r.set_options, prices: r.prices, codes: r.codes, product: r.product, snap: this.editSig(L) };
+    },
+    editSig(L) {
+      return JSON.stringify(['subject_id', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock'].map(k => L[k]));
+    },
+    closeEditor() {
+      if (this.ed && this.ed.snap !== this.editSig(this.ed.L) && !confirm('关闭编辑？没点「保存」的修改会丢失。')) return;
+      this.ed = null;
+    },
+    optCover(v) { const o = (this.ed.options[v.sku] || []).find(x => x.sid === v.sid); return o ? o.cover : ''; },
+    async loadSubjectData() {
+      const sid = this.ed.L.subject_id;
+      this.ed.busy = 'meta';
+      try {
+        const [meta, tn] = await Promise.all([api(`/api/wb/charcs/${sid}`), api(`/api/wb/directory/tnved?subject=${sid}`).catch(() => [])]);
+        if (this.ed && this.ed.L.subject_id === sid) { this.ed.meta = meta; this.ed.tnved = tn; }
+      } catch (e) { this.toast(e.message, true); }
+      if (this.ed) this.ed.busy = '';
+    },
+    async searchSubjects() {
+      if (!this.ed.subjQ.trim()) return;
+      this.ed.busy = 'subj';
+      try { this.ed.subjResults = await api(`/api/wb/subjects?q=${encodeURIComponent(this.ed.subjQ.trim())}`); if (!this.ed.subjResults.length) this.toast('没有找到，换个词试试（俄文更准）', true); }
+      catch (e) { this.toast(e.message, true); }
+      this.ed.busy = '';
+    },
+    pickSubject(r) {
+      if (this.ed.L.subject_id && this.ed.L.subject_id !== r.id && Object.keys(this.ed.L.charcs).length && !confirm('换类目会清空已经填写的属性，继续？')) return;
+      if (this.ed.L.subject_id !== r.id) { this.ed.L.charcs = {}; this.ed.L.tnved = ''; }
+      this.ed.L.subject_id = r.id; this.ed.L.subject_name = r.name; this.ed.subjResults = [];
+      this.loadSubjectData();
+    },
+    charcText(c) { return (this.ed.L.charcs[c.charcID] || []).join(', '); },
+    setCharc(c, text) {
+      let vals = c.charcType === 4 ? [text.trim()].filter(Boolean) : text.split(/[,，;；]/).map(x => x.trim()).filter(Boolean);
+      vals = vals.slice(0, c.maxCount || 1);
+      if (vals.length) this.ed.L.charcs[c.charcID] = vals; else delete this.ed.L.charcs[c.charcID];
+    },
+    useEstimate() {
+      const e = this.ed.L.package_estimate;
+      Object.assign(this.ed.L.package, { length: e.lengthCm, width: e.widthCm, height: e.heightCm, weight: e.weightKg });
+    },
+    async saveListing(quiet) {
+      const L = this.ed.L, s = this.ed.summary;
+      const body = {};
+      for (const k of ['subject_id', 'subject_name', 'title', 'description', 'brand', 'country', 'tnved', 'charcs', 'variants', 'sizes', 'pricing', 'package', 'stock']) body[k] = L[k];
+      body.sizes = L.sizes.map(x => ({ ...x, cny_override: x.cny_override === '' ? null : x.cny_override }));
+      try {
+        const r = await api(`/api/listings/${s.pid}/${s.key}`, { body });
+        Object.assign(this.ed, this.edFrom(r));
+        if (!quiet) this.toast('已保存');
+        this.loadQueue();
+        return true;
+      } catch (e) { this.toast(e.message, true); return false; }
+    },
+    async preflight() {
+      if (!(await this.saveListing(true))) return;
+      this.ed.busy = 'pf';
+      try { this.ed.pf = await api(`/api/listings/${this.ed.summary.pid}/${this.ed.summary.key}/preflight`, { body: {} }); }
+      catch (e) { this.toast(e.message, true); }
+      if (this.ed) this.ed.busy = '';
+      return this.ed && this.ed.pf;
+    },
+    async aiFill() {
+      if (!(await this.saveListing(true))) return;
+      this.ed.busy = 'ai';
+      try {
+        const r = await api(`/api/listings/${this.ed.summary.pid}/${this.ed.summary.key}/ai-fill`, { body: {} });
+        Object.assign(this.ed, this.edFrom(r), { aiNotes: r.ai_notes, aiRejected: r.ai_rejected });
+        this.toast('AI 已填写，请逐项核对后再上架');
+      } catch (e) { this.toast(e.message, true); }
+      if (this.ed) this.ed.busy = '';
+    },
+    confirmUpload(n, title) {
+      return confirm(`确认上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？\n\n${title}\n\n这会在 WB 上真实创建 ${n} 个款式的商品卡，并上传图片、价格和库存。\n同一张卡重复点上架是安全的：程序会按供应商编码回查，只续传没完成的步骤，不会重复建卡。`);
+    },
+    async saveAndUpload() {
+      const pf = await this.preflight();
+      if (!pf) return;
+      if (!pf.ok) { this.toast('预检没通过，请先处理红色的问题', true); return; }
+      if (!this.confirmUpload(this.ed.L.variants.filter(v => v.enabled).length, this.ed.L.title)) return;
+      await this.startUpload(this.ed.summary);
+    },
+    async uploadListing(l) {
+      try {
+        const pf = await api(`/api/listings/${l.pid}/${l.key}/preflight`, { body: {} });
+        if (!pf.ok) { this.toast('预检没通过：' + pf.errors.slice(0, 3).join('；'), true); this.openEditor(l).then(() => { if (this.ed) this.ed.pf = pf; }); return; }
+        if (!this.confirmUpload(l.variants.filter(v => v.enabled).length, l.title || l.product_title)) return;
+        await this.startUpload(l);
+      } catch (e) { this.toast(e.message, true); }
+    },
+    async startUpload(l) {
+      try {
+        this.jobs.unshift(await api(`/api/listings/${l.pid}/${l.key}/upload`, { body: {} }));
+        this.toast('已开始上架，进度在卡片上和右下角');
+        setTimeout(this.loadQueue, 800);
+      } catch (e) { this.toast(e.message, true); }
+    },
+    async batchUpload() {
+      const items = this.listings.filter(l => this.qSel.includes(this.lkey(l)));
+      const bad = [];
+      for (const l of items) {
+        const pf = await api(`/api/listings/${l.pid}/${l.key}/preflight`, { body: {} }).catch(e => ({ ok: false, errors: [e.message] }));
+        if (!pf.ok) bad.push(`${(l.title || l.product_title).slice(0, 24)}：${pf.errors[0]}`);
+      }
+      if (bad.length) { alert(`有 ${bad.length} 张卡预检没通过，先处理后再批量上架：\n\n` + bad.join('\n')); return; }
+      const n = items.reduce((k, l) => k + l.variants.filter(v => v.enabled).length, 0);
+      if (!confirm(`确认把 ${items.length} 张商品卡（共 ${n} 个款式）上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？会按顺序逐张上架。`)) return;
+      try { this.jobs.unshift(await api('/api/listings/batch-upload', { body: { items: items.map(l => ({ pid: l.pid, key: l.key })) } })); this.toast('已开始批量上架'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async removeListing(l) {
+      if (!confirm('把这张卡移出待上架？套图会保留在商品页，可以再移回来。')) return;
+      try { await api(`/api/listings/${l.pid}/${l.key}/remove`, { body: {} }); this.loadQueue(); this.loadProducts(); }
+      catch (e) { this.toast(e.message, true); }
+    },
     async exportQueue() {
-      const items = this.queue.filter(q => this.qSel.includes(q.set.id)).map(q => ({ pid: q.pid, sid: q.set.id }));
+      const items = this.listings.filter(l => this.qSel.includes(this.lkey(l)))
+        .flatMap(l => l.variants.filter(v => v.enabled).map(v => ({ pid: l.pid, sid: v.sid })));
       this.jobs.unshift(await api('/api/export', { body: { items } }));
     },
 

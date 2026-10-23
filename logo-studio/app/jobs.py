@@ -10,7 +10,7 @@ _lock = threading.Lock()
 
 
 class Job:
-    def __init__(self, kind: str, title: str):
+    def __init__(self, kind: str, title: str, register: bool = True):
         self.id = uuid.uuid4().hex[:8]
         self.kind = kind
         self.title = title
@@ -21,8 +21,9 @@ class Job:
         self.results: list[str] = []
         self.cancelled = False
         self.created = time.time()
-        with _lock:
-            _jobs[self.id] = self
+        if register:  # 批量任务里的子任务不单独显示
+            with _lock:
+                _jobs[self.id] = self
 
     def note(self, msg: str) -> None:
         if not self.log or self.log[-1] != msg:
