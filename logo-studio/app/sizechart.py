@@ -46,7 +46,7 @@ def render_size_chart(product: dict) -> Image.Image:
     table = (product.get("ai") or {}).get("size_table") or {}
     header, rows = table.get("header") or [], table.get("rows") or []
     if not header or not rows:
-        raise RuntimeError("没有尺码数据：请配置「商品理解模型」自动读取详情图里的尺码表，或在右侧「尺码表」里手动填写")
+        raise RuntimeError("没有尺码数据：详情图里没识别到尺码表，请在右侧「尺码表」手动填写后点「更新尺码表」")
     ncol = max(len(header), *(len(r) for r in rows))
     header = header + [""] * (ncol - len(header))
     rows = [r + [""] * (ncol - len(r)) for r in rows]

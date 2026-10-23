@@ -436,48 +436,34 @@ def rerender_set(pid: str, sid: str) -> None:
             _update_image(pid, sid, i, v=int(time.time() * 1000))
 
 
-def _run(tasks: list[tuple[str, str, int]], job) -> None:
+def _run(tasks: list[tuple[str, str, int]], job, finish: bool = True) -> None:
     n = max(1, min(int(store.get_settings().get("concurrency") or 3), 8))
     job.total += len(tasks)
     with ThreadPoolExecutor(max_workers=n) as ex:
         list(ex.map(lambda t: _gen_one(*t, job) if not job.cancelled else None, tasks))
+    if finish:
+        _finish(tasks, job)
+
+
+def _finish(tasks: list[tuple[str, str, int]], job) -> None:
     failed = sum(1 for pid, sid, i in tasks
                  if next(x for x in store.get_product(pid)["sets"] if x["id"] == sid)["images"][i]["status"] == "failed")
     job.finish(f"完成：成功 {len(tasks) - failed} 张" + (f"，失败 {failed} 张（可单张重试）" if failed else ""))
 
 
 def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
-    """为选中的 SKU 各生成一套图。"""
-    p = store.get_product(pid)
+    """为选中的 SKU 各生成一套图。先建好套图卡片（界面上立即显示"排队中"），
+    AI 生图和尺码表识别同时进行，尺码表放在每套最后一张。"""
+    import threading
+
+    p = fill_defaults(pid)
     logo = store.get_logo(logo_id) if logo_id else None
     s = store.get_settings()
     shots = (s.get("shots") or store.DEFAULT_SHOTS)[: int(s.get("shot_count") or 6)]
-    if store.get_settings().get("text_model") and not (p.get("ai") or {}).get("description_en"):
-        job.note("AI 正在理解商品…")
-        try:
-            info = ensure_analysis(p)
-            store.update_product(pid, lambda x: x.__setitem__("ai", info))
-        except Exception as e:  # noqa: BLE001
-            job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
-    p = fill_defaults(pid)
-    info = p.get("ai") or {}
-    if s.get("size_chart_auto", True) and not (info.get("size_table") or {}).get("rows") and p.get("detail_images"):
-        job.note("本地识别详情图里的尺码表…")
-        try:
-            from .ocr_size import read_size_table
-
-            table = read_size_table(p["detail_images"])
-            if table:
-                store.update_product(pid, lambda x: x.setdefault("ai", {}).__setitem__("size_table", table))
-                p = store.get_product(pid)
-        except Exception as e:  # noqa: BLE001
-            job.note(f"尺码表读取失败：{str(e)[:100]}")
     has_size = bool(((p.get("ai") or {}).get("size_table") or {}).get("rows"))
-    add_size = s.get("size_chart_auto", True) and has_size
-    if s.get("size_chart_auto", True) and not has_size:
-        job.note("没有尺码数据，这次不加尺码表；填好右侧尺码表后可在套图上点「生成尺码表」补上")
+    add_size = s.get("size_chart_auto", True) and (has_size or bool(p.get("detail_images")))
     skus = {k["name"]: k for k in sku_list(p)}
-    tasks = []
+    ai_tasks, size_tasks = [], []
     for name in sku_names:
         sku = skus.get(name)
         if not sku:
@@ -493,9 +479,48 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job) -> None:
                         + ([{"type": "size_chart", "logo": False, "extra": "", "status": "pending", "file": None,
                              "error": ""}] if add_size else [])}
         store.update_product(pid, lambda x, st=st: x.setdefault("sets", []).append(st))
-        tasks += [(pid, sid, i) for i in range(len(st["images"]))]
-    job.note(f"开始生成 {len(tasks)} 张图…")
-    _run(tasks, job)
+        ai_tasks += [(pid, sid, i) for i in range(len(shots))]
+        if add_size:
+            size_tasks.append((pid, sid, len(shots)))
+    if s.get("size_chart_auto", True) and not add_size:
+        job.note("这个商品没有详情图，这次不加尺码表；填好右侧尺码表后可在套图上点「生成尺码表」补上")
+
+    # 尺码表识别（本地 OCR）在后台和 AI 生图同时进行
+    def ocr():
+        from .ocr_size import read_size_table
+
+        try:
+            table = read_size_table(p["detail_images"])
+        except Exception as e:  # noqa: BLE001
+            job.note(f"尺码表识别出错：{str(e)[:100]}")
+            return
+        if table:
+            store.update_product(pid, lambda x: x.setdefault("ai", {}).__setitem__("size_table", table))
+            job.note("✓ 已从详情图识别出尺码表")
+        else:
+            job.note("详情图里没有识别到尺码表，请在右侧手动填写后点「更新尺码表」")
+
+    ocr_thread = None
+    if add_size and not has_size:
+        job.note("后台识别详情图里的尺码表…")
+        ocr_thread = threading.Thread(target=ocr, daemon=True)
+        ocr_thread.start()
+
+    if s.get("text_model") and not (p.get("ai") or {}).get("description_en"):
+        job.note("AI 正在理解商品…")
+        try:
+            info = ensure_analysis(store.get_product(pid))
+            store.update_product(pid, lambda x: x.setdefault("ai", {}).update(
+                {k: v for k, v in info.items() if k != "size_table" or v}))
+            fill_defaults(pid)
+        except Exception as e:  # noqa: BLE001
+            job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
+    job.note(f"开始生成 {len(ai_tasks)} 张 AI 图…")
+    _run(ai_tasks, job, finish=False)
+    if ocr_thread:
+        ocr_thread.join()
+    _run(size_tasks, job, finish=False)
+    _finish(ai_tasks + size_tasks, job)
 
 
 def swap_logo(pid: str, src_sid: str, logo_id: str, job) -> None:

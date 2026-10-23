@@ -170,7 +170,8 @@ def _finish(header: list[str], rows: list[list[str]]) -> dict:
 def read_size_table(detail_srcs: list[str]) -> dict | None:
     """依次识别详情图，找出最像尺码表的一张并解析。找不到返回 None。"""
     best, best_items, best_src = 0, None, None
-    for src in detail_srcs[:30]:
+    # 尺码表一般在详情图靠后的位置：从后往前识别，找到明显的尺码表就停
+    for src in list(reversed(detail_srcs[:30])):
         try:
             items = _ocr(src)
         except Exception:  # noqa: BLE001
@@ -178,6 +179,8 @@ def read_size_table(detail_srcs: list[str]) -> dict | None:
         sc = _score(items)
         if sc > best:
             best, best_items, best_src = sc, items, src
+        if best >= 18 and _table(best_items):
+            break
     if not best_items:
         return None
     parsed = _table(best_items) or _transposed(best_items)
