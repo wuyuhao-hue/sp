@@ -61,9 +61,10 @@ def start_tabs_job() -> jobs.Job:
     return job
 
 
-def _enqueue_offers(job: jobs.Job, ids: list[str]) -> None:
+def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False) -> None:
+    """skip_existing：整店采集时跳过已有商品；手动给的链接则重新采集（更新信息，保留套图）。"""
     for oid in ids:
-        if store.get_product(f"1688-{oid}"):
+        if skip_existing and store.get_product(f"1688-{oid}"):
             job.note(f"{oid} 已采集过，跳过")
             continue
         job.total += 1
@@ -155,7 +156,7 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
         if t["kind"] == "shop":
             ids = [i for i in data.get("ids", []) if isinstance(i, str)]
             job.note(f"店铺共发现 {len(ids)} 个商品")
-            _enqueue_offers(job, ids)
+            _enqueue_offers(job, ids, skip_existing=True)
             return
         pages = [(t["offer_id"], data.get("raw") or {})] if t["kind"] == "offer" else \
             [(p["offer_id"], p["raw"]) for p in data.get("pages", [])]
@@ -166,13 +167,6 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
                 return
         job.inflight = getattr(job, "inflight", 0) + len(pages)
     for oid, raw in pages:
-        if store.get_product(f"1688-{oid}"):
-            job.note(f"{oid} 已采集过，跳过")
-            with _lock:
-                job.done += 1
-                job.inflight -= 1
-                _maybe_finish(job)
-            continue
         _workers.submit(_process_offer, job, oid, raw)
 
 
@@ -180,8 +174,7 @@ def collect_single(offer_id: str, raw: dict) -> str:
     """商品页上的「采集到印标工作台」按钮。"""
     global _manual_job
     state["last_seen"] = time.time()
-    if store.get_product(f"1688-{offer_id}"):
-        return "这个商品已经采集过了"
+    existed = store.get_product(f"1688-{offer_id}") is not None
     with _lock:
         if _manual_job is None or _manual_job.status != "running" or jobs.get(_manual_job.id) is None:
             _manual_job = jobs.Job("scrape", "商品页一键采集")
@@ -191,4 +184,4 @@ def collect_single(offer_id: str, raw: dict) -> str:
         job.total += 1
         job.inflight += 1
     _workers.submit(_process_offer, job, offer_id, raw)
-    return "已发送到印标工作台"
+    return "已更新到工作台" if existed else "已发送到工作台"

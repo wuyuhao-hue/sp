@@ -46,14 +46,25 @@ EXTRACT_JS = r"""
   const gallery = [...document.querySelectorAll(
     '.detail-gallery-turn img, .img-list-wrapper img, .detail-gallery-img, #dt-tab img, [class*="gallery"] img')]
     .map(i => i.getAttribute('src') || i.getAttribute('data-lazy-src') || '').filter(Boolean);
+  // 详情图：页面里所有图片（包括 Shadow DOM 里的），记下位置和大小，由服务端挑选
   const descSel = '#detailContentContainer img, .content-detail img, .detail-desc-module img, .html-description img, ' +
     '.offer-description img, .desc-lazyload-container img, [class*="description"] img, [class*="detail-content"] img';
-  const details = [...document.querySelectorAll(descSel)]
-    .map(i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-src') || i.getAttribute('src') || '')
-    .filter(s => s && s.includes('alicdn'));
+  const imgSrc = i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-lazy-src') || i.getAttribute('data-src') ||
+    i.currentSrc || i.getAttribute('src') || '';
+  const details = [], allImgs = [], roots = [document];
+  for (let k = 0; k < roots.length && k < 500; k++) {
+    const root = roots[k];
+    root.querySelectorAll(descSel).forEach(i => details.push(imgSrc(i)));
+    root.querySelectorAll('img').forEach(i => {
+      const r = i.getBoundingClientRect();
+      allImgs.push({ src: imgSrc(i), w: Math.round(r.width), nw: i.naturalWidth || 0, top: Math.round(r.top + window.scrollY),
+                     shadow: root !== document });
+    });
+    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+  }
   const titleEl = document.querySelector('.title-text, .d-title, .od-pc-offer-title-contain h1, h1');
   return {
-    globals, gallery, details,
+    globals, gallery, details: details.filter(x => x && x.includes('alicdn')), allImgs: allImgs.filter(x => x.src.includes('alicdn')),
     h1: titleEl ? titleEl.innerText.trim() : '',
     title: document.title,
     html: document.documentElement.outerHTML.slice(0, 4000000),
@@ -96,6 +107,39 @@ def norm_img(url: str) -> str:
     return url
 
 
+def _pick_details(raw: dict, exclude: set[str]) -> list[str]:
+    """详情图：优先用详情区域里的图；拿不到时，从页面所有图片里挑尺寸够大、又不是主图/SKU 图的，按从上到下排序。"""
+    def uniq(urls):
+        out = []
+        for u in map(norm_img, urls):
+            if u and u not in exclude and u not in out and not re.search(r"\.(gif|svg)$", u, re.I):
+                out.append(u)
+        return out
+
+    found = uniq(raw.get("details") or [])
+    if found:
+        return found
+    big = [i for i in raw.get("allImgs") or [] if (i.get("w") or 0) >= 300 or (i.get("nw") or 0) >= 600]
+    big.sort(key=lambda i: i.get("top") or 0)
+    return uniq(i["src"] for i in big)
+
+
+def fetch_detail_images(detail_url: str, exclude: set[str]) -> list[str]:
+    """1688 的详情内容有单独的网址（返回一段包含图片的 HTML/JS），直接读取里面的图片。"""
+    try:
+        r = httpx.get(detail_url, headers={"User-Agent": UA, "Referer": "https://detail.1688.com/"}, timeout=20,
+                      follow_redirects=True)
+        text = r.text
+    except Exception:  # noqa: BLE001
+        return []
+    urls = re.findall(r'(?:https?:)?//[^"\'\s\\()<>]+?alicdn\.com/[^"\'\s\\()<>]+?\.(?:jpe?g|png|webp)', text, re.I)
+    out = []
+    for u in map(norm_img, urls):
+        if u not in exclude and u not in out:
+            out.append(u)
+    return out
+
+
 def _num(v):
     try:
         return float(str(v).replace(",", "").strip())
@@ -128,11 +172,9 @@ def parse_offer(raw: dict, offer_id: str, url: str) -> dict:
             seen.add(u)
             main_images.append(u)
 
-    detail_images, seen_d = [], set(main_images)
-    for u in map(norm_img, raw.get("details") or []):
-        if u and u not in seen_d and not u.endswith(".gif"):
-            seen_d.add(u)
-            detail_images.append(u)
+    detail_images = _pick_details(raw, set(main_images))
+    detail_url = next((v for k, v in _walk(g) if isinstance(v, str) and re.search(r"(detail|desc)\w*url", k, re.I)
+                       and re.match(r"(https?:)?//", v)), "")
 
     sku_props = []
     props = _first(g, "skuProps", lambda v: isinstance(v, list) and v) or []
@@ -192,6 +234,7 @@ def parse_offer(raw: dict, offer_id: str, url: str) -> dict:
         "title": (title or "").strip(),
         "main_images": main_images,
         "detail_images": detail_images[:30],
+        "detail_url": ("https:" + detail_url) if detail_url.startswith("//") else detail_url,
         "sku_props": sku_props,
         "skus": skus,
         "sizes": sizes,
@@ -424,19 +467,32 @@ def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | 
         dump.write_text(json.dumps(raw, ensure_ascii=False)[:20_000_000], "utf-8")
         job.note(f"{offer_id} 解析失败，已保存调试文件 data/debug/{dump.name}，请发给开发者")
         return None
-    product = {"id": pid, "source": "1688", "created": time.time(), **info, "sets": [], "ai": {}}
+    if info.get("detail_url"):
+        # 详情内容的独立网址里通常是完整的详情图（页面上的可能还没加载出来）
+        fetched = fetch_detail_images(info["detail_url"], set(info["main_images"]))
+        if len(fetched) > len(info["detail_images"]):
+            info["detail_images"] = fetched[:30]
+    if not info["detail_images"]:
+        dump = store.DEBUG / f"{offer_id}-详情图.json"
+        keys = {k: (v if isinstance(v, (str, int, float)) else str(v)[:300]) for k, v in _walk(raw.get("globals") or {})
+                if re.search(r"detail|desc", str(k), re.I)}
+        dump.write_text(json.dumps({"offer_id": offer_id, "detail_keys": dict(list(keys.items())[:80]),
+                                    "details": raw.get("details"), "allImgs": raw.get("allImgs")},
+                                   ensure_ascii=False, indent=1), "utf-8")
+        job.note(f"{offer_id} 没找到详情图，已保存调试文件 data/debug/{dump.name}，请发给开发者")
+    old = store.get_product(pid)
+    if old:  # 重新采集：更新商品信息，保留已生成的套图和填写过的卖点、尺码表
+        product = {**old, **info}
+    else:
+        product = {"id": pid, "source": "1688", "created": time.time(), **info, "sets": [], "ai": {}}
     store.save_product(product)
     n_sku = sum(1 for p in info["sku_props"] for v in p["values"] if v["image"])
-    job.note(f"✓ {info['title'][:30] or offer_id}（{n_sku} 个 SKU 图 / {len(info['main_images'])} 主图 / "
+    job.note(f"{'↻ 已更新' if old else '✓'} {info['title'][:30] or offer_id}（{n_sku} 个 SKU 图 / {len(info['main_images'])} 主图 / "
              f"{len(info['detail_images'])} 详情图）")
     return product
 
 
 def scrape_offer(b: Browser, offer_id: str, job: Job) -> dict | None:
-    pid = f"1688-{offer_id}"
-    if store.get_product(pid):
-        job.note(f"{offer_id} 已采集过，跳过")
-        return store.get_product(pid)
     b.goto(f"https://detail.1688.com/offer/{offer_id}.html", job)
     b.page.wait_for_timeout(random.randint(1500, 3000))
     b.human_scroll(random.randint(2, 4))
@@ -510,9 +566,7 @@ def run_scrape_tabs(b: Browser, job: Job) -> None:
     for pg in pages:
         oid = OFFER_RE.search(pg.url).group(1)
         try:
-            if store.get_product(f"1688-{oid}"):
-                job.note(f"{oid} 已采集过，跳过")
-            elif b.blocked(pg):
+            if b.blocked(pg):
                 job.note(f"✗ {oid}：这个标签页停在登录/验证页面，请先处理")
             else:
                 p = save_offer(b, pg.evaluate(EXTRACT_JS), oid, job)

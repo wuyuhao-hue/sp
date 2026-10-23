@@ -73,14 +73,25 @@ function pageExtract() {
   const gallery = [...document.querySelectorAll(
     '.detail-gallery-turn img, .img-list-wrapper img, .detail-gallery-img, #dt-tab img, [class*="gallery"] img')]
     .map(i => i.getAttribute('src') || i.getAttribute('data-lazy-src') || '').filter(Boolean);
+  // 详情图：页面里所有图片（包括 Shadow DOM 里的），记下位置和大小，由服务端挑选
   const descSel = '#detailContentContainer img, .content-detail img, .detail-desc-module img, .html-description img, ' +
     '.offer-description img, .desc-lazyload-container img, [class*="description"] img, [class*="detail-content"] img';
-  const details = [...document.querySelectorAll(descSel)]
-    .map(i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-src') || i.getAttribute('src') || '')
-    .filter(s => s && s.includes('alicdn'));
+  const imgSrc = i => i.getAttribute('data-lazyload-src') || i.getAttribute('data-lazy-src') || i.getAttribute('data-src') ||
+    i.currentSrc || i.getAttribute('src') || '';
+  const details = [], allImgs = [], roots = [document];
+  for (let k = 0; k < roots.length && k < 500; k++) {
+    const root = roots[k];
+    root.querySelectorAll(descSel).forEach(i => details.push(imgSrc(i)));
+    root.querySelectorAll('img').forEach(i => {
+      const r = i.getBoundingClientRect();
+      allImgs.push({ src: imgSrc(i), w: Math.round(r.width), nw: i.naturalWidth || 0, top: Math.round(r.top + window.scrollY),
+                     shadow: root !== document });
+    });
+    root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) roots.push(el.shadowRoot); });
+  }
   const titleEl = document.querySelector('.title-text, .d-title, .od-pc-offer-title-contain h1, h1');
   return {
-    globals, gallery, details,
+    globals, gallery, details: details.filter(x => x && x.includes('alicdn')), allImgs: allImgs.filter(x => x.src.includes('alicdn')),
     h1: titleEl ? titleEl.innerText.trim() : '',
     title: document.title,
     // 数据对象都没找到时才带上整页 HTML，供服务端兜底解析
@@ -100,11 +111,17 @@ function pageBlocked() {
 }
 
 async function pageScrollAndCollect() {
-  for (let i = 0; i < 14; i++) {
-    window.scrollBy(0, 400 + Math.random() * 400);
-    await new Promise(r => setTimeout(r, 300 + Math.random() * 400));
+  // 慢慢滚到页面底部，让懒加载的详情图出来；最多约 12 秒
+  const y0 = window.scrollY, t0 = Date.now();
+  while (Date.now() - t0 < 12000) {
+    const before = window.scrollY;
+    window.scrollBy(0, 500 + Math.random() * 400);
+    await new Promise(r => setTimeout(r, 350 + Math.random() * 300));
+    if (window.scrollY === before && window.innerHeight + window.scrollY >= document.body.scrollHeight - 5) break;
   }
-  return document.documentElement.outerHTML;
+  const html = document.documentElement.outerHTML;
+  window.scrollTo(0, y0); // 读完滚回原来的位置
+  return html;
 }
 
 // ---------------- 登录 / 验证 ----------------
@@ -226,6 +243,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       const m = sender.tab.url.match(/offer\/(\d{8,15})/);
       if (!m) return { ok: false, message: '不是商品详情页' };
+      await exec(sender.tab.id, pageScrollAndCollect).catch(() => {});
       const raw = await exec(sender.tab.id, pageExtract);
       const r = await post('/api/ext/collect', { offer_id: m[1], raw });
       return { ok: true, message: r.message || '已发送' };

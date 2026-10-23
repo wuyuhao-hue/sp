@@ -13,7 +13,7 @@
   const reset = () => { btn.disabled = false; btn.style.background = '#4f46e5'; btn.textContent = '采集到印标工作台'; };
   btn.addEventListener('click', () => {
     btn.disabled = true;
-    btn.textContent = '发送中…';
+    btn.textContent = '采集中（读取详情图）…';
     chrome.runtime.sendMessage({ type: 'collect-page' }, resp => {
       const ok = resp && resp.ok;
       btn.style.background = ok ? '#10b981' : '#ef4444';
