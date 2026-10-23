@@ -472,6 +472,9 @@ def shop_diagnose(sid: str, pid: str | None = Body(None), key: str | None = Body
     step("Content 连通（首次，含建立连接）", lambda: cli.ping())
     step("Content 连通（复用连接）", lambda: cli.ping())
     step("类目搜索 Куртки", lambda: [f"{r.get('subjectID')} {r.get('subjectName')}" for r in cli.subjects("Куртки", limit=5)])
+    from .wb import ratelimit as wb_rl
+
+    step("WB 给这个令牌的额度（响应头）", lambda: wb_rl.last_headers.get(f"{cli.fp}:content") or "WB 没有返回额度头")
     step("全部类目", lambda: dirs("subjects-all", cli.subjects_all, lambda x: f"{len(x)} 个"))
     step("颜色目录", lambda: dirs("colors", cli.colors, lambda x: f"{len(x)} 个"))
     step("国家目录", lambda: dirs("countries", cli.countries, lambda x: f"{len(x)} 个"))
@@ -513,6 +516,8 @@ def shop_diagnose(sid: str, pid: str | None = Body(None), key: str | None = Body
     hints = []
     if any(x["detail"] and "429" in str(x["detail"]) for x in steps if not x["ok"]):
         hints.append("有接口被 WB 限流：程序会在冷却时间内不再请求这个接口（避免越撞越久），已缓存的目录照常可用。等提示的时间过后再诊断一次即可，不影响其他接口。")
+    if any("Base" in str(x.get("detail")) or "Персональный" in str(x.get("detail")) for x in steps):
+        hints.append("令牌很可能是「基础 Base」类型：WB 自 2026-03-30 起大幅降低了它的额度（图片约 30 分钟 1 张）。到 WB 后台 设置→接入 API 创建「个人 Персональный」令牌（权限勾选 内容、价格和折扣、市场），在 店铺管理→更换令牌 换上。")
     first = next((x for x in steps if x["name"].startswith("Content 连通（首次")), None)
     second = next((x for x in steps if x["name"].startswith("Content 连通（复用")), None)
     if first and second and second.get("ms", 0) > 3000:

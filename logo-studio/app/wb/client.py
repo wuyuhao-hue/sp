@@ -1,7 +1,7 @@
 """Wildberries 卖家 API 客户端（Content / Prices and Discounts / Marketplace）。
 
 - 鉴权：令牌原文直接放在 Authorization 头里（不加 Bearer）。
-- 节奏：按"店铺令牌指纹 + 接口分类"做最小请求间隔（本地保守节奏，不是 WB 官方额度）。
+- 节奏：ratelimit.py 里按「店铺令牌 + WB 限流分类」共享的令牌桶，额度按 WB 官方文档，并跟着响应头调整。
 - 429：优先读 X-Ratelimit-Retry / Retry-After；等待超过 60 秒时抛 RateLimited，由任务层决定何时继续。
 - 非幂等写（创建商品卡、恢复商品卡）：只发 1 次，失败或响应不确定时不重发，由上层按 vendorCode 回查。
 - 任何日志、异常里都不出现完整令牌。
@@ -16,17 +16,12 @@ import time
 
 import httpx
 
+from . import ratelimit
+
 CONTENT = os.environ.get("WB_CONTENT_API", "https://content-api.wildberries.ru")
 PRICES = os.environ.get("WB_PRICES_API", "https://discounts-prices-api.wildberries.ru")
 MARKET = os.environ.get("WB_MARKET_API", "https://marketplace-api.wildberries.ru")
 
-# 本地请求起点间隔（秒），参照原项目手册的保守节奏
-_SCALE = float(os.environ.get("WB_PACE_SCALE", "1"))  # 仅测试用
-INTERVAL = {k: v * _SCALE for k, v in
-            {"content_read": 0.72, "content_write": 6.2, "media": 1.0, "prices": 0.72, "market": 0.72}.items()}
-
-_locks: dict[str, threading.Lock] = {}
-_last: dict[str, float] = {}
 _glock = threading.Lock()
 LONG_WAIT = float(os.environ.get("WB_LONG_WAIT", "60"))  # 429 要等超过这个秒数：不在请求里干等，交给上架任务排期续传
 _cooldown: dict[str, float] = {}  # 被 WB 长时间限流的接口：冷却结束前本地直接拒绝，不再去撞 WB（撞多了限流会越来越长）
@@ -70,14 +65,7 @@ class WBClient:
 
     # ---------- 底层 ----------
     def _pace(self, bucket: str) -> None:
-        key = f"{self.fp}:{bucket}"
-        with _glock:
-            lk = _locks.setdefault(key, threading.Lock())
-        with lk:
-            wait = _last.get(key, 0) + INTERVAL[bucket] - time.time()
-            if wait > 0:
-                time.sleep(wait)
-            _last[key] = time.time()
+        ratelimit.acquire(self.fp, bucket)
 
     def _req(self, method: str, url: str, bucket: str, *, json=None, params=None, files=None, headers=None,
              timeout: float = 30, retries: int = 3, idempotent: bool = True):
@@ -90,6 +78,7 @@ class WBClient:
             self._pace(bucket)
             try:
                 r = _client().request(method, url, json=json, params=params, files=files, headers=h, timeout=timeout)
+                ratelimit.observe(self.fp, bucket, r.status_code, r.headers)
             except httpx.TransportError as e:
                 if not idempotent:
                     raise WBError(0, f"网络中断，结果不确定：{type(e).__name__}", ambiguous=True) from e
@@ -107,6 +96,9 @@ class WBClient:
                     info = " ".join([url.split("wildberries.ru")[-1].split("?")[0]] + [
                         f"{k[12:]}={r.headers[k]}" for k in ("X-Ratelimit-Retry", "X-Ratelimit-Limit", "X-Ratelimit-Remaining",
                                                             "X-Ratelimit-Reset") if r.headers.get(k)])
+                    if r.headers.get("X-Ratelimit-Limit") == "1" and wait > 600:
+                        info += (" · 额度只有 1 次、要等这么久：多半是「基础 Base」令牌（WB 自 2026-03-30 起大幅降低了它的额度）。"
+                                 "到 WB 后台 设置→接入 API 创建「个人 Персональный」令牌，在 店铺管理→更换令牌 换上即可恢复正常速度")
                     raise RateLimited(wait, info)
                 time.sleep(wait)
                 continue

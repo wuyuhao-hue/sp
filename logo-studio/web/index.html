@@ -363,7 +363,7 @@
           </div>
           <div class="row" style="justify-content:flex-end"><button class="btn primary" :disabled="!shopForm.token || shopBusy" @click="addShop">{{ shopBusy ? '验证中…' : '验证并绑定' }}</button></div>
         </div>
-        <div class="note">令牌只保存在本机 <b>data/shops.json</b>，页面和日志里只显示末 4 位。生成令牌时请勾选：<b>内容（Content）</b>、<b>价格和折扣（Prices）</b>、<b>市场（Marketplace）</b>，类型选「标准」（非只读）。以后接入线上服务器时，这里改成从服务器同步店铺。</div>
+        <div class="note">令牌只保存在本机 <b>data/shops.json</b>，页面和日志里只显示末 4 位。生成令牌时<b>类型选「个人 Персональный」</b>（自己电脑上用的程序就选它；「基础 Base」令牌自 2026-03-30 起额度很低，图片约 30 分钟才能传 1 张），权限勾选：<b>内容（Content）</b>、<b>价格和折扣（Prices）</b>、<b>市场（Marketplace）</b>，不要勾「只读」。以后接入线上服务器时，这里改成从服务器同步店铺。</div>
       </div>
     </div>
   </div>
