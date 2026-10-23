@@ -16,7 +16,7 @@ createApp({
   data: () => ({
     tab: 'products',
     products: [], logos: [], current: null, queue: [],
-    query: '', selected: [], skuSel: [], skuView: null, genLogo: null, genStyle: null, showRefs: false,
+    query: '', selected: [], skuSel: [], skuView: null, genLogo: null, logoPicked: false, genStyle: null, showRefs: false,
     styles: {}, batch: { logo_id: null, style: 'random', sku_scope: 'all' },
     settings: {}, shotTypes: {}, canLogoTypes: [], defaultShots: [], models: [],
     browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 7, 1];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 8, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -193,7 +193,16 @@ createApp({
     jobStatus(j) { return { running: `${j.done}/${j.total || '?'}`, done: '完成', failed: '失败', pending: '排队中' }[j.status]; },
 
     async loadProducts() { this.products = await api('/api/products'); },
-    async loadLogos() { this.logos = await api('/api/logos'); },
+    async loadLogos(selectNewest = false) {
+      const before = new Set(this.logos.map(l => l.id));
+      this.logos = await api('/api/logos');
+      // 默认印最新的 logo（之前默认「不印标」，忘了点 logo 就生成出没有 logo 的图）；刚上传的 logo 自动选上
+      const fresh = this.logos.filter(l => !before.has(l.id));
+      const newest = this.logos[this.logos.length - 1];
+      if (selectNewest && fresh.length) this.genLogo = fresh[fresh.length - 1].id;
+      else if (!this.logoPicked && newest && !this.logos.some(l => l.id === this.genLogo)) this.genLogo = newest.id;
+      if (this.genLogo && !this.logos.some(l => l.id === this.genLogo)) this.genLogo = null;
+    },
     async loadQueue() {
       this.listings = await api('/api/listings');
       this.qSel = this.qSel.filter(k => this.shownListings.some(l => this.lkey(l) === k));
@@ -798,7 +807,7 @@ createApp({
         fd.append('file', f); fd.append('name', f.name.replace(/\.[^.]+$/, ''));
         try { await api('/api/logos', { form: fd }); } catch (e) { this.toast(e.message, true); }
       }
-      await this.loadLogos();
+      await this.loadLogos(true);
       if (this.$refs.logoInput) this.$refs.logoInput.value = '';
     },
     async saveLogo(l, patch) { Object.assign(l, await api(`/api/logos/${l.id}`, { body: patch })); this.toast('已保存'); },

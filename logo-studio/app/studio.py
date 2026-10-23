@@ -485,16 +485,25 @@ def rerender_set(pid: str, sid: str) -> None:
 def _run(tasks: list[tuple[str, str, int]], job, finish: bool = True) -> None:
     n = max(1, min(int(store.get_settings().get("concurrency") or 3), 8))
     job.total += len(tasks)
+    def one(t):
+        if job.cancelled:  # 已取消：还没开始的图标成「已取消」，界面上不会一直转圈，可以单张重新生成
+            _update_image(*t, status="failed", error="已取消（没有生成），可点这张重新生成")
+            job.done += 1
+            return
+        _gen_one(*t, job)
     with ThreadPoolExecutor(max_workers=n) as ex:
-        list(ex.map(lambda t: _gen_one(*t, job) if not job.cancelled else None, tasks))
+        list(ex.map(one, tasks))
     if finish:
         _finish(tasks, job)
 
 
 def _finish(tasks: list[tuple[str, str, int]], job) -> None:
-    failed = sum(1 for pid, sid, i in tasks
-                 if next(x for x in store.get_product(pid)["sets"] if x["id"] == sid)["images"][i]["status"] == "failed")
-    job.finish(f"完成：成功 {len(tasks) - failed} 张" + (f"，失败 {failed} 张（可单张重试）" if failed else ""))
+    sts = [next(x for x in store.get_product(pid)["sets"] if x["id"] == sid)["images"][i] for pid, sid, i in tasks]
+    ok = sum(1 for im in sts if im["status"] == "done")
+    cancelled = sum(1 for im in sts if im["status"] == "failed" and (im.get("error") or "").startswith("已取消"))
+    failed = sum(1 for im in sts if im["status"] == "failed") - cancelled
+    job.finish(f"完成：成功 {ok} 张" + (f"，失败 {failed} 张（可单张重试）" if failed else "")
+               + (f"，已取消 {cancelled} 张（没有生成）" if cancelled else ""))
     job.note(calls_text(job))
 
 
@@ -585,6 +594,10 @@ def generate(pid: str, sku_names: list[str], logo_id: str | None, job, style: st
             fill_defaults(pid)
         except Exception as e:  # noqa: BLE001
             job.note(f"商品理解失败，直接按图生成：{str(e)[:100]}")
+    if logo:
+        job.note(f"印标：「{logo['name']}」（模板里勾了「印标」的图会印上）")
+    else:
+        job.note("这次没有选 logo（不印标），生成的图不会带 logo")
     n_logo = sum(1 for pid_, sid_, i in ai_tasks
                  for st_ in [next(x for x in store.get_product(pid_)["sets"] if x["id"] == sid_)] if st_["images"][i]["logo"])
     job.note(f"开始生成 {len(ai_tasks)} 张 AI 图：预计生图请求 {len(ai_tasks) + n_logo} 次"

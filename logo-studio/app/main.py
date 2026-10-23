@@ -1158,6 +1158,7 @@ def cancel(job_id: str):
     j = jobs.get(job_id)
     if j:
         j.cancelled = True
+        j.note("已取消：正在生成的会做完，还没开始的不再生成")
     return {"ok": True}
 
 
@@ -1342,6 +1343,27 @@ def _resume_wb():
 def _log_start():
     from . import runlog
     runlog.startup(VERSION)
+
+
+@app.on_event("startup")
+def _reset_stale_images():
+    """程序关掉时还在排队 / 生成中的图：标成「中断」，界面上不会一直转圈，点一下可以重新生成。"""
+    def fn(x):
+        for st in x.get("sets") or []:
+            hit = False
+            for im in st.get("images") or []:
+                if im.get("status") in ("pending", "running"):
+                    im.update(status="failed", error="程序关闭时还没生成完，可点这张重新生成")
+                    hit = True
+            if hit:
+                done = [i["status"] for i in st["images"]]
+                st["status"] = "failed" if all(s == "failed" for s in done) else "partial"
+    try:
+        for p in store.list_products():
+            if any(im.get("status") in ("pending", "running") for st in p.get("sets") or [] for im in st.get("images") or []):
+                store.update_product(p["id"], fn)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @app.on_event("startup")

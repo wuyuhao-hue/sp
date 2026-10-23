@@ -546,31 +546,69 @@ async function doPage(task) {
 }
 
 async function doImgSearch(task) {
-  // 以图搜 1688 同款。Ozon / WB 的图片在俄罗斯的服务器上，国内的 AiPrice / 1688 服务器往往下载不到，
-  // 所以除了传图片地址，还会像人一样把图片「上传」到搜索框（图片由工作台下载好、缩到 1024 再给过来）。顺序：
-  // ① AiPrice 接口（传地址）→ ② AiPrice 页面上传图片 → ③ 1688 以图搜页面上传图片 → ④ 1688 以图搜（传地址）
+  // 以图搜 1688 同款，都在后台采集标签页里像人一样操作：
+  // ① AiPrice 结果页（传图片地址，页面自己加载结果）→ ② 1688「以图搜款」上传图片（图片由工作台下载、缩到 1024）→ ③ 1688 传图片地址
   const { win, tab } = await workerTab();
   let candidates = [], source = '', notes = [];
   const b64 = task.image_b64 || await imageB64(task.image).catch(() => '');
   const goto = async url => { await navigate(tab, url); await waitUnblocked(win, tab); };
   const steps = [
+    // ① AiPrice 结果页（和人在 AiPrice 上搜一样，让页面自己加载 1688 结果）
     ['aiprice', async () => {
-      const cur = (await chrome.tabs.get(tab)).url || '';
-      if (!cur.includes('aiprice.com')) await goto('https://www.aiprice.com/img/search');
-      const r = await exec(tab, pageAiprice, [task.image], 60000);
-      if (!(r && r.html)) throw new Error((r && r.error) || '没有返回页面');
-      const c = await exec(tab, pageCandidates, [r.html]);
-      if (!c.length) debugSave('aiprice-api-' + (task.unit || ''), r.html);
-      return c;
+      await goto('https://www.aiprice.com/img/search_detail?image=' + encodeURIComponent(task.image));
+      return await waitResults('aiprice', 40);
     }],
-    ['aiprice-upload', async () => uploadSearch('https://www.aiprice.com/img/search', 'aiprice-upload')],
-    ['1688-upload', async () => uploadSearch('https://s.1688.com/youyuan/index.htm?tab=imageSearch', '1688-upload')],
+    // ② 1688 以图搜：把图片放进「以图搜款」上传框 → 1688 返回图片编号 → 打开这个编号的搜索结果页
     ['1688', async () => {
+      if (!b64) throw new Error('没拿到图片数据');
+      await goto('https://s.1688.com/youyuan/index.htm?tab=imageSearch');
+      const up = await exec(tab, pageUpload, [b64], 30000);
+      elog('1688 上传图片', up || {});
+      if (!up || !up.ok) throw new Error((up && up.error) || '上传失败');
+      let imageId = '';
+      for (let i = 0; i < 20 && !imageId; i++) {
+        await sleep(1000);
+        imageId = await exec(tab, pageImageId, [], 10000).catch(() => '');
+        if (!imageId) {   // 有的版本上传后直接在页面上出结果
+          const c = await exec(tab, pageCandidates, [null], 10000).catch(() => []);
+          const n = await exec(tab, pageNetCandidates, ['1688'], 10000).catch(() => []);
+          if ((c && c.length) || (n && n.length)) return (c && c.length) ? c : n;
+        }
+      }
+      if (!imageId) { await saveDiag('1688-noid'); throw new Error('1688 没有返回图片编号'); }
+      elog('1688 图片编号', { imageId });
+      await goto(`https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageId=${imageId}&imageIdList=${imageId}`);
+      return await waitResults('1688', 30);
+    }],
+    // ③ 1688 以图搜（传图片地址，国内往往下载不到俄罗斯的图，放最后）
+    ['1688-url', async () => {
       await goto('https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(task.image));
-      await exec(tab, pageScrollAndCollect, [], 30000).catch(() => {});
-      return await exec(tab, pageCandidates, [null], 30000);
+      return await waitResults('1688', 20);
     }],
   ];
+  async function saveDiag(name) {
+    const diag = await exec(tab, pageNetDiag, [], 15000).catch(e => ({ error: String(e) }));
+    debugSave(name + '-net-' + (task.unit || ''), JSON.stringify(diag, null, 1));
+    debugSave(name + '-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
+    return diag;
+  }
+  // 等页面把结果画出来：页面上的商品链接，或页面请求到的接口数据，哪个先有用哪个
+  async function waitResults(site, secs) {
+    for (let i = 0; i < secs; i++) {
+      await sleep(1000);
+      try {
+        const c = await exec(tab, pageCandidates, [null], 10000);
+        if (c && c.length) return c;
+        const n = await exec(tab, pageNetCandidates, [site], 10000);
+        if (n && n.length) return n;
+        const end = await exec(tab, () => /暂无相关产品结果|分析失败|空空如也|没有找到/.test(document.body ? document.body.innerText : ''), [], 5000);
+        if (end && i > 5) break;
+      } catch (e) { /* 页面在跳转，等一下再读 */ }
+    }
+    const d = await saveDiag(site);
+    elog('以图搜页面没有结果', { site, href: d.href, requests: (d.net || []).length, broken: d.broken });
+    return [];
+  }
   async function uploadSearch(url, name) {
     if (!b64) throw new Error('没拿到图片数据');
     await goto(url);
@@ -617,6 +655,65 @@ async function imageB64(url) {
   let bin = '';
   for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
   return 'data:' + (r.headers.get('content-type') || 'image/jpeg') + ';base64,' + btoa(bin);
+}
+
+// 1688 上传图片后，接口返回的图片编号（imageId）
+function pageImageId() {
+  const bodies = (window.__lsNetFull || []).map(x => x.body);
+  try { for (const x of JSON.parse(sessionStorage.getItem('__lsNet') || '[]')) bodies.push(x.body || ''); } catch (e) { /* 忽略 */ }
+  for (const b of bodies.reverse()) {
+    const m = String(b || '').match(/"imageId"\s*:\s*"?(\d{6,25})/);
+    if (m) return m[1];
+  }
+  const u = location.href.match(/imageId=(\d{6,25})/);
+  return u ? u[1] : '';
+}
+
+// 从页面请求到的接口数据里找 1688 商品（编号 + 图 + 标题 + 价格）。AiPrice 只认 1688 商品链接 / offerId，不会把淘宝等其他平台的当成 1688
+function pageNetCandidates(site) {
+  const out = [], seen = new Set();
+  const parse = t => {
+    try { return JSON.parse(t); } catch (e) { /* 可能是 JSONP */ }
+    const m = String(t).match(/^\s*[\w$.]+\s*\(([\s\S]*)\)\s*;?\s*$/);
+    if (m) { try { return JSON.parse(m[1]); } catch (e) { /* 不是 JSON */ } }
+    return null;
+  };
+  const scal = v => (typeof v === 'string' || typeof v === 'number') ? String(v) : '';
+  const fix = u => u.startsWith('//') ? 'https:' + u : u;
+  const pick = (o, out2) => {
+    for (const [k, v] of Object.entries(o)) {
+      const sv = scal(v);
+      if (!sv) continue;
+      if (!out2.img && /img|image|pic/i.test(k) && /^(https?:)?\/\//.test(sv)) out2.img = fix(sv);
+      if (!out2.title && /title|subject|name/i.test(k) && sv.length > 3 && !/^(https?:)?\/\//.test(sv)) out2.title = sv.replace(/<[^>]+>/g, '');
+      if (out2.price == null && /price/i.test(k) && /^\d+(\.\d+)?$/.test(sv)) out2.price = Number(sv);
+    }
+  };
+  const walk = (o, d) => {
+    if (!o || typeof o !== 'object' || d > 16 || out.length >= 30) return;
+    if (Array.isArray(o)) { for (const x of o) walk(x, d + 1); return; }
+    let id = '';
+    for (const [k, v] of Object.entries(o)) {
+      const sv = scal(v);
+      if (!sv) continue;
+      const m = sv.match(/detail\.1688\.com\/offer\/(\d{8,15})/) || sv.match(/[?&]offer[_-]?[iI]d=(\d{8,15})/);
+      if (m) { id = m[1]; break; }
+      if (/^offer[_-]?id$/i.test(k) && /^\d{8,15}$/.test(sv)) id = sv;
+      if (!id && site === '1688' && /^(id|itemId|nid)$/.test(k) && /^\d{10,15}$/.test(sv)) id = sv;
+    }
+    if (id && !seen.has(id)) {
+      const info = { img: '', title: '', price: null };
+      pick(o, info);
+      for (const v of Object.values(o)) if (v && typeof v === 'object' && !Array.isArray(v)) pick(v, info);
+      if (info.img || info.title) {
+        seen.add(id);
+        out.push({ offer_id: id, image: info.img, title: (info.title || '').slice(0, 80), price: info.price });
+      }
+    }
+    for (const v of Object.values(o)) if (v && typeof v === 'object') walk(v, d + 1);
+  };
+  for (const x of (window.__lsNetFull || [])) { const j = parse(x.body); if (j) walk(j, 0); }
+  return out.slice(0, 20);
 }
 
 // 上传后的页面诊断：当前地址、裂开的图片地址、页面请求过的资源、上传时记录下来的接口请求和返回

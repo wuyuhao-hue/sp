@@ -24,7 +24,7 @@
       <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
     </div>
     <div class="spacer"></div>
-    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.7.1（登录检测、WB / Ozon 采集、找同款需要）</span>
+    <span class="pill" v-if="extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.8.0（登录检测、WB / Ozon 采集、找同款需要）</span>
     <div class="login-wrap" v-if="needLogin.length" @mouseleave="showLogin=false">
       <button class="pill login-pill" @click="showLogin=!showLogin"><i class="dot warn"></i>需要登录 {{ needLogin.length }} 个平台</button>
       <transition name="pop">
@@ -348,8 +348,8 @@
         <div class="sec">
           <h3>Logo <button class="btn sm ghost" @click="tab='logos'">管理</button></h3>
           <div class="logo-grid">
-            <div class="logo-tile none" :class="{on: !genLogo}" @click="genLogo=null"><div class="pv checker">不印</div><div class="nm">不印标</div></div>
-            <div v-for="l in logos" :key="l.id" class="logo-tile" :class="{on: genLogo===l.id}" @click="genLogo=l.id">
+            <div class="logo-tile none" :class="{on: !genLogo}" @click="genLogo=null; logoPicked=true"><div class="pv checker">不印</div><div class="nm">不印标</div></div>
+            <div v-for="l in logos" :key="l.id" class="logo-tile" :class="{on: genLogo===l.id}" @click="genLogo=l.id; logoPicked=true">
               <div class="pv checker"><img :src="logoUrl(l)"></div><div class="nm">{{ l.name }}</div>
             </div>
           </div>
