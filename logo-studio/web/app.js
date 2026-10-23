@@ -21,7 +21,7 @@ createApp({
     browserState: { state: 'idle', message: '' }, ext: {}, jobs: [], hiddenJobs: [],
     extInstalled: !!document.documentElement.getAttribute('data-logo-studio-ext'),
     showScrape: false, scrapeForm: { links: '', shops: '', max_pages: 5 },
-    generating: false, analyzing: false, lightbox: null, qSel: [],
+    generating: false, analyzing: false, readingSize: false, lightbox: null, qSel: [],
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
   }),
   computed: {
@@ -159,8 +159,8 @@ createApp({
       e.target.value = '';
       if (!id) return;
       const name = (this.logos.find(l => l.id === id) || {}).name;
-      const n = st.images.filter(i => i.logo).length;
-      if (!confirm(`用「${name}」生成一套新图？只重做 ${n} 张印标图，其余 ${st.images.length - n} 张直接复用。`)) return;
+      const n = st.images.filter(i => i.place || (i.logo && !i.base)).length;
+      if (!confirm(`用「${name}」生成一套新图？衣服底图全部沿用，只有 ${n} 张需要重新印胸口 logo，其余在本地处理。`)) return;
       try {
         this.jobs.unshift(await api(`/api/products/${this.current.id}/sets/${st.id}/swap`, { body: { logo_id: id } }));
         setTimeout(this.refreshCurrent, 600);
@@ -207,6 +207,12 @@ createApp({
     async saveInfo(patch) {
       try { this.current = await api(`/api/products/${this.current.id}/info`, { body: patch }); }
       catch (e) { this.toast(e.message, true); }
+    },
+    async readSizeTable() {
+      this.readingSize = true;
+      try { this.current = await api(`/api/products/${this.current.id}/size-table`, { body: {} }); this.toast('已读取尺码表，可以在下面检查修改'); }
+      catch (e) { this.toast(e.message, true); }
+      this.readingSize = false;
     },
     async analyze() {
       this.analyzing = true;
@@ -298,6 +304,7 @@ createApp({
       const r = await api('/api/settings/test', { body: {} });
       this.testMsg = r.message;
       this.models = r.models || [];
+      if (r.suggest_text_model && !this.settings.text_model) this.settings.text_model = r.suggest_text_model;
     },
     async addStyleRef(e) {
       const f = e.target.files[0];

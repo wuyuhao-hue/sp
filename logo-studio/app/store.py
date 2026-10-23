@@ -22,31 +22,36 @@ _lock = threading.RLock()
 
 # 套图模板里可选的图片类型
 SHOT_TYPES = {
-    "hero": "卖点首图（商品+标题+卖点图标）",
-    "hero_model": "卖点首图（模特版）",
+    "hero": "首图：正面（隐形人台）+ 左上 logo / 尺码 / 颜色圆点 / 底部大字",
+    "back_overlay": "背面（隐形人台）+ 左上 logo / 尺码 / 颜色圆点 / 底部大字",
+    "open_lining": "敞开展示内衬 + 底部大字",
+    "material_info": "面料/保暖特写 + 俄语标题说明 + 图标",
+    "material_tech": "面料工艺特写（防水/面料质感）+ 俄语说明",
+    "detail_collage": "细节特写拼图（拉链/口袋/袖口）",
+    "flat_front": "正面平铺/挂拍（无文字）",
+    "side_ghost": "侧面 45°（隐形人台，无文字）",
+    "detail_fabric": "面料微距（无文字）",
+    "back_info": "背面 + AI 写的标题文字",
+    "hero_ai_text": "首图：AI 写卖点文字版",
     "model_front": "模特正面",
     "model_side": "模特侧面",
     "model_back": "模特背面",
-    "back_info": "背面图+标题文字",
-    "flat_front": "平铺/挂拍正面（无模特）",
-    "material_info": "面料/填充特写+说明文字",
-    "detail_collage": "细节拼图（大图+3个局部+说明）",
-    "detail_fabric": "面料特写（无文字）",
-    "lifestyle": "街拍场景",
+    "hero_model": "首图：模特版",
+    "lifestyle": "模特街拍",
 }
 
-# 推荐模板（参照 WB 头部商品）。张数选 6 时用前 6 个；尺码表另外固定加在每套最后，不占张数
+# 推荐模板（参照 WB 头部商品，不用模特）。张数选 6 时用前 6 个；尺码表另外固定加在每套最后，不占张数
 DEFAULT_SHOTS = [
     {"type": "hero", "logo": True, "extra": ""},
-    {"type": "model_front", "logo": True, "extra": ""},
-    {"type": "back_info", "logo": False, "extra": ""},
+    {"type": "back_overlay", "logo": False, "extra": ""},
+    {"type": "open_lining", "logo": False, "extra": ""},
     {"type": "material_info", "logo": False, "extra": ""},
+    {"type": "material_tech", "logo": False, "extra": ""},
     {"type": "detail_collage", "logo": False, "extra": ""},
-    {"type": "model_side", "logo": False, "extra": ""},
     {"type": "flat_front", "logo": True, "extra": ""},
-    {"type": "lifestyle", "logo": False, "extra": ""},
+    {"type": "side_ghost", "logo": True, "extra": ""},
 ]
-SHOTS_VERSION = 3
+SHOTS_VERSION = 4
 
 DEFAULT_SETTINGS = {
     "api_base": "",
@@ -62,6 +67,11 @@ DEFAULT_SETTINGS = {
     "shots": DEFAULT_SHOTS,
     "shots_version": SHOTS_VERSION,
     "size_chart_auto": True,   # 每套最后自动加一张本地生成的尺码表
+    "logo_mode": "ai_crop",    # ai_crop：AI 定位 + 胸口放大由 AI 印（推荐）/ exact：本地贴原图 / ai：AI 整张直接画
+    "overlay_logo": True,      # 首图/背面图左上角放品牌 logo
+    "overlay_size": True,      # 尺码标
+    "overlay_swatches": True,  # 右侧颜色圆点
+    "overlay_word": True,      # 底部半透明大字
     "copy_lang": "ru",         # 首图卖点文字语言
     "style_refs": [],          # 风格参考图文件名（data/style_refs/ 下）
     "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）

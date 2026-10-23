@@ -101,19 +101,25 @@ def _fetch_result(raw_url_or_b64: str) -> bytes:
     return r.content
 
 
-def _via_edits(c: httpx.Client, s: dict, images: list[Image.Image], prompt: str) -> bytes:
+def _via_edits(c: httpx.Client, s: dict, images: list[Image.Image], prompt: str, size: str | None = None,
+               fidelity: bool = False) -> bytes:
     """标准图片编辑接口：multipart 上传多张参考图。"""
     data = {"model": s["image_model"], "prompt": prompt, "n": "1"}
-    if s.get("image_size"):
-        data["size"] = s["image_size"]
+    if size or s.get("image_size"):
+        data["size"] = size or s["image_size"]
+    if fidelity:
+        data["input_fidelity"] = "high"  # 尽量保留输入图细节（logo、文字）
     if s.get("image_quality"):
         data["quality"] = s["image_quality"]
     blobs = [(f"ref{i}.png", _png(im), "image/png") for i, im in enumerate(images)]
     r = None
     for field in ("image[]", "image"):  # 官方多图字段是 image[]；部分中转站只认 image
-        for attempt in range(2):
+        for attempt in range(3):
             r = c.post("/images/edits", data=data, files=[(field, b) for b in blobs])
-            if r.status_code == 400 and "size" in r.text.lower() and "size" in data and attempt == 0:
+            if r.status_code == 400 and "input_fidelity" in r.text and "input_fidelity" in data:
+                data.pop("input_fidelity")  # 中转站不支持这个参数
+                continue
+            if r.status_code == 400 and "size" in r.text.lower() and "size" in data and attempt < 2:
                 data.pop("size")  # 不支持竖版尺寸：用默认尺寸，之后裁成 3:4
                 continue
             break
@@ -157,7 +163,7 @@ def _via_chat(c: httpx.Client, s: dict, images: list[Image.Image], prompt: str) 
     raise RuntimeError("对话接口没有返回图片：" + text[:200])
 
 
-def edit_images(images: list[Image.Image], prompt: str) -> Image.Image:
+def edit_images(images: list[Image.Image], prompt: str, size: str | None = None, fidelity: bool = False) -> Image.Image:
     """多张参考图 + 文字要求 → 一张新图。自动适配中转站支持的方式，并记住能用的那种。"""
     s = store.get_settings()
     mode = s.get("image_api") or "auto"
@@ -168,7 +174,7 @@ def edit_images(images: list[Image.Image], prompt: str) -> Image.Image:
     with _client() as c:
         for m in order:
             try:
-                raw = (_via_edits if m == "edits" else _via_chat)(c, s, images, prompt)
+                raw = _via_edits(c, s, images, prompt, size, fidelity) if m == "edits" else _via_chat(c, s, images, prompt)
             except RuntimeError as e:
                 errors.append(f"[{'图片编辑接口' if m == 'edits' else '对话接口'}] {e}")
                 # 鉴权/余额/限流问题换接口也没用
@@ -211,10 +217,66 @@ Return ONLY a JSON object with these keys:
 - "selling_points_ru": 4 short Russian selling points (2-4 words each) based on real features (fabric, warmth, waterproofing, fit, hood, pockets...)
 - "selling_points_cn": the same 4 points in Chinese
 - "title_ru": a Wildberries-style Russian product title (max 60 characters), no brand names
+- "big_word_ru": ONE short Russian word for the garment type, as shown big on Wildberries images (e.g. "Пуховик", "Куртка", "Ветровка", "Худи", "Свитер", "Жилет")
 - "size_table": if any image contains a size chart, copy it EXACTLY as {{"header": [...], "rows": [[...], ...]}} with the
   column names translated to short Russian (e.g. "Размер", "Длина", "Обхват груди", "Ширина плеч", "Длина рукава",
   "Рост, см", "Вес, кг"); keep every number exactly as written, one row per size; otherwise null
 """
+
+
+SIZE_PROMPT = """These images are the detail pages of a clothing product from 1688 (Chinese). One of them may contain a
+size chart (尺码表 / 尺寸表 / 参数) — a table with sizes (S/M/L/XL/2XL..., or numbers) and measurements in cm (衣长, 胸围,
+肩宽, 袖长, 身高, 体重...).
+Sizes sold: {sizes}
+If you find a size chart, return ONLY JSON: {{"image_index": <1-based index of that image>, "header": [...], "rows": [[...], ...]}}
+- Translate column names to short Russian: Размер, Длина, Обхват груди, Ширина плеч, Длина рукава, Обхват талии, Длина брюк,
+  Рост, см, Вес, кг (weight in 斤 must be converted to kg by dividing by 2, and the column named "Вес, кг").
+- Copy every other number EXACTLY as written, one row per size, in the same order as the chart.
+If there is no size chart, return ONLY {{"header": null, "rows": null}}."""
+
+# 能看图的对话模型，按优先级（便宜够用的在前）
+VISION_CANDIDATES = ["gpt-4o-mini", "gpt-4.1-mini", "gpt-5-mini", "gemini-2.5-flash", "gemini-2.0-flash", "gpt-4o",
+                     "gpt-4.1", "gpt-5", "qwen-vl-max", "qwen2.5-vl-72b-instruct", "claude-sonnet-4", "glm-4v"]
+
+
+def suggest_vision_model(models: list[str]) -> str:
+    low = {m.lower(): m for m in models}
+    for c in VISION_CANDIDATES:
+        for k, m in low.items():
+            if k == c or k.startswith(c + "-"):
+                return m
+    return ""
+
+
+def _chat_json(model: str, content: list[dict], timeout: float = 180) -> dict:
+    with _client(timeout) as c:
+        r = c.post("/chat/completions", json={"model": model, "temperature": 0.1,
+                                              "messages": [{"role": "user", "content": content}]})
+        if r.status_code >= 400:
+            raise _error(r)
+        text = r.json()["choices"][0]["message"]["content"] or ""
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        raise RuntimeError("模型没有返回有效结果：" + text[:150])
+    return json.loads(m.group(0))
+
+
+def extract_size_table(detail_srcs: list[str], sizes: list[str]) -> dict | None:
+    """把所有详情图一次发给看图模型，只找尺码表并照抄数字。"""
+    s = store.get_settings()
+    if not s.get("text_model"):
+        raise RuntimeError("需要在「设置」里填一个能看图的「商品理解模型」才能自动读取尺码表")
+    content: list[dict] = [{"type": "text", "text": SIZE_PROMPT.format(sizes=", ".join(sizes) or "-")}]
+    for i, src in enumerate(detail_srcs[:24]):
+        try:
+            content.append({"type": "text", "text": f"Image {i + 1}:"})
+            content.append({"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + _jpeg_b64(load_image(src, 1600), 1000)}})
+        except Exception:  # noqa: BLE001
+            continue
+    res = _chat_json(s["text_model"], content)
+    if not res.get("header") or not res.get("rows"):
+        return None
+    return {"header": [str(x) for x in res["header"]], "rows": [[str(x) for x in r] for r in res["rows"]]}
 
 
 def analyze(title: str, skus: list[str], sizes: list[str], image_srcs: list[str]) -> dict:

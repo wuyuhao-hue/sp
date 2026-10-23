@@ -103,7 +103,11 @@ def products():
 
 @app.get("/api/products/{pid}")
 def product(pid: str):
-    return _product_or_404(pid)
+    p = _product_or_404(pid)
+    info = p.get("ai") or {}
+    if "big_word" not in info or "size_label" not in info:
+        p = studio.fill_defaults(pid)
+    return p
 
 
 @app.delete("/api/products/{pid}")
@@ -155,7 +159,7 @@ def update_info(pid: str, patch: dict = Body(...)):
     """手动修改 AI 商品理解结果（卖点、俄语标题、模特性别等）。改过的字段之后不会被 AI 覆盖。"""
     _product_or_404(pid)
     keys = ("title_ru", "selling_points_ru", "selling_points_cn", "selling_points_en", "gender", "description_en",
-            "category_en", "size_table")
+            "category_en", "size_table", "big_word", "size_label")
     if isinstance(patch.get("size_table"), str):
         from .sizechart import parse_table
 
@@ -168,6 +172,31 @@ def update_info(pid: str, patch: dict = Body(...)):
             if k in patch:
                 info[k] = patch[k]
                 edited[k] = True
+    p = store.update_product(pid, fn)
+    if "big_word" in patch or "size_label" in patch:  # 首图叠加层变了：已生成的套图在本地重新叠加
+        for st in p.get("sets") or []:
+            if st.get("status") != "running":
+                studio.rerender_set(pid, st["id"])
+        p = store.get_product(pid)
+    return p
+
+
+@app.post("/api/products/{pid}/size-table")
+def read_size_table(pid: str):
+    p = _product_or_404(pid)
+    if not p.get("detail_images"):
+        raise HTTPException(400, "这个商品没有详情图，请重新采集或手动填写尺码表")
+    try:
+        table = ai.extract_size_table(p["detail_images"], p.get("sizes") or [])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, str(e)) from e
+    if not table:
+        raise HTTPException(400, "详情图里没有找到尺码表，请手动填写")
+
+    def fn(x):
+        info = x.setdefault("ai", {})
+        info["size_table"] = table
+        info.setdefault("edited", {}).pop("size_table", None)
     return store.update_product(pid, fn)
 
 
@@ -203,7 +232,7 @@ def swap(pid: str, sid: str, logo_id: str = Body(..., embed=True)):
         raise HTTPException(400, "这套图还在生成中")
     if not store.get_logo(logo_id):
         raise HTTPException(404, "logo 不存在")
-    if not any(im.get("logo") for im in st["images"]):
+    if not any(im.get("logo") or im.get("base") for im in st["images"]):
         raise HTTPException(400, "这套图没有印标位（生成时没有选 logo），请直接选新 logo 重新生成")
     job = jobs.Job("generate", f"换标：{st['sku']} → {store.get_logo(logo_id)['name']}")
     jobs.run_in_thread(job, studio.swap_logo, pid, sid, logo_id)
@@ -230,6 +259,13 @@ def add_size_chart(pid: str, sid: str):
     job = jobs.Job("generate", f"尺码表：{st['sku']}")
     jobs.run_in_thread(job, studio.size_chart, pid, sid)
     return job.to_dict()
+
+
+@app.post("/api/products/{pid}/sets/{sid}/rerender")
+def rerender(pid: str, sid: str):
+    _set(_product_or_404(pid), sid)
+    studio.rerender_set(pid, sid)
+    return store.get_product(pid)
 
 
 @app.post("/api/products/{pid}/sets/{sid}/queue")
@@ -442,11 +478,14 @@ def test_settings():
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "message": str(e), "models": []}
     msg = f"连接成功，共 {len(models)} 个模型。"
+    suggest = "" if s.get("text_model") else ai.suggest_vision_model(models)
+    if suggest:
+        msg += f"已为「商品理解模型」填入 {suggest}（用于读取尺码表、写卖点），确认后点「保存设置」。"
     if models and s["image_model"] not in models:
         msg += f"注意：生图模型「{s['image_model']}」不在列表里，请检查名称。"
     if s.get("text_model") and models and s["text_model"] not in models:
         msg += f"注意：商品理解模型「{s['text_model']}」不在列表里。"
-    return {"ok": True, "message": msg, "models": models}
+    return {"ok": True, "message": msg, "models": models, "suggest_text_model": suggest}
 
 
 # ---------------- 静态文件 ----------------
