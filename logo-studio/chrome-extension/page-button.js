@@ -18,7 +18,7 @@
       const ok = resp && resp.ok;
       btn.style.background = ok ? '#10b981' : '#ef4444';
       btn.textContent = (resp && resp.message) || '发送失败，请确认 AI 套图工作台已启动';
-      setTimeout(reset, 3500);
+      setTimeout(reset, 6000);
     });
   });
   document.body.appendChild(btn);

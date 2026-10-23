@@ -316,6 +316,7 @@ async function loop() {
           await sleep(rand(delay, delay * 2) * 1000);
         } else if (task.kind === 'shop') await doShop(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
+        else throw new Error('采集助手不认识这个任务（' + task.kind + '），请更新采集助手');
       } catch (e) {
         await post('/api/ext/result', { task_id: task.id, ok: false, data: { error: String((e && e.message) || e) } }).catch(() => {});
       }

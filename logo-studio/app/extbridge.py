@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +22,12 @@ _workers = ThreadPoolExecutor(max_workers=2)
 state = {"last_seen": 0.0, "version": "", "status": "", "message": ""}
 _manual_job: jobs.Job | None = None
 TASK_TIMEOUT = 15 * 60  # 等人机验证最多 15 分钟
+NEED_VERSION = {"page": (1, 3, 0)}  # 拼多多 / Ozon 采集需要的采集助手版本
+UPDATE_HINT = "打开 chrome://extensions，找到「采集助手」点刷新按钮（↻），再刷新一下工作台页面"
+
+
+def _ver(v: str) -> tuple:
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:3]) or (0,)
 
 
 def connected() -> bool:
@@ -52,15 +59,28 @@ def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
     with _lock:
         for s in shops:
             _new_task(job, "shop", url=s, max_pages=max_pages)
-        _enqueue_offers(job, ids)
-        for x in others:  # 拼多多 / Ozon：一律进「采集上架」
+        for x in others:  # 拼多多 / Ozon：一律进「采集上架」。必须先排进队列，再处理 1688（否则只有拼多多/Ozon 链接时任务会被提前结束）
             job.total += 1
             _new_task(job, "page", platform=x["platform"], item_id=x["id"], url=x["url"])
+        _enqueue_offers(job, ids)
+    _watch(job)
     if not ids and not shops and not others:
         job.fail("没有识别到商品链接")
     elif not connected():
         job.note("等待 Chrome 采集助手连接…（请确认已安装扩展，并打开过一次本页面）")
     return job
+
+
+def _watch(job: jobs.Job, wait: float = 45) -> None:
+    """发出去的任务 45 秒都没人领：多半是 Chrome 没开 / 采集助手被停用，告诉用户，而不是一直没动静。"""
+    def check():
+        time.sleep(wait)
+        with _lock:
+            waiting = any(t["job_id"] == job.id for t in _queue)
+        if waiting and job.status == "running":
+            job.note("采集助手 45 秒都没有来领任务：请确认 Chrome 开着、采集助手已启用（chrome://extensions），"
+                     "并且在 Chrome 里打开过一次工作台页面")
+    threading.Thread(target=check, daemon=True).start()
 
 
 def start_tabs_job() -> jobs.Job:
@@ -85,7 +105,10 @@ def _enqueue_offers(job: jobs.Job, ids: list[str], skip_existing: bool = False) 
 def _maybe_finish(job: jobs.Job) -> None:
     pending = any(t["job_id"] == job.id for t in _queue) or any(t["job_id"] == job.id for t in _active.values())
     if not pending and job.status == "running" and getattr(job, "inflight", 0) == 0:
-        job.finish(f"采集完成：新增 {len(job.results)} 个" + (f"（共 {job.total} 个）" if job.total else ""))
+        if getattr(job, "is_match", False):
+            job.finish("货源绑定完成")
+        else:
+            job.finish(f"采集完成：新增 {len(job.results)} 个" + (f"（共 {job.total} 个）" if job.total else ""))
 
 
 def next_task(version: str = "") -> dict | None:
@@ -109,6 +132,14 @@ def next_task(version: str = "") -> dict | None:
                 if j and j.status == "running":
                     j.note("已取消")
                     _maybe_finish(j)
+                continue
+            need = NEED_VERSION.get(t["kind"])
+            if need and _ver(state["version"]) < need:
+                # 旧版采集助手不认识这类任务：不派给它（否则它会悄悄丢掉，界面一直没动静），直接说明原因
+                j.note(f"✗ {sources.PLATFORM_NAME.get(t.get('platform'), '')} {t.get('item_id', '')}：采集助手版本太旧"
+                       f"（{state['version'] or '未知'}），拼多多 / Ozon 需要 {'.'.join(map(str, need))} 以上。{UPDATE_HINT}")
+                j.done += 1
+                _maybe_finish(j)
                 continue
             t["taken"] = time.time()
             _active[t["id"]] = t
@@ -219,6 +250,7 @@ def enqueue_match(pid: str, offer_id: str) -> jobs.Job:
     job = jobs.Job("scrape", f"读取 1688 货源 {offer_id}")
     job.status = "running"
     job.total = 1
+    job.is_match = True
     with _lock:
         _new_task(job, "offer", offer_id=offer_id, url=f"https://detail.1688.com/offer/{offer_id}.html", match_for=pid)
     if not connected():

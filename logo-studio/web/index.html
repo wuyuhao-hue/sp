@@ -20,8 +20,8 @@
       <button :class="{on: tab==='settings'}" @click="tab='settings'">设置</button>
     </nav>
     <div class="mode-switch" title="采集印标：AI 生成套图并印你的 logo；采集上架：1688 / 拼多多 / Ozon 采集后用原图直接上架">
-      <button :class="{on: workMode==='logo'}" @click="setMode('logo')">采集印标</button>
-      <button :class="{on: workMode==='direct'}" @click="setMode('direct')">采集上架</button>
+      <button :class="{on: workMode==='logo'}" @click="setMode('logo')"><i class="dot-m"></i>采集印标</button>
+      <button :class="{on: workMode==='direct'}" @click="setMode('direct')"><i class="dot-m"></i>采集上架</button>
     </div>
     <div class="spacer"></div>
     <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.3.0（拼多多 / Ozon 需要）</span>
@@ -331,76 +331,53 @@
   </main>
 
   <!-- ================= 待上架 ================= -->
-  <main class="workspace queue-ws" v-if="tab==='queue'">
-    <aside class="sidebar q-side">
-      <!-- 当前店铺 -->
-      <div class="shop-card" v-if="shops.length">
+  <main class="page" v-if="tab==='queue'">
+    <div class="page-inner" style="max-width:1440px">
+      <div class="row between" style="align-items:flex-start">
+        <div><h1>待上架</h1><div class="sub">同一个商品 + 同一个 logo（或同一个货源）合成一张 WB 商品卡，每个颜色是卡里的一个款式。填好资料 → 预检 → 上架。</div></div>
         <div class="row">
-          <div class="shop-avatar">{{ (shopName(shopCurrent) || '?').slice(0, 1) }}</div>
-          <div class="grow">
-            <div class="faint">当前店铺（上架到这里）</div>
-            <select class="shop-select" :value="shopCurrent" @change="setCurrentShop($event.target.value)">
-              <option v-for="s in shops" :key="s.id" :value="s.id">{{ s.name }}</option>
-            </select>
+          <span class="faint">店铺</span>
+          <select class="input" style="width:180px" :value="shopCurrent" @change="setCurrentShop($event.target.value)" v-if="shops.length">
+            <option v-for="s in shops" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <button class="btn" @click="openShops">店铺管理</button>
+        </div>
+      </div>
+
+      <div class="note" style="margin-top:16px" v-if="!shops.length">
+        <b>还没有绑定 WB 店铺。</b>点右上角「店铺管理」→ 填写店铺名和 WB 卖家后台生成的 API 令牌（类型选「个人 Персональный」，勾选 内容 Content、价格和折扣 Prices、市场 Marketplace 三个权限）。
+        令牌只保存在这台电脑的 data/shops.json 里。
+      </div>
+
+      <div class="logo-tabs" v-if="listingLogos.length > 1">
+        <button :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]">全部 <span>{{ facetCount('logo', '') }}</span></button>
+        <button v-for="g in listingLogos" :key="g.key" :class="{on: qLogo===g.key}" @click="qLogo=g.key; qSel=[]">
+          <img v-if="g.img" :src="g.img">{{ g.name }} <span>{{ facetCount('logo', g.key) }}</span></button>
+      </div>
+      <div class="row between q-bar" v-if="listings.length">
+        <div class="row wrap">
+          <span class="row" style="cursor:pointer" @click="qSel = qSel.length === shownListings.length ? [] : shownListings.map(lkey)"><i class="check" :class="{on: shownListings.length && qSel.length === shownListings.length}"></i><span class="faint">全选（{{ qSel.length }}/{{ shownListings.length }}）</span></span>
+          <div class="seg" style="margin-left:10px">
+            <button v-for="(n, k) in {all: '全部', todo: '未上架', running: '上架中', uploaded: '已上架', failed: '失败'}" :key="k" :class="{on: qFilter===k}" @click="qFilter=k; qSel=[]">{{ n }} {{ facetCount('status', k) }}</button>
           </div>
+          <select class="input sm" v-if="otherShops.length" v-model="qShopF" @change="qSel=[]" title="按在其他店铺的上架情况筛选">
+            <option value="">其他店铺：不限</option>
+            <template v-for="s in otherShops" :key="s.id">
+              <option :value="'off:' + s.id">还没上到「{{ s.name }}」（{{ facetCount('shop', 'off:' + s.id) }}）</option>
+              <option :value="'on:' + s.id">已上到「{{ s.name }}」（{{ facetCount('shop', 'on:' + s.id) }}）</option>
+            </template>
+          </select>
+          <select class="input sm" v-if="listingSubjects.length > 1" v-model="qSubject" @change="qSel=[]">
+            <option :value="null">全部类目</option>
+            <option v-for="c in listingSubjects" :key="c" :value="c">{{ c || '未选类目' }}（{{ facetCount('subject', c) }}）</option>
+          </select>
         </div>
-        <div class="shop-meta">
-          <span>令牌 {{ (shops.find(s => s.id === shopCurrent) || {}).token_hint }}</span>
-          <span>仓库 {{ (shops.find(s => s.id === shopCurrent) || {}).warehouse_name || '自动' }}</span>
+        <div class="row">
+          <button class="btn" :disabled="!qSel.length" @click="exportQueue">导出图片</button>
+          <button class="btn" :disabled="!qSel.length || !shops.length" @click="batchAi" title="自动匹配类目，AI 填写标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">批量 AI 填写</button>
+          <button class="btn" :disabled="!qSel.length" @click="openBatchEdit">批量修改价格/折扣/重量/库存/尺寸</button>
+          <button class="btn primary" :disabled="!qSel.length || !shops.length" @click="batchUpload">批量上架选中</button>
         </div>
-        <button class="btn sm block" @click="openShops">店铺管理 / 上架诊断</button>
-      </div>
-      <div class="shop-card empty-shop" v-else>
-        <b>还没有绑定 WB 店铺</b>
-        <div class="faint">绑定后才能上架。令牌只保存在这台电脑。</div>
-        <button class="btn primary sm block" @click="openShops">绑定店铺</button>
-      </div>
-
-      <div class="f-group">
-        <div class="f-title">状态（{{ shopName(shopCurrent) || '当前店铺' }}）</div>
-        <button v-for="(n, k) in {all: '全部', todo: '未上架', running: '上架中 / 等待', uploaded: '已上架', failed: '失败'}" :key="k"
-                class="f-row" :class="{on: qFilter===k}" @click="qFilter=k; qSel=[]"><span>{{ n }}</span><b>{{ facetCount('status', k) }}</b></button>
-      </div>
-
-      <div class="f-group" v-if="otherShops.length">
-        <div class="f-title">其他店铺上架情况</div>
-        <button class="f-row" :class="{on: qShopF===''}" @click="qShopF=''; qSel=[]"><span>不限</span></button>
-        <template v-for="s in otherShops" :key="s.id">
-          <button class="f-row" :class="{on: qShopF==='on:' + s.id}" @click="qShopF='on:' + s.id; qSel=[]"><span>已上到「{{ s.name }}」</span><b>{{ facetCount('shop', 'on:' + s.id) }}</b></button>
-          <button class="f-row" :class="{on: qShopF==='off:' + s.id}" @click="qShopF='off:' + s.id; qSel=[]"><span>还没上到「{{ s.name }}」</span><b>{{ facetCount('shop', 'off:' + s.id) }}</b></button>
-        </template>
-      </div>
-
-      <div class="f-group" v-if="listingLogos.length">
-        <div class="f-title">商标 / 来源</div>
-        <button class="f-row" :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]"><span>全部</span><b>{{ facetCount('logo', '') }}</b></button>
-        <button v-for="g in listingLogos" :key="g.key" class="f-row" :class="{on: qLogo===g.key}" @click="qLogo=g.key; qSel=[]">
-          <span class="row"><img v-if="g.img" :src="g.img" class="f-logo">{{ g.name }}</span><b>{{ facetCount('logo', g.key) }}</b></button>
-      </div>
-
-      <div class="f-group" v-if="listingSubjects.length > 1">
-        <div class="f-title">类目</div>
-        <button class="f-row" :class="{on: qSubject===null}" @click="qSubject=null; qSel=[]"><span>全部</span></button>
-        <button v-for="c in listingSubjects" :key="c" class="f-row" :class="{on: qSubject===c}" @click="qSubject=c; qSel=[]">
-          <span>{{ c || '未选类目' }}</span><b>{{ facetCount('subject', c) }}</b></button>
-      </div>
-    </aside>
-
-    <section class="q-main">
-      <div class="q-head">
-        <div>
-          <h2>待上架 <span class="faint">{{ shownListings.length }} 张商品卡</span></h2>
-          <div class="faint">同一个商品 + 同一个 logo（或同一个货源）合成一张 WB 商品卡，每个颜色是卡里的一个款式。填好资料 → 预检 → 上架。</div>
-        </div>
-        <input class="search" style="width:240px" v-model="qQuery" placeholder="搜索标题 / 商品ID">
-      </div>
-      <div class="toolbar q-tools" v-if="listings.length">
-        <span class="row" style="cursor:pointer;padding:0 6px" @click="qSel = qSel.length === shownListings.length ? [] : shownListings.map(lkey)"><i class="check" :class="{on: shownListings.length && qSel.length === shownListings.length}"></i><span class="faint">全选（{{ qSel.length }}/{{ shownListings.length }}）</span></span>
-        <span class="spacer"></span>
-        <button class="btn sm" :disabled="!qSel.length" @click="exportQueue">导出图片</button>
-        <button class="btn sm" :disabled="!qSel.length || !shops.length" @click="batchAi" title="自动匹配类目，AI 填写标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">批量 AI 填写</button>
-        <button class="btn sm" :disabled="!qSel.length" @click="openBatchEdit">批量改价格/折扣/重量/库存/尺寸</button>
-        <button class="btn sm primary" :disabled="!qSel.length || !shops.length" @click="batchUpload">批量上架到「{{ shopName(shopCurrent) || '店铺' }}」</button>
       </div>
 
       <div class="q-grid wide">
@@ -448,7 +425,7 @@
         </div>
       </div>
       <div class="empty" v-if="!shownListings.length" style="padding:80px 0"><div class="faint">{{ listings.length ? '没有符合筛选条件的商品卡' : '还没有待上架的商品。印标模式：生成套图后点「移入待上架」；采集上架模式：在商品页点「加入待上架」。' }}</div></div>
-    </section>
+    </div>
   </main>
 
   <!-- 店铺管理 -->
@@ -884,6 +861,10 @@
     <div class="modal">
       <div class="modal-head"><h3>采集 1688 商品</h3><button class="btn sm ghost" @click="showScrape=false">✕</button></div>
       <div class="modal-body">
+        <div class="note err-box" v-if="workMode==='direct' && (extOld || !ext.connected)">
+          <template v-if="!ext.connected">采集助手没有连接：请确认 Chrome 开着、采集助手已启用（chrome://extensions）。</template>
+          <template v-else>采集助手是旧版（{{ ext.version }}），采集拼多多 / Ozon 需要 1.3.0：打开 <b>chrome://extensions</b>，找到「采集助手」点刷新按钮（↻），再按 F5 刷新本页面。</template>
+        </div>
         <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。需要「采集助手」1.3.0 以上。</div>
         <div class="field"><label>商品链接（每行一个，可以直接粘贴一大段包含链接的文字）</label>
           <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="https://detail.1688.com/offer/123456789012.html"></textarea></div>
