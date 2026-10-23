@@ -23,6 +23,8 @@ SYNC_WAIT = float(os.environ.get("WB_SYNC_WAIT", "20"))      # 新卡跨服务�
 POLL_EVERY = float(os.environ.get("WB_POLL_EVERY", "8"))
 POLL_TIMES = int(os.environ.get("WB_POLL_TIMES", "225"))      # 新卡最多约 30 分钟
 POLL_AMBIGUOUS = int(os.environ.get("WB_POLL_AMBIGUOUS", "12"))  # 建卡结果不确定时只短轮询
+MEDIA_WORKERS = int(os.environ.get("WB_MEDIA_WORKERS", "1"))  # 图片上传同时传几个颜色（WB 对图片接口限流严，默认 1 个）
+MAX_AUTO_RESUME = 8  # 被 WB 长时间限流后自动续传的最多次数
 STOCK_DELAYS = [float(x) for x in os.environ.get("WB_STOCK_DELAYS", "20,40,80,160,300,600,600").split(",")]
 
 
@@ -224,7 +226,7 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 if job:
                     job.note(f"上传图片 {codes[vc]['sku']} 第 {n}/{len(imgs)} 张")
 
-        with ThreadPoolExecutor(max_workers=min(4, len(media))) as ex:
+        with ThreadPoolExecutor(max_workers=max(1, min(MEDIA_WORKERS, len(media)))) as ex:
             list(ex.map(push, list(media)))
 
         _stage(pid, key, shop_id, job, "提交价格和折扣", 92)
@@ -259,17 +261,27 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 if job:
                     job.finish("商品卡和图片、价格已完成，库存在后台同步")
                 return
-        _update(pid, key, shop_id, lambda P: P.update(status="uploaded", uploaded_at=time.time(), error="",
+        _update(pid, key, shop_id, lambda P: P.update(status="uploaded", uploaded_at=time.time(), error="", auto_resume=0,
                                                      price={vc: r["price"] for vc, r in zip(codes, rows_price)},
                                                      discount=disc))
         _stage(pid, key, shop_id, job, "完成", 100)
         if job:
             job.finish("上架完成")
     except RateLimited as e:
-        _update(pid, key, shop_id, lambda P: P.update(status="failed", error=str(e), retry_at=time.time() + e.retry_after))
-        _stage(pid, key, shop_id, job, f"✗ {e}", 0)
+        # WB 要求等很久：不算失败，到点后自动从断点续传（已建的卡按供应商编码找回，不会重复建卡）
+        n = int(LS.pub(store.get_product(pid)["listings"][key], shop_id).get("auto_resume") or 0)
+        at = time.time() + e.retry_after + 5
+        if n >= MAX_AUTO_RESUME:
+            _update(pid, key, shop_id, lambda P: P.update(status="failed", error=f"多次被 WB 限流，已停止自动续传：{e}"))
+            _stage(pid, key, shop_id, job, f"✗ {e}", 0)
+            if job:
+                job.fail(str(e))
+            return
+        _update(pid, key, shop_id, lambda P: P.update(status="waiting", error=str(e), retry_at=at, auto_resume=n + 1))
+        _stage(pid, key, shop_id, job, f"⏸ {e}。{time.strftime('%H:%M', time.localtime(at))} 后自动从断点继续，不用再点", 0)
+        _schedule_resume(pid, key, shop_id, at)
         if job:
-            job.fail(str(e))
+            job.finish(f"WB 限流，{time.strftime('%H:%M', time.localtime(at))} 后自动继续")
     except Exception as e:  # noqa: BLE001
         msg = str(e)
         _update(pid, key, shop_id, lambda P: P.update(status="failed", error=msg[:500]))
@@ -429,6 +441,15 @@ def _stock_later(pid: str, key: str, shop_id: str, wh: int, rows: list[dict], st
     _stage(pid, key, shop_id, None, "✗ 库存多次写入失败，请在 WB 后台手动设置", 100)
 
 
+def _schedule_resume(pid: str, key: str, shop_id: str, at: float) -> None:
+    def run():
+        time.sleep(max(0.0, at - time.time()))
+        P = LS.pub(store.get_product(pid)["listings"][key], shop_id)
+        if P.get("status") == "waiting":  # 期间没被手动处理过
+            upload(pid, key, shop_id, None)
+    threading.Thread(target=run, daemon=True).start()
+
+
 def resume_pending() -> None:
     """程序启动时恢复：库存后台重试接着跑；上次异常中断的"上架中"标为失败，可以再点上架安全续传。"""
     for p in store.list_products():
@@ -438,6 +459,8 @@ def resume_pending() -> None:
                 if P.get("status") == "pending_stock" and ps:
                     threading.Thread(target=_stock_later, args=(p["id"], key, sid, ps["warehouse"], ps["rows"],
                                                                 int(ps.get("step") or 0)), daemon=True).start()
+                elif P.get("status") == "waiting":
+                    _schedule_resume(p["id"], key, sid, float(P.get("retry_at") or 0))
                 elif P.get("status") == "uploading":
                     _update(p["id"], key, sid, lambda P: P.update(
                         status="failed", error="程序上次在上架中途关闭。再点「上架」会按供应商编码回查并从断点续传，不会重复建卡"))

@@ -382,3 +382,5 @@ pre.log-box { white-space: pre-wrap; max-height: 320px; }
 .stage-seg { display: flex; }
 .stage-seg button { flex: 1; padding: 3px 2px; font-size: 11px; white-space: nowrap; }
 .input.bad { border-color: var(--danger); color: var(--danger); }
+.wait-text { margin-top: 8px; font-size: 12px; color: #b45309; line-height: 1.45; }
+.q-status.waiting { color: #b45309; background: #fff6e6; }

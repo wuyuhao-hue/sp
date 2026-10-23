@@ -598,6 +598,7 @@ def _listing_summary(p: dict, L: dict, shop_id: str | None = None) -> dict:
     return {"pid": p["id"], "key": L["key"], "product_title": p.get("title", ""), "offer_id": p.get("offer_id"),
             "title": L.get("title", ""), "logo_name": L.get("logo_name", ""), "subject_name": L.get("subject_name", ""),
             "status": P.get("status") or "draft", "progress": P.get("progress"), "error": P.get("error", ""),
+            "retry_at": P.get("retry_at") if P.get("status") == "waiting" else None,
             "nm": P.get("nm") or {}, "variants": vs, "shop_id": shop_id, "logo_id": L.get("logo_id"),
             "shops": _shop_records(L), "on_wb": wb_listing.any_on_wb(L), "brand": L.get("brand", ""),
             "ai_filled": bool(L.get("ai_filled")), "stock": L.get("stock") or 0,
@@ -826,6 +827,7 @@ def listing_upload(pid: str, key: str, shop: str | None = Body(None, embed=True)
     sid = _shop_or_current(shop)
     if wb_listing.pub_status(L, sid) in ("uploading", "pending_stock"):
         raise HTTPException(400, "已经在上架中")
+    store.update_product(pid, lambda x: wb_listing.pub(x["listings"][key], sid).update(auto_resume=0))  # 手动点上架：重新计数
     job = jobs.Job("wb", f"上架到 WB：{(L.get('title') or p.get('title') or '')[:20]}")
     jobs.run_in_thread(job, lambda a, b, c, j: wb_upload.upload(a, b, c, j), pid, key, sid)
     return job.to_dict()

@@ -23,11 +23,12 @@ MARKET = os.environ.get("WB_MARKET_API", "https://marketplace-api.wildberries.ru
 # 本地请求起点间隔（秒），参照原项目手册的保守节奏
 _SCALE = float(os.environ.get("WB_PACE_SCALE", "1"))  # 仅测试用
 INTERVAL = {k: v * _SCALE for k, v in
-            {"content_read": 0.72, "content_write": 6.2, "media": 0.75, "prices": 0.72, "market": 0.72}.items()}
+            {"content_read": 0.72, "content_write": 6.2, "media": 1.0, "prices": 0.72, "market": 0.72}.items()}
 
 _locks: dict[str, threading.Lock] = {}
 _last: dict[str, float] = {}
 _glock = threading.Lock()
+LONG_WAIT = float(os.environ.get("WB_LONG_WAIT", "60"))  # 429 要等超过这个秒数：不在请求里干等，交给上架任务排期续传
 _cooldown: dict[str, float] = {}  # 被 WB 长时间限流的接口：冷却结束前本地直接拒绝，不再去撞 WB（撞多了限流会越来越长）
 _http: httpx.Client | None = None
 
@@ -100,11 +101,12 @@ class WBClient:
                 ra = r.headers.get("X-Ratelimit-Retry") or r.headers.get("Retry-After")
                 wait = float(ra) if ra and ra.replace(".", "", 1).isdigit() else min(30 * 2 ** (attempt - 1), 300)
                 wait += 1 + random.random()
-                if wait > 60 or attempt == retries or not idempotent:
-                    if wait > 60:
+                if wait > LONG_WAIT or attempt == retries or not idempotent:
+                    if wait > LONG_WAIT:
                         _cooldown[ck] = time.time() + wait
-                    info = " ".join(f"{k[12:]}={r.headers[k]}" for k in ("X-Ratelimit-Limit", "X-Ratelimit-Remaining",
-                                                                        "X-Ratelimit-Reset") if r.headers.get(k))
+                    info = " ".join([url.split("wildberries.ru")[-1].split("?")[0]] + [
+                        f"{k[12:]}={r.headers[k]}" for k in ("X-Ratelimit-Retry", "X-Ratelimit-Limit", "X-Ratelimit-Remaining",
+                                                            "X-Ratelimit-Reset") if r.headers.get(k)])
                     raise RateLimited(wait, info)
                 time.sleep(wait)
                 continue

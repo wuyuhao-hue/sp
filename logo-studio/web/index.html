@@ -283,7 +283,7 @@
           <div class="q-cover" @click="toggleQ(lkey(l))">
             <img :src="(l.variants.find(v => v.enabled && v.cover) || l.variants[0] || {}).cover">
             <i class="check" :class="{on: qSel.includes(lkey(l))}"></i>
-            <span class="q-status" :class="l.status">{{ statusName(l.status) }}</span>
+            <span class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
           </div>
           <div class="q-vars">
             <div class="q-var" v-for="v in l.variants" :key="v.sku" :class="{off: !v.enabled}" :title="v.sku + (v.color ? ' → ' + v.color : '')">
@@ -306,6 +306,7 @@
               <div class="faint">{{ (l.progress||{}).stage }}</div>
             </div>
             <div class="err-text" v-if="l.status==='failed' && l.error">{{ l.error }}</div>
+            <div class="wait-text" v-if="l.status==='waiting'">WB 限流中，{{ hhmm(l.retry_at) }} 后自动继续（卡已建好，不会重复建卡；不用再点）<br><span class="faint">{{ l.error }}</span></div>
             <div class="faint" style="margin-top:6px" v-if="Object.keys(l.nm||{}).length">nmID：{{ Object.values(l.nm).join('、') }}</div>
             <div class="meta" style="margin-top:6px" v-if="l.shops.filter(x => x.shop_id !== shopCurrent).length">
               <span class="tag live" v-for="x in l.shops.filter(x => x.shop_id !== shopCurrent)" :key="x.shop_id">{{ x.shop }}：{{ statusName(x.status) }}</span>

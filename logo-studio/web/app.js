@@ -169,7 +169,7 @@ createApp({
           await this.loadProducts();
           if (this.current) await this.refreshCurrent();
           if (this.tab === 'queue') await this.loadQueue();
-        } else if (this.tab === 'queue' && this.listings.some(l => l.status === 'pending_stock' || l.status === 'uploading')) await this.loadQueue();
+        } else if (this.tab === 'queue' && this.listings.some(l => ['pending_stock', 'uploading', 'waiting'].includes(l.status))) await this.loadQueue();
       } catch (e) { /* 服务未就绪时忽略 */ }
     },
     async openProduct(id) {
@@ -185,7 +185,7 @@ createApp({
     toggleSku(name) { const i = this.skuSel.indexOf(name); i >= 0 ? this.skuSel.splice(i, 1) : this.skuSel.push(name); },
     listingMatch(l, f) {
       const st = l.status || 'draft';
-      return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock')) || st === f;
+      return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock' || st === 'waiting')) || st === f;
     },
     listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f) && (!this.qLogo || l.key === this.qLogo)).length; },
     logoMatch(p) {
@@ -202,6 +202,7 @@ createApp({
       return Object.entries(L.pub || {}).filter(([, P]) => P.status && P.status !== 'draft' && P.codes && P.nm && P.nm[P.codes[v.sku]])
         .map(([sid, P]) => (this.shopName(sid) || '已删除的店铺') + (P.status === 'uploaded' ? '' : '（' + this.statusName(P.status) + '）'));
     },
+    hhmm(t) { const d = new Date(t * 1000); return d.toTimeString().slice(0, 5); },
     lkey(l) { return `${l.pid}:${l.key}`; },
     toggleQ(id) { const i = this.qSel.indexOf(id); i >= 0 ? this.qSel.splice(i, 1) : this.qSel.push(id); },
 
@@ -286,7 +287,7 @@ createApp({
     },
 
     // ---------- 待上架 / WB ----------
-    statusName(st) { return { draft: '草稿', uploading: '上架中', pending_stock: '库存同步中', uploaded: '已上架', failed: '失败' }[st || 'draft'] || st; },
+    statusName(st) { return { draft: '草稿', uploading: '上架中', pending_stock: '库存同步中', waiting: '等待限流结束', uploaded: '已上架', failed: '失败' }[st || 'draft'] || st; },
     shopName(id) { return (this.shops.find(s => s.id === id) || {}).name; },
     async loadShops() {
       const r = await api('/api/shops');
