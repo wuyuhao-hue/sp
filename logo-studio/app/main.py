@@ -74,7 +74,8 @@ def _summary(p: dict) -> dict:
 @app.get("/api/state")
 def state():
     s = store.get_settings()
-    s["api_key"] = ("●" * 8 + s["api_key"][-4:]) if s.get("api_key") else ""
+    for k in ("api_key", "listing_api_key"):
+        s[k] = ("●" * 8 + s[k][-4:]) if s.get(k) else ""
     ext = {"connected": extbridge.connected(), "version": extbridge.state["version"],
            "status": extbridge.state["status"], "message": extbridge.state["message"]}
     return {"browser": {"state": browser.state, "message": browser.message}, "ext": ext,
@@ -991,10 +992,36 @@ def del_style_ref(name: str):
 # ---------------- 设置 ----------------
 @app.post("/api/settings")
 def save_settings(patch: dict = Body(...)):
-    if str(patch.get("api_key", "")).startswith("●"):
-        patch.pop("api_key")
+    for k in ("api_key", "listing_api_key"):
+        if str(patch.get(k, "")).startswith("●"):
+            patch.pop(k)
     store.save_settings(patch)
     return state()
+
+
+@app.post("/api/settings/test-listing")
+def test_listing_model():
+    """测试上架资料模型：用它自己的令牌列模型，再发一句很短的对话（约几十 token）。"""
+    from .wb.ai_fill import _chat, listing_model
+
+    s = store.get_settings()
+    model = listing_model()
+    if not model:
+        return {"ok": False, "message": "没有填写上架资料模型"}
+    who = "单独的令牌" if s.get("listing_api_key") else "生图令牌"
+    try:
+        with ai._client(30, "listing") as c:
+            r = c.get("/models")
+            models = sorted(m.get("id", "") for m in r.json().get("data", [])) if r.status_code < 400 else []
+    except Exception:  # noqa: BLE001
+        models = []
+    if models and model not in models:
+        return {"ok": False, "message": f"用{who}连接成功，但这个分组里没有模型「{model}」。可用的有：{'、'.join(models[:12])}"}
+    try:
+        r = _chat([{"type": "text", "text": '只返回 JSON：{"ok": true}'}], 50)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": f"用{who}调用「{model}」失败：{str(e)[:200]}"}
+    return {"ok": isinstance(r, dict), "message": f"用{who}调用「{model}」成功"}
 
 
 @app.get("/api/ai-calls")

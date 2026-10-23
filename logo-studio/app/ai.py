@@ -93,12 +93,16 @@ _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_lock = threading.Lock()
 
 
-def _client(timeout: float = 300) -> httpx.Client:
+def _client(timeout: float = 300, purpose: str = "") -> httpx.Client:
+    """purpose="listing"：上架资料模型，可以用单独的令牌（中转站里不同分组）和地址，没填就和生图共用。"""
     s = store.get_settings()
-    if not s.get("api_base") or not s.get("api_key"):
+    base, key = s.get("api_base"), s.get("api_key")
+    if purpose == "listing":
+        base = s.get("listing_api_base") or base
+        key = s.get("listing_api_key") or key
+    if not base or not key:
         raise RuntimeError("请先在「设置」里填写中转站地址和令牌")
-    return _LoggedClient(base_url=s["api_base"].rstrip("/"), timeout=timeout,
-                        headers={"Authorization": f"Bearer {s['api_key']}"})
+    return _LoggedClient(base_url=base.rstrip("/"), timeout=timeout, headers={"Authorization": f"Bearer {key}"})
 
 
 def _error(r: httpx.Response) -> RuntimeError:

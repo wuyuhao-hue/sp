@@ -610,7 +610,15 @@
           <div class="field"><label>令牌（API Key）</label><input class="input" v-model="settings.api_key" placeholder="sk-..."></div>
           <div class="field"><label>生图模型</label><input class="input" v-model="settings.image_model" list="model-list" placeholder="gpt-image-2"></div>
           <div class="field"><label>商品理解模型（可选，需要能看图）</label><input class="input" v-model="settings.text_model" list="model-list" placeholder="如 gpt-4o，留空则不使用"></div>
-          <div class="field"><label>上架资料模型（WB 待上架里的 AI 填写：类目、标题、说明、属性、包装尺寸重量、海关编码）</label><input class="input" v-model="settings.listing_model" list="model-list" placeholder="如 gpt-6-sol，留空则用商品理解模型"></div>
+          <div class="full sub-block">
+            <div class="set-sub">WB 上架资料模型（待上架里的 AI 填写：类目、标题、说明、属性、包装尺寸重量、海关编码）</div>
+            <div class="form-grid tight">
+              <div class="field"><label>模型</label><input class="input" v-model="settings.listing_model" placeholder="gpt-6-sol"></div>
+              <div class="field"><label>令牌（中转站里这个模型所在分组的令牌；留空则用上面的生图令牌）</label><input class="input" v-model="settings.listing_api_key" placeholder="sk-..."></div>
+              <div class="field full"><label>接口地址（留空则和上面相同）</label><input class="input" v-model="settings.listing_api_base" :placeholder="settings.api_base || 'https://www.xpivot.top/v1'"></div>
+              <div class="full row"><button class="btn" @click="testListing">测试上架资料模型</button><span class="faint">{{ listingTestMsg }}</span></div>
+            </div>
+          </div>
           <div class="field"><label>调用方式</label>
             <select class="input" v-model="settings.image_api">
               <option value="auto">自动适配（推荐）</option><option value="edits">图片编辑接口 /images/edits</option><option value="chat">对话接口 /chat/completions</option>

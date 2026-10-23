@@ -78,7 +78,7 @@ def _chat(content: list[dict], max_tokens: int) -> dict:
         body["max_completion_tokens"] = max_tokens * 4  # 推理模型的思考也算在里面
     if caps.get("json_mode", True):
         body["response_format"] = {"type": "json_object"}
-    with ai._client(300) as c:
+    with ai._client(300, "listing") as c:
         for _ in range(6):
             r = c.post("/chat/completions", json=body)
             if r.status_code != 400:

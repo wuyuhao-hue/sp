@@ -26,7 +26,7 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, dir: { colors: [], countries: [] },
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -597,6 +597,12 @@ createApp({
       const r = await api('/api/settings/test', { body: {} });
       this.testMsg = r.message;
       this.models = r.models || [];
+    },
+    async testListing() {
+      await this.saveSettings();
+      this.listingTestMsg = '测试中…';
+      const r = await api('/api/settings/test-listing', { body: {} }).catch(e => ({ message: e.message }));
+      this.listingTestMsg = r.message;
     },
     async loadAiCalls() { this.aiCalls = await api('/api/ai-calls').catch(() => null); },
     async addStyleRef(e) {
