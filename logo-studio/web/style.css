@@ -307,3 +307,5 @@ textarea.input { height: auto; padding: 10px 12px; resize: vertical; line-height
 .sku-card:hover .zoom-btn { opacity: 1; }
 .lb-side .btn.block { width: auto; align-self: stretch; }
 .input.mono { font-family: Consolas, "SFMono-Regular", monospace; font-size: 12px; }
+.rightbar { overflow-x: hidden; }
+.btn.block { display: flex; min-width: 0; white-space: normal; text-align: center; }
