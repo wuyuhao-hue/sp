@@ -13,7 +13,7 @@ const iconSent = new Set();
 async function sendFavicon(tabId) {
   const t = await chrome.tabs.get(tabId);
   const host = (t.url || '').split('/')[2] || '';
-  const p = /1688\.com/.test(host) ? '1688' : /yangkeduo|pinduoduo/.test(host) ? 'pdd' : /ozon\./.test(host) ? 'ozon' : /wildberries\./.test(host) ? 'wb' : '';
+  const p = /1688\.com/.test(host) ? '1688' : /yangkeduo|pinduoduo/.test(host) ? 'pdd' : /ozon\./.test(host) ? 'ozon' : /wildberries\./.test(host) ? 'wb' : /aiprice\./.test(host) ? 'aiprice' : '';
   if (!p || iconSent.has(p) || !t.favIconUrl || !/^https?:/.test(t.favIconUrl)) return;
   iconSent.add(p);
   const data = await imageB64(t.favIconUrl);
@@ -740,9 +740,64 @@ async function loop() {
   }
 }
 
+// ---------------- 登录状态 ----------------
+// 按各平台的登录 Cookie 判断是否已登录（只看有没有、是不是登录标记，不读取、不上传 Cookie 的值）
+const LOGINS = {
+  '1688': { url: 'https://login.1688.com/member/signin.htm?Done=https%3A%2F%2Fwww.1688.com%2F', domains: ['1688.com'],
+            check: cs => cs.some(c => c.name === '__cn_logon__' && c.value === 'true') || cs.some(c => (c.name === 'unb' || c.name === '__cn_logon_id__') && c.value) },
+  pdd: { url: 'https://mobile.yangkeduo.com/login.html', domains: ['yangkeduo.com', 'pinduoduo.com'],
+         check: cs => cs.some(c => (c.name === 'PDDAccessToken' || c.name === 'pdd_user_id') && c.value) },
+  aiprice: { url: 'https://www.aiprice.com/', domains: ['aiprice.com'],
+             check: cs => cs.some(c => /token|uid|user_?id|login|auth/i.test(c.name) && !/^(_ga|_gid|Hm_|cna|tfstk|isg)/i.test(c.name) && (c.value || '').length >= 6) },
+};
+async function isLogged(p) {
+  let cs = [];
+  for (const d of LOGINS[p].domains) cs = cs.concat(await chrome.cookies.getAll({ domain: d }).catch(() => []));
+  return LOGINS[p].check(cs);
+}
+async function reportLogins() {
+  const status = {};
+  for (const p of Object.keys(LOGINS)) status[p] = await isLogged(p).catch(() => null);
+  await post('/api/ext/logins', { status }).catch(() => {});
+  return status;
+}
+let loginOpen = {};
+async function doLogin(p) {
+  if (!LOGINS[p] || loginOpen[p]) return;
+  if (await isLogged(p)) { await reportLogins(); return; }
+  loginOpen[p] = true;
+  elog('打开登录窗口', { platform: p });
+  try {
+    const w = await chrome.windows.create({ url: LOGINS[p].url, type: 'popup', width: 520, height: 780, focused: true });
+    const t0 = Date.now();
+    while (Date.now() - t0 < 15 * 60 * 1000) {
+      await sleep(1500);
+      try { await chrome.windows.get(w.id); } catch (e) { elog('登录窗口被手动关闭', { platform: p }); break; }
+      if (await isLogged(p)) {
+        elog('检测到已登录，自动关闭登录窗口', { platform: p });
+        await sleep(1500);   // 让网站把登录流程走完
+        await chrome.windows.remove(w.id).catch(() => {});
+        break;
+      }
+    }
+  } finally {
+    loginOpen[p] = false;
+    await reportLogins();
+  }
+}
+let cookieTimer = null;
+chrome.cookies.onChanged.addListener(ch => {   // 在别处登录 / 退出也能及时更新
+  const d = (ch.cookie && ch.cookie.domain) || '';
+  if (!/1688\.com|yangkeduo|pinduoduo|aiprice/.test(d)) return;
+  clearTimeout(cookieTimer);
+  cookieTimer = setTimeout(() => reportLogins().catch(() => {}), 1500);
+});
+
 // ---------------- 事件 ----------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'kick') { loop(); sendResponse({ ok: true }); return; }
+  if (msg.type === 'login') { doLogin(msg.platform); sendResponse({ ok: true }); return; }
+  if (msg.type === 'check-logins') { reportLogins(); sendResponse({ ok: true }); return; }
   if (msg.type === 'collect-page' && sender.tab) {
     (async () => {
       const pf = platformOf(sender.tab.url);
@@ -758,6 +813,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 chrome.alarms.create('poll', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => loop());
-chrome.runtime.onStartup.addListener(() => loop());
-chrome.runtime.onInstalled.addListener(() => loop());
+chrome.alarms.onAlarm.addListener(() => { loop(); reportLogins().catch(() => {}); });
+chrome.runtime.onStartup.addListener(() => { loop(); reportLogins().catch(() => {}); });
+chrome.runtime.onInstalled.addListener(() => { loop(); reportLogins().catch(() => {}); });

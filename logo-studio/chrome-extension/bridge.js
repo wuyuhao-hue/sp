@@ -8,6 +8,11 @@
   kick();
   setInterval(kick, 10000);
   window.addEventListener('message', e => {
-    if (e.source === window && e.data && e.data.logoStudio === 'kick') kick();
+    if (e.source !== window || !e.data) return;
+    if (e.data.logoStudio === 'kick') kick();
+    // 工作台右上角「去登录」：让采集助手弹出登录窗口，检测到登录成功后自动关掉
+    if (e.data.logoStudio === 'login' || e.data.logoStudio === 'check-logins') {
+      try { chrome.runtime.sendMessage({ type: e.data.logoStudio, platform: e.data.platform }).catch(() => {}); } catch (err) { /* 忽略 */ }
+    }
   });
 })();

@@ -110,7 +110,8 @@ def state():
     for k in ("api_key", "listing_api_key"):
         s[k] = ("●" * 8 + s[k][-4:]) if s.get(k) else ""
     ext = {"connected": extbridge.connected(), "version": extbridge.state["version"],
-           "status": extbridge.state["status"], "message": extbridge.state["message"]}
+           "status": extbridge.state["status"], "message": extbridge.state["message"],
+           "logins": extbridge.state.get("logins") or {}, "login_skip": s.get("login_skip") or []}
     return {"browser": {"state": browser.state, "message": browser.message}, "ext": ext,
             "jobs": jobs.list_jobs(), "settings": s,
             "shot_types": {**store.SHOT_TYPES, "size_chart": "尺码表（本地生成）"},
@@ -995,6 +996,27 @@ def scrape_tabs():
 
 
 # ---------------- Chrome 扩展「采集助手」 ----------------
+@app.post("/api/ext/logins")
+def ext_logins(status: dict = Body(..., embed=True)):
+    """采集助手按各平台的登录 Cookie 检测到的登录状态（只有 是/否，不含 Cookie 内容）。"""
+    from . import runlog
+    new = {k: v for k, v in (status or {}).items() if k in ("1688", "pdd", "aiprice") and v in (True, False)}
+    if new != extbridge.state.get("logins"):
+        runlog.log("登录", "登录状态变化", **new)
+    extbridge.state["logins"] = new
+    extbridge.state["last_seen"] = time.time()
+    return {"ok": True}
+
+
+@app.post("/api/login-skip")
+def login_skip(platform: str = Body(...), skip: bool = Body(True)):
+    """「已登录 / 不需要」：检测不准或不用这个平台时，手动把它从登录提示里去掉。"""
+    s = store.get_settings()
+    cur = [x for x in s.get("login_skip") or [] if x != platform] + ([platform] if skip else [])
+    store.save_settings({"login_skip": cur})
+    return {"login_skip": cur}
+
+
 @app.post("/api/ext/log")
 def ext_log(msg: str = Body(""), data: dict = Body(default_factory=dict)):
     """采集助手上报的过程日志（打开了哪个网址、页面被拦、脚本超时、采集诊断等）。"""
@@ -1022,6 +1044,7 @@ ICON_URLS = {
     "pdd": ["https://mobile.yangkeduo.com/favicon.ico", "https://www.pinduoduo.com/favicon.ico"],
     "ozon": ["https://www.ozon.ru/favicon.ico"],
     "wb": ["https://www.wildberries.ru/favicon.ico"],
+    "aiprice": ["https://www.aiprice.com/favicon.ico"],
 }
 _icon_tried: dict[str, float] = {}
 
@@ -1054,15 +1077,18 @@ def src_icon(p: str):
     f = _icon_file(p)
     if not f and time.time() - _icon_tried.get(p, 0) > 600:
         _icon_tried[p] = time.time()
-        for u in ICON_URLS[p]:
-            try:
-                r = httpx.get(u, timeout=6, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
-                if r.status_code == 200 and 50 < len(r.content) < 300000 and not r.content[:200].lstrip().lower().startswith(b"<!doctype"):
-                    _icon_save(p, r.content)
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-        f = _icon_file(p)
+
+        def fetch():  # 后台下载，不让界面等
+            for u in ICON_URLS[p]:
+                try:
+                    r = httpx.get(u, timeout=8, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"})
+                    if r.status_code == 200 and 50 < len(r.content) < 300000 and b"<html" not in r.content[:400].lower():
+                        _icon_save(p, r.content)
+                        return
+                except Exception:  # noqa: BLE001
+                    continue
+        import threading
+        threading.Thread(target=fetch, daemon=True).start()
     if not f:
         raise HTTPException(404, "图标还没下载到")
     media = {"png": "image/png", "svg": "image/svg+xml", "gif": "image/gif", "jpg": "image/jpeg", "webp": "image/webp"}.get(

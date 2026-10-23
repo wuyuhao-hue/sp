@@ -27,7 +27,7 @@ createApp({
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
     warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', pSource: '', qShopF: '', qSubject: null, qQuery: '', qSource: '',
-    dsel: { skus: [], main: [], detail: false }, matchUrl: '', mFilter: 'all', pick: null, iconBad: {}, dir: { colors: [], countries: [] },
+    dsel: { skus: [], main: [], detail: false }, matchUrl: '', mFilter: 'all', pick: null, iconBad: {}, showLogin: false, loginBusy: {}, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -52,7 +52,7 @@ createApp({
     },
     workMode() { return this.settings.work_mode || 'logo'; },
     extOld() {
-      const v = (this.ext.version || '').split('.').map(Number), need = [1, 6, 0];
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 7, 0];
       if (!this.ext.version) return false;
       for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
       return false;
@@ -76,6 +76,19 @@ createApp({
     // 采集上架：按采集来源（1688 / WB / 拼多多 / Ozon）切换
     productSources() { return this.sourcesOf(this.products.filter(p => (p.mode || 'logo') === this.workMode)); },
     listingSources() { return this.sourcesOf(this.listings.filter(l => (l.mode || 'logo') === this.workMode)); },
+    loginItems() {
+      const lg = this.ext.logins || {}, skip = this.ext.login_skip || [];
+      return [
+        { k: '1688', name: '1688', why: '采集 1688 商品、打开 1688 核对同款' },
+        { k: 'pdd', name: '拼多多', why: '采集拼多多商品（mobile.yangkeduo.com）' },
+        { k: 'aiprice', name: 'AiPrice', why: '以图搜 1688 同款' },
+      ].map(it => ({ ...it, skipped: skip.includes(it.k), ok: lg[it.k] === true || skip.includes(it.k) }));
+    },
+    needLogin() {
+      // 采集助手连上并报了登录状态才提示；已登录（自动检测）和手动跳过的不算
+      if (!this.ext.connected || !Object.keys(this.ext.logins || {}).length) return [];
+      return this.loginItems.filter(it => !it.ok);
+    },
     isMarket() { return !!this.current && ['ozon', 'wb'].includes(this.current.source); },
     units() { return (this.current && this.current.units) || []; },
     mCount() {
@@ -145,12 +158,19 @@ createApp({
     },
   },
   watch: {
+    'ext.logins'(lg, old) {
+      for (const [k, v] of Object.entries(lg || {})) {
+        if (v && this.loginBusy[k]) { this.loginBusy[k] = false; this.toast(`${{ '1688': '1688', pdd: '拼多多', aiprice: 'AiPrice' }[k] || k} 已登录`); }
+      }
+    },
+    'needLogin.length'(n, o) { if (o > 0 && n === 0) { this.showLogin = false; this.toast('需要的平台都已登录 ✓'); } },
     tab(t) { if (t === 'queue') { this.loadQueue(); this.loadShops(); } if (t === 'settings') this.loadAiCalls(); },
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll(), this.loadShops().catch(() => {})]);
     if (this.filtered.length) this.openProduct(this.filtered[0].id);
     setInterval(this.poll, 1500);
+    window.postMessage({ logoStudio: 'check-logins' }, '*');  // 打开工作台就检测一次各平台登录状态
   },
   methods: {
     toast(msg, err = false) {
@@ -338,7 +358,17 @@ createApp({
       return this.listings.filter(l => this.qMatch(l, f)).length;
     },
     sourceName(s) { return { '1688': '1688', wb: 'WB', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
-    iconOk(s) { return ['1688', 'pdd', 'ozon', 'wb'].includes(s) && !this.iconBad[s]; },
+    iconOk(s) { return ['1688', 'pdd', 'ozon', 'wb', 'aiprice'].includes(s) && !this.iconBad[s]; },
+    startLogin(k) {
+      this.loginBusy[k] = true;
+      window.postMessage({ logoStudio: 'login', platform: k }, '*');
+      this.toast('已弹出登录窗口：登录成功后会自动关闭');
+      setTimeout(() => { this.loginBusy[k] = false; }, 15 * 60 * 1000);
+    },
+    async skipLogin(k) {
+      const r = await api('/api/login-skip', { body: { platform: k, skip: true } });
+      this.ext = { ...this.ext, login_skip: r.login_skip };
+    },
     srcIcon(s) {
       // 来源平台图标（品牌色简化图形）
       const box = (bg, inner) => `<svg viewBox="0 0 24 24" width="18" height="18"><rect width="24" height="24" rx="6" fill="${bg}"/>${inner}</svg>`;
@@ -349,6 +379,7 @@ createApp({
         ozon: box('#005BFF', '<circle cx="12" cy="12" r="5.6" fill="none" stroke="#fff" stroke-width="2.6"/>'),
         wb: box('url(#wbg)', '<defs><linearGradient id="wbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#CB11AB"/><stop offset="1" stop-color="#5B1BA8"/></linearGradient></defs>' + txt('WB', 9.5)),
         local: box('#8b5cf6', txt('本', 12)),
+        aiprice: box('#7c3aed', txt('Ai', 10)),
       }[s] || box('#a78bfa', txt('?'));
     },
     sourcesOf(list) {
