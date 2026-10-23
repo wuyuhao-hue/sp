@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import json as json_mod
 import os
 import random
 import threading
@@ -292,12 +293,19 @@ def parse_errors(data) -> list[dict]:
 
 
 def _detail(r: httpx.Response) -> str:
+    """把 WB 返回的错误完整带出来（接口路径 + 所有说明字段），不能只留一句「validation error」。"""
+    path = r.request.url.path if r.request else ""
     try:
         j = r.json()
     except ValueError:
-        return r.text[:300]
-    for k in ("errorText", "detail", "message", "title", "error"):
-        if isinstance(j, dict) and j.get(k):
-            extra = j.get("additionalErrors")
-            return f"{j[k]}" + (f"（{extra}）" if extra else "")
-    return str(j)[:300]
+        return f"{path}：{r.text[:600]}"
+    if not isinstance(j, dict):
+        return f"{path}：{str(j)[:600]}"
+    parts = []
+    for k in ("title", "errorText", "detail", "message", "code", "error", "additionalErrors", "errors", "data", "origin",
+              "requestId"):
+        v = j.get(k)
+        if v in (None, "", [], {}, False) or (k == "error" and v is True):
+            continue
+        parts.append(f"{k}={v if isinstance(v, str) else json_mod.dumps(v, ensure_ascii=False)}")
+    return f"{path}：" + ("；".join(parts) or json_mod.dumps(j, ensure_ascii=False))[:800]
