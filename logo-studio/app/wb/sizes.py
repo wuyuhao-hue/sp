@@ -39,6 +39,18 @@ def _letter(m: re.Match) -> str:
     return "XL" if n == 1 else f"{n}XL"
 
 
+# 卖家尺码显示成 XXL / XXXL 这种写法（4XL 以上还是 4XL，太长不好认）；俄码表的键仍用 2XL / 3XL
+SHOW = {"2XL": "XXL", "3XL": "XXXL"}
+# 标签中间任意位置的字母码：「48 RU / M」「M(48)」「54 RU / XXL」「XL码」；前后不能紧挨字母或数字（避免 CM、SIZE、ONESIZE 误认）
+LETTER_ANY = re.compile(r"(?<![A-Z0-9])(?:(\d{1,2})X|(X{0,6}))(S|M|L)(?![A-Z])")
+RU_NUM = re.compile(r"(\d{2,3})(?:\s*[-–—~/]\s*(\d{2,3}))?\s*(?:RU|РОС|РФ)\b")
+BARE_RU = re.compile(r"(?<![\d.])(4[0-9]|5[0-9]|6[0-9]|7[0-2])(?![\d.]|\s*(?:KG|公斤|斤|CM|厘米))")
+
+
+def show(t: str) -> str:
+    return SHOW.get(t, t)
+
+
 def _by_weight(s: str) -> str | None:
     """只写了体重（斤 / kg）时按体重估一个国际码。"""
     m = JIN.search(s)
@@ -63,20 +75,36 @@ def parse_size(label: str) -> dict:
     s = _norm(label)
     if not s or ONE_SIZE.match(s):
         return {"tech": "", "wb": "", "note": "均码"}
+    # 同时写了俄码和字母码（Ozon / WB 常见：「48 RU / M」「50–52 RU / L」「M (48)」）：卖家尺码用字母码，俄码用写明的数字
+    lm = LETTER_ANY.search(s)
+    if lm and not LETTER.match(s):
+        t = _letter(lm)
+        rm = RU_NUM.search(s)
+        if rm:
+            wb = rm.group(1) + (f"-{rm.group(2)}" if rm.group(2) else "")
+            return {"tech": show(t), "wb": wb, "note": "已是俄码"}
+        bm = BARE_RU.search(s)
+        if bm and int(bm.group(1)) % 2 == 0:
+            return {"tech": show(t), "wb": bm.group(1), "note": "已是俄码"}
+        if t in LETTER_RU:
+            return {"tech": show(t), "wb": str(LETTER_RU[t]), "note": ""}
     # 两个字母码连写：S-M、M/L、L~XL
     parts = re.split(r"\s*[-/~～—]\s*", s, maxsplit=1)
     if len(parts) == 2 and LETTER.match(parts[0]) and LETTER.match(parts[1]):
         a, b = _letter(LETTER.match(parts[0])), _letter(LETTER.match(parts[1]))
         if a in LETTER_RU and b in LETTER_RU:
-            return {"tech": f"{a}-{b}", "wb": f"{LETTER_RU[a]}-{LETTER_RU[b]}", "note": ""}
+            return {"tech": f"{show(a)}-{show(b)}", "wb": f"{LETTER_RU[a]}-{LETTER_RU[b]}", "note": ""}
     m = LETTER.match(s)
     if m:
         t = _letter(m)
-        return {"tech": t, "wb": str(LETTER_RU[t]) if t in LETTER_RU else "", "note": ""}
+        rm = RU_NUM.search(s)   # 「M / 48 RU」：字母码在前、俄码写在后面
+        if rm:
+            return {"tech": show(t), "wb": rm.group(1) + (f"-{rm.group(2)}" if rm.group(2) else ""), "note": "已是俄码"}
+        return {"tech": show(t), "wb": str(LETTER_RU[t]) if t in LETTER_RU else "", "note": ""}
     if re.match(r"^[^A-Z]*\d{2,3}\s*(?:[-~—至到]\s*\d{2,3}\s*)?(?:斤|KG|公斤)", s):  # 只写了体重
         t = _by_weight(s)
         if t:
-            return {"tech": t, "wb": str(LETTER_RU[t]), "note": "按建议体重估算，请核对"}
+            return {"tech": show(t), "wb": str(LETTER_RU[t]), "note": "按建议体重估算，请核对"}
     m = GB.match(s)
     if m:  # 国标 身高/胸围：俄码 = 胸围的一半（取偶数）
         chest = int(m.group(2))
@@ -95,6 +123,6 @@ def parse_size(label: str) -> dict:
             return {"tech": str(n), "wb": str(ru), "note": f"按身高 {n} cm 估算，请核对"}
     t = _by_weight(s)
     if t:
-        return {"tech": t, "wb": str(LETTER_RU[t]), "note": "按建议体重估算，请核对"}
+        return {"tech": show(t), "wb": str(LETTER_RU[t]), "note": "按建议体重估算，请核对"}
     raw = re.sub(r"[^\w\-/.]", "", s)[:15]
     return {"tech": raw, "wb": "", "note": "没认出来，请手动填写俄码"}

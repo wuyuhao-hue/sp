@@ -158,11 +158,14 @@ def sync(p: dict) -> dict:
                 v["index"] = max(seen | {x["index"] for x in L["variants"]}) + 1
             seen.add(v["index"])
         L["variants"].sort(key=lambda v: v["index"])
-        for sz in L["sizes"]:  # 旧版本没认出来的俄码：用新的尺码解析补上
-            if not sz.get("wb") and not sz.get("note_user"):
-                ps = parse_size(sz["label"])
-                if ps["wb"]:
-                    sz.update(tech=ps["tech"], wb=ps["wb"], note=ps["note"])
+        for sz in L["sizes"]:  # 旧版本没认出来的俄码 / 旧版本把「48 RU / M」的卖家尺码写成 48：用新的尺码解析补上
+            if sz.get("note_user"):
+                continue
+            ps = parse_size(sz["label"])
+            lead = re.match(r"\s*(\d{2,3})", sz["label"])
+            old_num = bool(lead and sz.get("tech") == lead.group(1) and not ps["tech"].isdigit() and ps["tech"])
+            if (not sz.get("wb") and ps["wb"]) or old_num:
+                sz.update(tech=ps["tech"], wb=sz.get("wb") or ps["wb"], note=ps["note"])
         if not L["sizes"]:
             L["sizes"] = [{"label": s, **parse_size(s), "enabled": True,
                            "cny": max([c for c in (_cny(p, v["sku"], s) for v in L["variants"]) if c] or
