@@ -78,9 +78,16 @@ class WBClient:
         for attempt in range(1, retries + 1):
             self._pace(bucket)
             try:
+                t0 = time.time()
                 r = _client().request(method, url, json=json, params=params, files=files, headers=h, timeout=timeout)
                 ratelimit.observe(self.fp, bucket, r.status_code, r.headers)
+                from .. import runlog
+                runlog.log("WB", f"{method} {url.split('?')[0]} -> {r.status_code} {int((time.time() - t0) * 1000)}ms",
+                           shop=self.fp, attempt=attempt,
+                           err=(_detail(r)[:300] if r.status_code >= 400 else None))
             except httpx.TransportError as e:
+                from .. import runlog
+                runlog.log("WB", f"{method} {url.split('?')[0]} 网络错误 {type(e).__name__}", shop=self.fp, attempt=attempt)
                 if not idempotent:
                     raise WBError(0, f"网络中断，结果不确定：{type(e).__name__}", ambiguous=True) from e
                 if attempt == retries:

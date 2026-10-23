@@ -227,6 +227,9 @@ def gate(unit: dict, offer: dict) -> dict | None:
                     "evidence": {"support": support, "of": nq, "inliers": top["inliers"], "ratio": top.get("ratio"),
                                  "color_de": round(top["color_de"], 1) if top.get("color_de") is not None else None,
                                  "card_ok": card_ok}, "manual": False, "t": time.time()}
+    from . import runlog
+    runlog.log("找同款", f"核对 {unit['name']} ↔ 1688 {offer['offer_id']}：{'同款 ' + (best['sku_name'] or '') if best else '不通过'}",
+               evidence=(best or {}).get("evidence"), why=why[:6], colors=[c.get("name") for c in offer["colors"]][:12])
     if best:
         best.pop("_score")
         return best
@@ -370,11 +373,16 @@ def on_candidates(pid: str, unit_key: str, data: dict, job, enqueue) -> None:
         units = p.get("units") or []
         u = next((x for x in units if x["key"] == unit_key), None)
         if u is not None:
-            cands = [c for c in data.get("candidates") or [] if c.get("offer_id") and c.get("image")]
-            if not cands and data.get("note"):
-                u.update(status="error", error="以图搜没成功：" + str(data["note"])[:120], cands=[])
+            cands = [c for c in data.get("candidates") or [] if c.get("offer_id")]  # 图片懒加载读不到也保留（详情闸门才是证据）
+            if not cands:
+                # 真实商品照在 AiPrice / 1688 以图搜几乎不可能一个结果都没有：0 个候选按技术失败处理（多半没登录、被拦或页面改版），
+                # 不判无同款、不删规格；原始页面已存进运行日志的 debug 里
+                u.update(status="error", cands=None, error="以图搜没有返回任何候选（AiPrice 可能没登录 / 被拦 / 页面改版）"
+                         + (f"：{str(data['note'])[:100]}" if data.get("note") else "") + "。点「继续匹配」重试，或把运行日志发给开发者")
             else:
                 u["cands"] = rank_candidates(u, cands)
+                from . import runlog
+                runlog.log("找同款", f"{pid} {u['name']} 候选排序", top=[(c["offer_id"], c["card_ok"], c["card_inliers"]) for c in u["cands"][:8]])
                 u["status"] = "pending"
                 ok = sum(1 for c in u["cands"] if c["card_ok"])
                 job.note(f"{u['name']}：以图搜到 {len(cands)} 个候选，{ok} 个图片对得上")

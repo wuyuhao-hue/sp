@@ -548,3 +548,18 @@ body { background: radial-gradient(1200px 600px at 100% -10%, #fde7f6 0%, transp
 a { color: var(--accent); transition: color .2s; }
 a:hover { color: var(--pink); }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+.log-note { margin: 14px 0 6px; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.log-note code { background: var(--accent-soft); color: var(--accent); padding: 1px 6px; border-radius: 5px; }
+a.btn { text-decoration: none; }
+/* 来源平台图标 */
+.src-ic { display: inline-flex; width: 18px; height: 18px; flex: none; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(60, 40, 160, .2); transition: transform .25s var(--ease); }
+.src-ic svg { display: block; width: 100%; height: 100%; }
+.src-ic.sm { width: 14px; height: 14px; border-radius: 4px; box-shadow: none; }
+.logo-tabs button:hover .src-ic, .src-tabs button:hover .src-ic, .logo-tabs button.on .src-ic { transform: scale(1.12) rotate(-4deg); }
+.src-tabs button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+.src-tabs .src-ic { width: 14px; height: 14px; border-radius: 4px; }
+.tag.src { display: inline-flex; align-items: center; gap: 4px; background: #fff; color: var(--text); border-color: var(--line); }
+.q-src { display: inline-flex; align-items: center; gap: 5px; background: rgba(255, 255, 255, .94) !important; color: var(--text) !important; box-shadow: 0 2px 8px rgba(60, 40, 160, .18) !important; }
+.q-src .src-ic { width: 15px; height: 15px; border-radius: 4px; }
+.src-tabs { gap: 5px; }
+.src-tabs button { flex: 1 1 auto; min-width: auto; padding: 0 8px; }

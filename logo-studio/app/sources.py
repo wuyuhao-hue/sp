@@ -389,6 +389,10 @@ def normalize_wb(raw: dict, nm: str) -> dict:
             pk["height"] = n_
         elif "вес" in kl and "упаков" in kl and not pk.get("weight"):
             pk["weight"] = round(n_ / 1000, 3) if n_ > 30 else n_
+    if raw.get("dom_price") and not any(k.get("price_rub") for k in skus):  # 价格接口不通时：页面上读到的当前价格
+        for k in skus:
+            if k.get("wb_nm") == str(nm):
+                k["price_rub"] = raw["dom_price"]
     prices = [k["price_rub"] for k in skus if k.get("price_rub")]
     data = mc.get("data") or {}
     return {
@@ -416,6 +420,9 @@ def save(platform: str, raw: dict, item_id: str, job=None) -> dict | None:
             job.note(f"✗ {PLATFORM_NAME[platform]} {item_id} 解析失败：{e}。已保存调试文件 data/debug/{name}，请发给开发者")
         return None
     pid = f"{platform}-{item_id}"
+    from . import runlog
+    runlog.log("采集", f"{PLATFORM_NAME[platform]} {item_id} 解析完成", colors=[v["name"] for v in (info["sku_props"][:1] or [{"values": []}])[0]["values"]],
+               skus=len(info.get("skus") or []), sizes=info.get("sizes"), capture=info.get("capture"), diag=raw.get("diag"))
     old = store.get_product(pid)
     keep = {k: old[k] for k in ("sets", "listings", "ai", "match", "units", "match_offers", "match_wait", "created")
             if old and k in old}

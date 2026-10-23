@@ -28,6 +28,7 @@
     <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
+    <a class="btn sm ghost" href="/api/logs/export" download title="出问题时导出运行日志发给开发者">导出日志</a>
   </header>
 
   <!-- ================= 商品 ================= -->
@@ -48,7 +49,7 @@
         </div>
         <div class="src-tabs" v-if="workMode==='direct' && productSources.length > 1">
           <button :class="{on: !pSource}" @click="pSource=''; selected=[]">全部 <span>{{ sourceCount('') }}</span></button>
-          <button v-for="s in productSources" :key="s" :class="{on: pSource===s}" @click="pSource=s; selected=[]">{{ sourceName(s) }} <span>{{ sourceCount(s) }}</span></button>
+          <button v-for="s in productSources" :key="s" :class="{on: pSource===s}" @click="pSource=s; selected=[]" :title="sourceName(s)"><i class="src-ic" v-html="srcIcon(s)"></i>{{ sourceName(s) }} <span>{{ sourceCount(s) }}</span></button>
         </div>
         <select class="input sm" v-model="pLogo" v-if="logos.length && workMode!=='direct'">
           <option value="">全部 logo</option>
@@ -68,7 +69,7 @@
           <div class="grow">
             <div class="t">{{ p.title || '（无标题）' }}</div>
             <div class="meta">
-              <span class="tag src" v-if="workMode==='direct'">{{ sourceName(p.source) }}</span>
+              <span class="tag src" v-if="workMode==='direct'"><i class="src-ic sm" v-html="srcIcon(p.source)"></i>{{ sourceName(p.source) }}</span>
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
               <span class="price rub" v-else-if="p.market_price_rub">{{ Math.round(p.market_price_rub) }} ₽</span>
               <span class="tag warn" v-if="matchStateName(p.match_state)">{{ matchStateName(p.match_state) }}</span>
@@ -191,7 +192,7 @@
         <div class="grow">
           <h2 :title="current.title">{{ current.title || '（无标题）' }}</h2>
           <div class="faint" style="margin-top:4px">
-            <span class="tag src">{{ sourceName(current.source) }}</span> {{ current.offer_id }} ·
+            <span class="tag src"><i class="src-ic sm" v-html="srcIcon(current.source)"></i>{{ sourceName(current.source) }}</span> {{ current.offer_id }} ·
             {{ skus.length }} 个颜色 · {{ (current.sizes||[]).length || 1 }} 个尺码 · {{ (current.main_images||[]).length }} 主图 · {{ (current.detail_images||[]).length }} 详情图
             <template v-if="current.price_min"> · 进货价 <span class="price">¥{{ fmtPrice(current.price_min, current.price_max) }}</span></template>
             <template v-if="current.market_price_rub"> · {{ sourceName(current.source) }} 售价 {{ Math.round(current.market_price_rub) }} ₽</template>
@@ -209,7 +210,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
             {{ units.length && (mCount.matched || mCount.none) ? '继续匹配剩下的规格' : '找 1688 同款' }}</button>
           <button class="btn" v-if="!matchRunning && units.length && !mCount.todo" @click="rematch">全部重新匹配</button>
-          <span class="mt-running" v-if="matchRunning"><i class="spin"></i>匹配中…</span>
+          <span class="mt-running" v-if="matchRunning"><i class="spin"></i>{{ matchStep() }}</span>
         </div>
         <div class="mt-stats" v-if="units.length">
           <button v-for="f in mFilters" :key="f.k" :class="['mt-stat', f.k, {on: mFilter === f.k}]" @click="mFilter = f.k">
@@ -409,7 +410,7 @@
 
       <div class="logo-tabs" v-if="workMode==='direct' && listingSources.length">
         <button :class="{on: qSource===''}" @click="qSource=''; qSel=[]">全部来源 <span>{{ facetCount('source', '') }}</span></button>
-        <button v-for="s in listingSources" :key="s" :class="{on: qSource===s}" @click="qSource=s; qSel=[]">{{ sourceName(s) }} <span>{{ facetCount('source', s) }}</span></button>
+        <button v-for="s in listingSources" :key="s" :class="{on: qSource===s}" @click="qSource=s; qSel=[]"><i class="src-ic" v-html="srcIcon(s)"></i>{{ s === '1688' ? '1688' : sourceName(s) }} <span>{{ facetCount('source', s) }}</span></button>
       </div>
       <div class="logo-tabs" v-if="listingLogos.length > 1">
         <button :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]">全部 <span>{{ facetCount('logo', '') }}</span></button>
@@ -448,7 +449,7 @@
             <img :src="(l.variants.find(v => v.enabled && v.cover) || l.variants[0] || {}).cover">
             <i class="check" :class="{on: qSel.includes(lkey(l))}"></i>
             <span class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
-            <span class="q-src" v-if="l.source && l.mode === 'direct'">{{ sourceName(l.source) }}</span>
+            <span class="q-src" v-if="l.source && l.mode === 'direct'"><i class="src-ic" v-html="srcIcon(l.source)"></i>{{ sourceName(l.source) }}</span>
           </div>
           <div class="q-vars">
             <div class="q-var" v-for="v in l.variants" :key="v.sku" :class="{off: !v.enabled}" :title="v.sku + (v.color ? ' → ' + v.color : '')">
@@ -801,6 +802,11 @@
     <div class="page-inner" style="max-width:860px">
       <h1>设置</h1>
       <div class="sub">所有数据保存在程序目录下的 data 文件夹。</div>
+      <div class="note log-note">
+        <b>运行日志</b>：程序会把每一步（采集、找同款、AI 填写、上架、WB 接口、报错）记在 <code>data/logs</code>，令牌和密钥自动打码。
+        遇到问题点「导出运行日志」，把下载的 zip 发给开发者即可定位。
+        <a class="btn sm primary" href="/api/logs/export" download>导出运行日志</a>
+      </div>
 
       <div class="card">
         <div class="set-title">AI 中转站</div>

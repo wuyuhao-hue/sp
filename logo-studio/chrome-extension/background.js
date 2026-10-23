@@ -8,6 +8,12 @@ const OFFER_RE = /(?:offer\/|offerId=|offer_id=)(\d{8,15})/g;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const rand = (a, b) => a + Math.random() * (b - a);
 
+// 过程日志写进工作台的运行日志（data/logs），出问题时一起导出
+function elog(msg, data = {}) {
+  fetch(SERVER + '/api/ext/log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ msg: String(msg).slice(0, 500), data }) }).catch(() => {});
+}
+
 async function post(path, body) {
   const r = await fetch(SERVER + path, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -32,6 +38,7 @@ async function workerTab() {
 
 async function closeWorker() {
   const { win } = await chrome.storage.session.get(['win']);
+  if (win) elog('任务都做完了，关闭采集窗口');
   await chrome.storage.session.remove(['win', 'tab']);
   if (win) await chrome.windows.remove(win).catch(() => {});
 }
@@ -53,15 +60,23 @@ function waitLoaded(tabId, timeout = 45000) {
 }
 
 async function navigate(tabId, url) {
+  const t0 = Date.now();
   const loaded = waitLoaded(tabId);
   await chrome.tabs.update(tabId, { url });
-  await loaded;
+  const ok = await loaded;
+  elog(ok ? '打开页面' : '页面 45 秒没加载完，继续尝试读取', { url: url.slice(0, 300), ms: Date.now() - t0 });
   await sleep(rand(1200, 2200));
 }
 
-async function exec(tabId, func, args = []) {
-  const [res] = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func, args });
-  return res ? res.result : undefined;
+async function exec(tabId, func, args = [], ms = 150000) {
+  // 页面里的脚本最多等 ms：页面卡住时报错交回，不会让采集助手一直卡在一个任务上、后面的任务都排不到
+  let timer;
+  const run = chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN', func, args });
+  const limit = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('页面没有响应（超过 ' + Math.round(ms / 1000) + ' 秒）')), ms); });
+  try {
+    const [res] = await Promise.race([run, limit]);
+    return res ? res.result : undefined;
+  } finally { clearTimeout(timer); }
 }
 
 // ---------------- 页面内执行的函数（必须自包含） ----------------
@@ -161,7 +176,8 @@ async function pageOzon() {
   const walk = (o, depth = 0) => {      // 在任意 JSON 结构里找 {sku, link}
     if (!o || depth > 12) return;
     if (typeof o === 'string') {
-      if (o.includes('/modal/aspects')) modalLinks.add(o);
+      if (/modal\/aspects/i.test(o) && o.length < 600) modalLinks.add(o.startsWith('/') || o.startsWith('http') ? o : '/' + o);
+      for (const m of o.matchAll(/\/product\/[\w%-]*?-?(\d{6,})\/?/g)) add(m[1], m[0]);
       if (o.length > 2 && (o[0] === '{' || o[0] === '[')) { try { walk(JSON.parse(o), depth + 1); } catch (e) { /* 不是 JSON */ } }
       return;
     }
@@ -172,7 +188,38 @@ async function pageOzon() {
     }
   };
   const aspectsOf = j => {
-    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) if (/^webAspects/.test(k)) walk(v);
+    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) {
+      if (/^webAspects/.test(k)) walk(v);
+      else if (typeof v === 'string' && /modal\/aspects/i.test(v)) {   // 「所有颜色」入口可能在别的组件里
+        for (const m of v.matchAll(/[\w/]*modal\/aspects\w*\?[^"\\\s]*/gi)) modalLinks.add(m[0].startsWith('/') ? m[0] : '/' + m[0]);
+      }
+    }
+  };
+  // 页面上实际显示的规格（和人看到的一样）：规格区里的链接；再点开「所有颜色 / Ещё」读弹窗里的链接
+  const domScan = async () => {
+    const grab = root => {
+      for (const a of root.querySelectorAll('a[href*="/product/"]')) {
+        const m = (a.getAttribute('href') || '').match(/\/product\/[\w%-]*?-?(\d{6,})\/?/);
+        if (m) add(m[1], m[0]);
+      }
+    };
+    const zones = () => document.querySelectorAll('[data-widget^="webAspects"], [data-widget*="spects"]');
+    for (const z of zones()) grab(z);
+    let clicked = 0;
+    for (const z of zones()) {
+      for (const el of z.querySelectorAll('button, [role="button"], span, div')) {
+        const t = (el.textContent || '').trim();
+        if (t.length > 40 || !/^(все|ещё|еще|показать)/i.test(t)) continue;
+        try { el.click(); clicked++; } catch (e) { /* 忽略 */ }
+        await sleep(1500);
+        for (const d of document.querySelectorAll('[data-widget*="AspectsModal"], [data-widget*="aspectsModal"], [role="dialog"], [class*="modal"]')) grab(d);
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await sleep(300);
+        if (clicked >= 3) break;
+      }
+      if (clicked >= 3) break;
+    }
+    diag.dom_clicked = clicked;
   };
   const entry = (location.pathname.match(/(\d{5,})\/?$/) || location.pathname.match(/-(\d{5,})/) || [])[1] || '';
   const first = await get(location.pathname);
@@ -185,11 +232,15 @@ async function pageOzon() {
   aspectsOf(first);
   const pages = new Map([[entrySku, main]]);
   const probed = new Set();
-  const diag = { modal: 0, modal_ok: 0, failed: 0 };
+  const diag = { modal: 0, modal_ok: 0, failed: 0, dom_clicked: 0 };
+  try { await domScan(); } catch (e) { diag.dom_error = String(e).slice(0, 120); }
+  diag.after_dom = known.size;
   const probe = async sku => {
     probed.add(sku);
     diag.modal++;
-    const tries = [...[...modalLinks].filter(l => l.includes(sku)), `/modal/aspectsNew?product_id=${sku}`];
+    const own = [...modalLinks].filter(l => l.includes(sku));
+    const other = [...modalLinks].filter(l => !l.includes(sku)).map(l => l.replace(/(product_id|sku|id)=\d+/i, `$1=${sku}`));
+    const tries = [...new Set([...own, ...other, `/modal/aspectsNew?product_id=${sku}`, `/modal/aspectsNew?sku=${sku}`])].slice(0, 4);
     for (const path of tries) {
       try {
         const j = await get(path.startsWith('http') ? new URL(path).pathname + new URL(path).search : path);
@@ -215,78 +266,132 @@ async function pageOzon() {
     await sleep(300 + Math.random() * 400);
   }
   diag.discovered = known.size;
+  diag.modal_links = [...modalLinks].slice(0, 5);
+  diag.skus = [...known.keys()].slice(0, 80);
+  diag.fetched = [...pages.values()].filter(Boolean).length;
   return { pages: [...pages.values()].filter(Boolean), url: location.href, diag };
 }
 
-// WB：在商品页里读 WB 公开的 card.json（图片服务器上）和价格接口；同一商品的其他颜色一起读（最多 20 个）
+// WB：读 WB 公开的 card.json（图片服务器上）和价格接口；同一商品的其他颜色一起读（最多 20 个）。
+// WB 的图片服务器编号（basket-NN）和价格接口会变：优先用页面自己刚请求过的地址，其次并行探测，所有请求都有超时，不会卡死。
 async function pageWb() {
+  const T0 = Date.now(), BUDGET = 75000;
   const nm = Number((location.pathname.match(/catalog\/(\d+)/) || [])[1]);
   const vp = n => ({ vol: Math.floor(n / 1e5), part: Math.floor(n / 1e3) });
-  const hosts = {};
-  for (const e of performance.getEntriesByType('resource')) {
-    const m = e.name.match(/https:\/\/(basket-\d+\.wbbasket\.ru)\/vol(\d+)\//);
-    if (m) hosts[m[2]] = m[1];
-  }
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const tfetch = async (url, ms = 6000) => {
+    const c = new AbortController(); const t = setTimeout(() => c.abort(), ms);
+    try { return await fetch(url, { signal: c.signal }); } finally { clearTimeout(t); }
+  };
+  const diag = { tried: 0, from_page: false, detail: '' };
+  const hosts = {};           // vol → host
+  let detailUrl = '';         // 页面自己用的价格接口
+  const scan = () => {
+    for (const e of performance.getEntriesByType('resource')) {
+      const m = e.name.match(/https:\/\/([\w-]+\.wbbasket\.ru|[\w-]+\.wbcontent\.net|[\w-]+\.wb\.ru)\/vol(\d+)\//);
+      if (m) { hosts[m[2]] = m[1]; diag.from_page = true; }
+      if (/\/cards\/v\d+\/(list|detail)\?/.test(e.name) && /nm=/.test(e.name)) detailUrl = e.name;
+    }
+  };
+  for (let i = 0; i < 16 && !hosts[vp(nm).vol]; i++) { scan(); if (!hosts[vp(nm).vol]) await sleep(500); } // 页面还在加载：等一会儿
   const tryHost = async (h, n) => {
     const { vol, part } = vp(n);
+    diag.tried++;
     try {
-      const r = await fetch(`https://${h}/vol${vol}/part${part}/${n}/info/ru/card.json`);
-      if (r.ok) return { nm: n, host: h, vol, part, card: await r.json() };
+      const r = await tfetch(`https://${h}/vol${vol}/part${part}/${n}/info/ru/card.json`, 5000);
+      if (r.ok) { const card = await r.json(); return { nm: n, host: h, vol, part, card }; }
     } catch (e) { /* 换下一个服务器 */ }
     return null;
   };
   const get = async n => {
     const { vol } = vp(n);
     if (hosts[vol]) { const r = await tryHost(hosts[vol], n); if (r) return r; }
-    for (let i = 1; i <= 40; i++) {
-      const h = `basket-${String(i).padStart(2, '0')}.wbbasket.ru`;
-      const r = await tryHost(h, n);
-      if (r) { hosts[vol] = h; return r; }
+    const near = Object.entries(hosts).sort((a, b) => Math.abs(a[0] - vol) - Math.abs(b[0] - vol)).map(x => +x[1].match(/\d+/)[0]);
+    const order = [...new Set([...near.flatMap(k => [k, k + 1, k - 1, k + 2, k - 2]), ...Array.from({ length: 80 }, (_, i) => i + 1)])]
+      .filter(k => k >= 1 && k <= 99);
+    for (let i = 0; i < order.length && Date.now() - T0 < BUDGET; i += 10) { // 每批并行 10 个
+      const res = await Promise.all(order.slice(i, i + 10).map(k => tryHost(`basket-${String(k).padStart(2, '0')}.wbbasket.ru`, n)));
+      const ok = res.find(Boolean);
+      if (ok) { hosts[vol] = ok.host; return ok; }
     }
     return null;
   };
   const first = await get(nm);
-  if (!first) return { cards: [], error: '没找到这个商品的 card.json' };
+  if (!first) return { cards: [], error: `没找到这个商品的 card.json（探测了 ${diag.tried} 次）`, diag };
   const ids = [nm];
   for (const c of first.card.full_colors || []) if (c && c.nm_id && !ids.includes(c.nm_id)) ids.push(c.nm_id);
   for (const c of first.card.colors || []) if (typeof c === 'number' && !ids.includes(c)) ids.push(c);
   const cards = [first];
-  for (const n of ids.slice(1, 20)) { const c = await get(n); if (c) cards.push(c); }
+  const rest = await Promise.all(ids.slice(1, 20).map(n => get(n)));
+  for (const c of rest) if (c) cards.push(c);
+  // 价格：先用页面自己请求过的价格接口（换上我们要的 nm），再试几个已知版本
+  scan();
+  const nmList = ids.slice(0, 20).join(';');
+  const urls = [];
+  if (detailUrl) urls.push(detailUrl.replace(/([?&]nm=)[^&]*/, '$1' + nmList));
+  for (const host of ['card.wb.ru', 'u-card.wb.ru']) for (const v of ['v4', 'v2']) {
+    urls.push(`https://${host}/cards/${v}/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm=${nmList}`);
+  }
   let detail = null;
-  for (const v of ['v4', 'v2', 'v1']) {
+  for (const u of urls) {
+    if (Date.now() - T0 > BUDGET + 15000) break;
     try {
-      const r = await fetch(`https://card.wb.ru/cards/${v}/detail?appType=1&curr=rub&dest=-1257786&spp=30&nm=${ids.slice(0, 20).join(';')}`);
+      const r = await tfetch(u, 6000);
       if (!r.ok) continue;
       const j = await r.json();
-      if ((j.products || (j.data || {}).products || []).length) { detail = j; break; }
-    } catch (e) { /* 换下一个版本 */ }
+      if ((j.products || (j.data || {}).products || []).length) { detail = j; diag.detail = u.split('?')[0]; break; }
+    } catch (e) { /* 换下一个 */ }
   }
-  return { cards, detail };
+  // 价格接口都不通：从页面上读当前商品的价格（只有这一个颜色的价，够做市场参考）
+  let domPrice = null;
+  if (!detail) {
+    const el = document.querySelector('[class*="price-block__final-price"], ins[class*="final-price"], [class*="priceBlockFinalPrice"], meta[itemprop="price"]');
+    const txt = el ? (el.getAttribute('content') || el.textContent || '') : '';
+    domPrice = Number(txt.replace(/[^\d,.]/g, '').replace(',', '.')) || null;
+  }
+  return { cards, detail, dom_price: domPrice, diag };
 }
 
 // 以图搜 1688 同款：从搜索结果里提取候选（商品链接周围的图、标题、价格）。自包含，页面里和解析 HTML 文本时都能用
 function pageCandidates(html) {
   const doc = html ? new DOMParser().parseFromString(html, 'text/html') : document;
   const out = [], seen = new Set();
+  const ID = /(?:offer\/|offerId=|offer_id=|offerid["':=\s]+|data-offer-?id=["']?)(\d{8,15})/i;
+  const imgOf = box => {
+    const img = box.querySelector('img');
+    let src = img ? (img.getAttribute('data-src') || img.getAttribute('data-original') || img.getAttribute('data-lazy-src') ||
+      img.getAttribute('data-lazy') || img.getAttribute('data-url') || (img.getAttribute('srcset') || '').split(/[\s,]/)[0] || img.getAttribute('src') || '') : '';
+    if (!src || src.startsWith('data:')) {
+      const bg = box.querySelector('[style*="background"]');
+      const m = bg && (bg.getAttribute('style') || '').match(/url\(["']?([^"')]+)/);
+      src = m ? m[1] : (src.startsWith('data:') ? '' : src);
+    }
+    try { return src ? new URL(src, location.href).href : ''; } catch (e) { return src; }
+  };
+  const push = (id, box, a) => {
+    if (seen.has(id) || out.length >= 20) return;
+    seen.add(id);
+    const text = (box.innerText || box.textContent || '').replace(/\s+/g, ' ').trim();
+    const price = (text.match(/[¥￥]\s*(\d+(?:\.\d+)?)/) || [])[1];
+    const titleEl = box.querySelector('[class*=title], [title]');
+    out.push({ offer_id: id, image: imgOf(box), price: price ? Number(price) : null,
+               title: ((titleEl && (titleEl.getAttribute('title') || titleEl.innerText || titleEl.textContent)) || (a && a.getAttribute('title')) || text).trim().slice(0, 80) });
+  };
   for (const a of doc.querySelectorAll('a[href]')) {
-    const m = (a.getAttribute('href') || '').match(/(?:offer\/|offerId=|offer_id=)(\d{8,15})/);
-    if (!m || seen.has(m[1])) continue;
+    const m = (a.getAttribute('href') || '').match(ID);
+    if (!m) continue;
     let box = a;
     for (let i = 0; i < 6 && box.parentElement; i++) {
       if (box.querySelector('img') && (box.innerText || box.textContent || '').length > 8) break;
       box = box.parentElement;
     }
-    const img = box.querySelector('img');
-    const src = img ? (img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('src') || '') : '';
-    const text = (box.innerText || box.textContent || '').replace(/\s+/g, ' ').trim();
-    const price = (text.match(/[¥￥]\s*(\d+(?:\.\d+)?)/) || [])[1];
-    const titleEl = box.querySelector('[class*=title], [title]');
-    seen.add(m[1]);
-    let abs = src;
-    try { abs = src ? new URL(src, location.href).href : ''; } catch (e) { /* 保留原样 */ }
-    out.push({ offer_id: m[1], image: abs, price: price ? Number(price) : null,
-               title: ((titleEl && (titleEl.getAttribute('title') || titleEl.innerText)) || a.getAttribute('title') || text).trim().slice(0, 80) });
-    if (out.length >= 20) break;
+    push(m[1], box, a);
+  }
+  if (!out.length) {  // 链接不是 1688 地址（站内跳转、点击事件）：在每个结果卡片的属性里找 1688 商品编号
+    for (const box of doc.querySelectorAll('.sbi-item, [class*="item"], li')) {
+      const m = (box.outerHTML || '').slice(0, 5000).match(ID);
+      if (m && box.querySelector('img')) push(m[1], box, null);
+    }
   }
   return out;
 }
@@ -314,6 +419,7 @@ function pageBlocked() {
   const u = location.href;
   if (u.includes('yangkeduo.com/login') || u.includes('pinduoduo.com/login')) return 'login';
   if (u.includes('ozon.') && (document.title.includes('Доступ ограничен') || document.querySelector('#challenge, .challenge-form'))) return 'verify';
+  if (u.includes('wildberries.') && /Почти готово|Проверяем браузер|Подождите/i.test(document.title)) return 'verify';
   if (u.includes('login.') || u.includes('/member/signin')) return 'login';
   if (u.includes('punish') || u.includes('_____tmd_____')) return 'verify';
   for (const sel of ['#nc_1_n1z', '#baxia-dialog-content', '.baxia-dialog', "iframe[src*='punish']"]) {
@@ -350,6 +456,7 @@ async function blockedState(tabId) {
 async function waitUnblocked(win, tabId) {
   let b = await blockedState(tabId);
   if (!b) return false;
+  elog('页面需要' + (b === 'login' ? '登录' : '人机验证') + '，已弹出窗口等待处理', { url: (await chrome.tabs.get(tabId)).url.slice(0, 300) });
   await post('/api/ext/status', {
     status: b, message: b === 'login' ? '请在弹出的 Chrome 窗口中登录（1688 / 拼多多）' : '请在弹出的 Chrome 窗口中完成人机验证',
   });
@@ -392,32 +499,44 @@ async function doPage(task) {
   await navigate(tab, task.url);
   await waitUnblocked(win, tab);
   if (task.platform === 'pdd') await exec(tab, pageScrollAndCollect).catch(() => {});
-  const raw = await exec(tab, { pdd: pagePdd, ozon: pageOzon, wb: pageWb }[task.platform]);
+  const raw = await exec(tab, { pdd: pagePdd, ozon: pageOzon, wb: pageWb }[task.platform], [], 240000);
+  if (raw && raw.error && !((raw.cards || raw.pages || []).length)) throw new Error(raw.error);
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { raw } });
 }
 
 async function doImgSearch(task) {
-  // 先用 AiPrice，没结果再用 1688 自己的以图搜
+  // 先用 AiPrice，没结果再用 1688 自己的以图搜。已经在 AiPrice 页面上就不重新打开（快很多）
   const { win, tab } = await workerTab();
-  let candidates = [], source = '', note = '';
+  let candidates = [], source = '', note = '', html = '';
   try {
-    await navigate(tab, 'https://www.aiprice.com/img/search');
-    await waitUnblocked(win, tab);
-    const r = await exec(tab, pageAiprice, [task.image]);
-    if (r && r.html) candidates = await exec(tab, pageCandidates, [r.html]);
+    const cur = (await chrome.tabs.get(tab)).url || '';
+    if (!cur.includes('aiprice.com')) {
+      await navigate(tab, 'https://www.aiprice.com/img/search');
+      await waitUnblocked(win, tab);
+    }
+    const r = await exec(tab, pageAiprice, [task.image], 60000);
+    if (r && r.html) { html = r.html; candidates = await exec(tab, pageCandidates, [r.html]); }
     else note = (r && r.error) || '';
     source = 'aiprice';
   } catch (e) { note = 'AiPrice：' + e.message; }
   if (!candidates || !candidates.length) {
+    if (html) debugSave('aiprice-' + (task.unit || ''), html);   // 有页面但一个候选都没解析出来：存下来给开发者看格式
     try {
       await navigate(tab, 'https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(task.image));
       await waitUnblocked(win, tab);
-      await exec(tab, pageScrollAndCollect).catch(() => {});
-      candidates = await exec(tab, pageCandidates, [null]);
+      await exec(tab, pageScrollAndCollect, [], 30000).catch(() => {});
+      candidates = await exec(tab, pageCandidates, [null], 30000);
       source = '1688';
+      if (!candidates.length) debugSave('1688search-' + (task.unit || ''), await exec(tab, () => document.documentElement.outerHTML.slice(0, 400000)).catch(() => ''));
     } catch (e) { note = (note ? note + '；' : '') + '1688 以图搜：' + e.message; }
   }
+  elog('以图搜结果', { unit: task.unit, source, count: (candidates || []).length, note, image: task.image });
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { candidates: candidates || [], source, note } });
+}
+
+function debugSave(name, html) {
+  fetch(SERVER + '/api/ext/debug', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, html: String(html || '').slice(0, 400000) }) }).catch(() => {});
 }
 
 async function doShop(task, delay) {
@@ -477,6 +596,8 @@ async function loop() {
       }
       idle = 0;
       const task = r.task, delay = Math.max(Number(r.delay) || 3, 1);
+      // 处理任务期间每 15 秒报到一次：工作台知道采集助手还在忙，不会误报「没连接」
+      const beat = setInterval(() => post('/api/ext/status', { status: '', message: '' }).catch(() => {}), 15000);
       try {
         if (task.kind === 'offer') {
           await doOffer(task);
@@ -486,13 +607,15 @@ async function loop() {
           await sleep(rand(delay, delay * 2) * 1000);
         } else if (task.kind === 'imgsearch') {
           await doImgSearch(task);
-          await sleep(rand(delay, delay * 2) * 1000);
+          await sleep(rand(400, 1000)); // AiPrice 是接口请求，不用像翻 1688 页面那样停很久
         } else if (task.kind === 'shop') await doShop(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
         else throw new Error('采集助手不认识这个任务（' + task.kind + '），请更新采集助手');
       } catch (e) {
+        elog('任务出错：' + String((e && e.message) || e), { kind: task.kind, id: task.id, url: task.url || task.image || '' });
         await post('/api/ext/result', { task_id: task.id, ok: false, data: { error: String((e && e.message) || e) } }).catch(() => {});
       }
+      clearInterval(beat);
     }
   } finally {
     running = false;

@@ -11,7 +11,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import jobs, sources, store
+from . import jobs, runlog, sources, store
 from .scraper import extract_offer_ids, save_offer
 
 _lock = threading.Lock()
@@ -77,7 +77,14 @@ def _watch(job: jobs.Job, wait: float = 45) -> None:
         time.sleep(wait)
         with _lock:
             waiting = any(t["job_id"] == job.id for t in _queue)
-        if waiting and job.status == "running":
+        if not waiting or job.status != "running":
+            return
+        with _lock:
+            busy_with = next((t for t in _active.values()), None)
+        if busy_with and connected():  # 采集助手在忙前面的任务（一次只开一个采集窗口，按顺序来）
+            what = {"page": "商品页", "offer": "1688 商品", "imgsearch": "以图搜", "shop": "店铺"}.get(busy_with["kind"], "任务")
+            job.note(f"排队中：采集助手正在处理前面的{what}，做完会接着处理这里")
+        else:
             job.note("采集助手 45 秒都没有来领任务：请确认 Chrome 开着、采集助手已启用（chrome://extensions），"
                      "并且在 Chrome 里打开过一次工作台页面")
     threading.Thread(target=check, daemon=True).start()
@@ -154,6 +161,8 @@ def next_task(version: str = "") -> dict | None:
                 continue
             t["taken"] = time.time()
             _active[t["id"]] = t
+            runlog.log("采集助手", f"派发 {t['kind']}", ext=state["version"],
+                       **{k: v for k, v in t.items() if k in ("id", "job_id", "platform", "item_id", "offer_id", "url", "pid", "unit", "image", "match_for")})
             if t["kind"] == "offer":
                 j.note(f"正在打开第 {j.done + 1}/{j.total} 个商品…")
             elif t["kind"] == "shop":
@@ -164,6 +173,24 @@ def next_task(version: str = "") -> dict | None:
                 j.note(f"正在以图搜 1688 同款（{j.done + 1}/{j.total}）…")
             return {k: v for k, v in t.items() if k != "taken"}
     return None
+
+
+def _summary(t: dict, data: dict) -> dict:
+    """交回结果的概要（不存整页数据，只记数量和采集诊断，排查漏采时用）。"""
+    raw = data.get("raw") or {}
+    out = {"bytes": len(str(data))}
+    if isinstance(raw, dict):
+        for k in ("pages", "cards"):
+            if isinstance(raw.get(k), list):
+                out[k] = len(raw[k])
+        for k in ("diag", "error"):
+            if raw.get(k):
+                out[k] = raw[k]
+    if "candidates" in data:
+        out["candidates"] = len(data.get("candidates") or [])
+        out["source"] = data.get("source")
+        out["note"] = data.get("note")
+    return out
 
 
 def busy() -> bool:
@@ -210,7 +237,10 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
     with _lock:
         t = _active.pop(task_id, None)
         if not t:
+            runlog.log("采集助手", f"交回了未知/已超时的任务 {task_id}", ok=ok)
             return
+        runlog.log("采集助手", f"交回 {t['kind']} {'成功' if ok else '失败'}", id=task_id, sec=round(time.time() - t.get("taken", time.time()), 1),
+                   error=None if ok else str(data.get("error"))[:500], summary=_summary(t, data) if ok else None)
         job = jobs.get(t["job_id"])
         if not job:
             return

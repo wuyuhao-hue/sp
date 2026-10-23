@@ -292,6 +292,13 @@ createApp({
       return (u.cands && !u.cands.length) ? '以图搜没有找到 1688 候选' : '候选的图片和规格都对不上';
     },
     uniq(a) { return [...new Set((a || []).filter(Boolean))]; },
+    matchStep() {
+      // 现在在做哪一步、做了多久：慢的时候也能看出来没卡住
+      const w = (this.current && this.current.match_wait) || {}, c = this.mCount;
+      const done = c.matched + c.none + c.error, sec = w.t ? Math.max(0, Math.round(Date.now() / 1000 - w.t)) : 0;
+      const step = w.kind === 'imgsearch' ? `正在以图搜「${w.unit}」` : w.kind === 'offer' ? `正在打开 1688 商品 ${w.offer} 核对「${w.unit}」` : '正在本地核对图片';
+      return `${step}… ${sec ? sec + ' 秒 · ' : ''}已完成 ${done}/${this.units.length} 个规格`;
+    },
     matchStateName(m) {
       if (!m) return '';
       if (m.state === 'none') return '未匹配 1688';
@@ -331,6 +338,18 @@ createApp({
       return this.listings.filter(l => this.qMatch(l, f)).length;
     },
     sourceName(s) { return { '1688': '1688', wb: 'WB', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
+    srcIcon(s) {
+      // 来源平台图标（品牌色简化图形）
+      const box = (bg, inner) => `<svg viewBox="0 0 24 24" width="18" height="18"><rect width="24" height="24" rx="6" fill="${bg}"/>${inner}</svg>`;
+      const txt = (t, size = 11) => `<text x="12" y="16" text-anchor="middle" font-size="${size}" font-weight="800" fill="#fff" font-family="Arial, sans-serif">${t}</text>`;
+      return {
+        '1688': box('#FF6A00', '<path d="M5.5 9.5c1.6 5 11.4 5 13 0" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/><circle cx="17.6" cy="7.6" r="1.6" fill="#fff"/>'),
+        pdd: box('#E02E24', txt('拼', 13)),
+        ozon: box('#005BFF', '<circle cx="12" cy="12" r="5.6" fill="none" stroke="#fff" stroke-width="2.6"/>'),
+        wb: box('url(#wbg)', '<defs><linearGradient id="wbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#CB11AB"/><stop offset="1" stop-color="#5B1BA8"/></linearGradient></defs>' + txt('WB', 9.5)),
+        local: box('#8b5cf6', txt('本', 12)),
+      }[s] || box('#a78bfa', txt('?'));
+    },
     sourcesOf(list) {
       const order = ['1688', 'wb', 'pdd', 'ozon'], have = new Set(list.map(x => x.source || '1688'));
       return [...order.filter(s => have.has(s)), ...[...have].filter(s => !order.includes(s))];

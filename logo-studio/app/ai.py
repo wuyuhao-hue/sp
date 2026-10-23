@@ -46,6 +46,12 @@ def _kind(request: httpx.Request) -> str:
 
 def _record(request: httpx.Request, status, ms: int) -> None:
     kind = _kind(request)
+    from . import runlog
+    try:
+        model = json.loads(request.content or b"{}").get("model") if request.headers.get("content-type", "").startswith("application/json") else ""
+    except Exception:  # noqa: BLE001
+        model = ""
+    runlog.log("AI", f"{request.method} {request.url.path} -> {status} {ms}ms", kind=kind, model=model)
     row = {"t": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, "path": request.url.path, "status": status, "ms": ms}
     with _ledger_lock:
         with open(LEDGER, "a", encoding="utf-8") as f:

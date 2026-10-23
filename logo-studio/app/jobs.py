@@ -30,12 +30,16 @@ class Job:
         if not self.log or self.log[-1] != msg:
             self.log.append(msg)
             del self.log[:-200]
+            from . import runlog
+            runlog.log("任务", f"{self.title} | {msg}", job=self.id, progress=f"{self.done}/{self.total}")
 
     def finish(self, msg: str = "完成") -> None:
         self.status = "done"
         self.note(msg)
 
     def fail(self, msg: str) -> None:
+        from . import runlog
+        runlog.log("任务", f"{self.title} | 任务失败", job=self.id)
         self.status = "failed"
         self.note("失败：" + msg)
 

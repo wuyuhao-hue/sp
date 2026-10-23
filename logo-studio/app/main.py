@@ -995,6 +995,39 @@ def scrape_tabs():
 
 
 # ---------------- Chrome 扩展「采集助手」 ----------------
+@app.post("/api/ext/log")
+def ext_log(msg: str = Body(""), data: dict = Body(default_factory=dict)):
+    """采集助手上报的过程日志（打开了哪个网址、页面被拦、脚本超时、采集诊断等）。"""
+    from . import runlog
+    runlog.log("采集助手·插件", msg[:500], **{k: v for k, v in (data or {}).items()})
+    return {"ok": True}
+
+
+@app.post("/api/ext/debug")
+def ext_debug(name: str = Body(""), html: str = Body("")):
+    """采集助手解析不出数据时，把原始页面存一份（去掉脚本）到 data/debug，随运行日志一起导出给开发者。"""
+    from . import runlog
+    d = store.DATA / "debug"
+    d.mkdir(parents=True, exist_ok=True)
+    clean = re.sub(r"(?is)<script\b.*?</script>", "", html or "")[:400000]
+    fn = d / f"{re.sub(r'[^\w-]', '_', name)[:40]}-{time.strftime('%m%d-%H%M%S')}.html"
+    fn.write_text(runlog.mask(clean), "utf-8")
+    runlog.log("调试", f"已保存页面 {fn.name}（{len(clean)} 字符）")
+    return {"ok": True}
+
+
+@app.get("/api/logs/export")
+def logs_export():
+    """导出运行日志（最近 14 天 + 采集调试文件），出问题时把这个 zip 发给开发者。"""
+    from fastapi.responses import Response
+    from . import runlog
+    runlog.log("日志", "导出运行日志")
+    name = time.strftime("运行日志-%Y%m%d-%H%M.zip")
+    from urllib.parse import quote
+    return Response(runlog.export_zip(), media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+
+
 @app.get("/api/ext/task")
 def ext_task(v: str = ""):
     t = extbridge.next_task(v)
@@ -1214,6 +1247,12 @@ def _resume_wb():
 
 
 @app.on_event("startup")
+def _log_start():
+    from . import runlog
+    runlog.startup(VERSION)
+
+
+@app.on_event("startup")
 def _reset_stale_match():
     """程序重启时还没做完的找同款：标回「未匹配」，点「继续匹配」接着做（已出结果的规格不动）。"""
     from . import skumatch
@@ -1226,9 +1265,25 @@ def _reset_stale_match():
         pass
 
 
+@app.exception_handler(HTTPException)
+async def _log_http_error(request, exc):
+    """接口返回的错误提示（界面上弹出的红字）也记进运行日志。"""
+    from fastapi.exception_handlers import http_exception_handler
+    from . import runlog
+    if request.url.path.startswith("/api/"):
+        runlog.log("接口", f"{request.method} {request.url.path} -> {exc.status_code} {str(exc.detail)[:500]}")
+    return await http_exception_handler(request, exc)
+
+
 @app.middleware("http")
 async def no_cache_static(request, call_next):
-    resp = await call_next(request)
+    from . import runlog
+    try:
+        resp = await call_next(request)
+    except Exception as e:  # noqa: BLE001
+        runlog.error("接口", f"{request.method} {request.url.path} 程序出错", e)
+        raise
+
     if request.url.path.startswith("/static/"):
         resp.headers["Cache-Control"] = "no-cache"  # 每次都向服务确认，更新程序后不会用到旧脚本
     return resp
