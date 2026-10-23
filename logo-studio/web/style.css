@@ -384,3 +384,57 @@ pre.log-box { white-space: pre-wrap; max-height: 320px; }
 .input.bad { border-color: var(--danger); color: var(--danger); }
 .wait-text { margin-top: 8px; font-size: 12px; color: #b45309; line-height: 1.45; }
 .q-status.waiting { color: #b45309; background: #fff6e6; }
+
+/* ---------- 待上架（左侧筛选 + 右侧卡片） ---------- */
+.workspace.queue-ws { grid-template-columns: 272px 1fr; }
+.q-side { overflow-y: auto; padding: 14px; gap: 14px; }
+.shop-card { border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+  background: linear-gradient(180deg, #fafaff, #fff); }
+.shop-card.empty-shop { background: #fff7ed; border-color: #fed7aa; }
+.shop-avatar { width: 38px; height: 38px; border-radius: 11px; background: linear-gradient(135deg, var(--accent), #8b5cf6); color: #fff;
+  display: grid; place-items: center; font-weight: 700; font-size: 16px; flex: none; }
+.shop-select { width: 100%; border: 0; background: transparent; font-size: 15px; font-weight: 600; padding: 2px 0; cursor: pointer; outline: none; color: var(--text); }
+.shop-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); background: var(--panel-2); border-radius: 8px; padding: 6px 8px; }
+.f-group { display: flex; flex-direction: column; gap: 2px; }
+.f-title { font-size: 12px; color: var(--muted); font-weight: 600; margin: 4px 4px 4px; }
+.f-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; border: 0; background: transparent; padding: 7px 10px;
+  border-radius: 8px; font-size: 13px; color: var(--text); cursor: pointer; text-align: left; }
+.f-row:hover { background: var(--panel-2); }
+.f-row.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.f-row b { font-weight: 500; font-size: 12px; color: var(--faint); }
+.f-row.on b { color: var(--accent); }
+.f-logo { height: 16px; max-width: 34px; object-fit: contain; }
+.q-main { overflow-y: auto; padding: 18px 22px 40px; min-width: 0; }
+.q-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 14px; }
+.q-head h2 { margin: 0 0 4px; font-size: 20px; }
+.q-head h2 .faint { font-weight: 400; margin-left: 6px; }
+.toolbar.q-tools { margin: 0 0 16px; }
+.toolbar .spacer { flex: 1; }
+.q-main .q-grid { margin-top: 0; align-items: stretch; }
+.q-card { display: flex; flex-direction: column; }
+.q-card .q-body { flex: 1; display: flex; flex-direction: column; }
+.q-info { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.q-info:empty { display: none; }
+.q-actions { margin-top: auto; padding-top: 12px; }
+.q-src { position: absolute; left: 10px; bottom: 10px; font-size: 11px; padding: 2px 8px; border-radius: 6px; background: rgba(17,17,17,.75); color: #fff; }
+.err-text { max-height: 52px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
+
+/* ---------- 采集印标 / 采集上架 切换 ---------- */
+.mode-switch { display: flex; margin-left: 14px; background: #111827; border-radius: 10px; padding: 3px; }
+.mode-switch button { border: 0; background: transparent; color: #9ca3af; padding: 5px 14px; border-radius: 8px; font-weight: 600; font-size: 13px; cursor: pointer; }
+.mode-switch button.on { background: #fff; color: #111827; }
+.workspace.direct { grid-template-columns: 300px 1fr; }
+.tag.src { background: #111827; color: #fff; border-color: #111827; }
+.price.rub { color: #0369a1; }
+.match-card .block-head .faint { margin-left: 8px; }
+.match-row { display: flex; gap: 14px; align-items: flex-start; }
+.match-row img { width: 84px; height: 84px; object-fit: cover; border-radius: 8px; cursor: zoom-in; background: #eceef3; }
+.match-row .t { font-size: 13px; line-height: 1.4; }
+.col-btns { display: flex; flex-direction: column; gap: 6px; }
+.pick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.pick { position: relative; border: 2px solid var(--line); border-radius: 9px; overflow: hidden; cursor: pointer; aspect-ratio: 1; opacity: .55; }
+.pick.on { border-color: var(--accent); opacity: 1; }
+.pick img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pick .check { position: absolute; top: 6px; left: 6px; }
+.shop-card .btn.block { width: auto; align-self: stretch; }
+.shop-meta { flex-wrap: wrap; gap: 4px 10px; }

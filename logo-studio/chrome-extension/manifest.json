@@ -1,23 +1,54 @@
 {
   "manifest_version": 3,
-  "name": "印标工作台 采集助手",
-  "version": "1.2.0",
-  "description": "在你自己的 Chrome 里静默采集 1688 商品，发送到本机运行的印标工作台。",
-  "permissions": ["tabs", "scripting", "storage", "alarms"],
-  "host_permissions": ["*://*.1688.com/*", "http://127.0.0.1:8765/*", "http://localhost:8765/*"],
-  "background": { "service_worker": "background.js" },
+  "name": "AI 套图工作台 采集助手",
+  "version": "1.3.0",
+  "description": "在你自己的 Chrome 里采集 1688 / 拼多多 / Ozon 商品，发送到本机运行的 AI 套图工作台。",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://*.1688.com/*",
+    "*://*.yangkeduo.com/*",
+    "*://*.pinduoduo.com/*",
+    "*://*.ozon.ru/*",
+    "http://127.0.0.1:8765/*",
+    "http://localhost:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["http://127.0.0.1:8765/*", "http://localhost:8765/*"],
-      "js": ["bridge.js"],
+      "matches": [
+        "http://127.0.0.1:8765/*",
+        "http://localhost:8765/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["*://detail.1688.com/offer/*"],
-      "js": ["page-button.js"],
+      "matches": [
+        "*://detail.1688.com/offer/*",
+        "*://mobile.yangkeduo.com/goods*",
+        "*://*.ozon.ru/product/*"
+      ],
+      "js": [
+        "page-button.js"
+      ],
       "run_at": "document_idle"
     }
   ],
-  "action": { "default_title": "印标工作台 采集助手" },
-  "icons": { "16": "icon16.png", "48": "icon48.png", "128": "icon128.png" }
+  "action": {
+    "default_title": "AI 套图工作台 采集助手"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
 }

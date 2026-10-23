@@ -133,8 +133,9 @@ def load_image(src: str, max_side: int = 1280) -> Image.Image:
             pid, rel = src[6:].split("/", 1)
             data = (store.product_dir(pid) / rel).read_bytes()
         else:
-            r = httpx.get(src, headers={"User-Agent": UA, "Referer": "https://detail.1688.com/"},
-                          timeout=40, follow_redirects=True)
+            ref = "https://www.ozon.ru/" if "ozone.ru" in src or "ozon." in src else \
+                "https://mobile.yangkeduo.com/" if "pddpic" in src or "yangkeduo" in src else "https://detail.1688.com/"
+            r = httpx.get(src, headers={"User-Agent": UA, "Referer": ref}, timeout=40, follow_redirects=True)
             if r.status_code != 200:
                 raise RuntimeError(f"图片读取失败（{r.status_code}）：{src}")
             data = r.content

@@ -66,7 +66,8 @@ def _summary(p: dict) -> dict:
         "sku_count": len(studio.sku_list(p)), "set_count": len(sets),
         "queued": sum(1 for st in sets if st.get("queued")),
         "running": any(st.get("status") == "running" for st in sets),
-        "source": p.get("source"), "created": p.get("created"),
+        "source": p.get("source"), "created": p.get("created"), "mode": p.get("mode") or "logo",
+        "match": bool(p.get("match")), "market_price_rub": p.get("market_price_rub"),
         **_lifecycle(p),
     }
 
@@ -352,6 +353,72 @@ def batch_queue(ids: list[str] = Body(..., embed=True)):
     return {"count": n}
 
 
+# ---------------- 采集上架模式 ----------------
+@app.post("/api/mode")
+def set_mode(mode: str = Body(..., embed=True)):
+    if mode not in ("logo", "direct"):
+        raise HTTPException(400, "未知模式")
+    store.save_settings({"work_mode": mode})
+    return {"mode": mode}
+
+
+@app.post("/api/products/{pid}/to-queue")
+def direct_to_queue(pid: str, skus: list[str] = Body(default_factory=list), main: list[str] | None = Body(None),
+                    include_detail: bool = Body(False)):
+    """采集上架：把选中颜色的货源原图下载下来，直接加入待上架。"""
+    from . import direct
+
+    p = _product_or_404(pid)
+    if (p.get("mode") or "logo") != "direct":
+        raise HTTPException(400, "这个商品在「采集印标」模式里，请生成套图后移入待上架")
+    job = jobs.Job("direct", f"加入待上架：{(p.get('title') or '')[:20]}")
+    jobs.run_in_thread(job, direct.to_queue, pid, skus, main, include_detail)
+    return job.to_dict()
+
+
+@app.post("/api/products/{pid}/match")
+def match_bind(pid: str, url: str = Body(..., embed=True)):
+    """Ozon 商品绑定 1688 货源。"""
+    from . import match
+
+    _product_or_404(pid)
+    oid = match.offer_id_from(url)
+    if not oid:
+        raise HTTPException(400, "没认出 1688 商品链接（形如 https://detail.1688.com/offer/123456789012.html）")
+    return extbridge.enqueue_match(pid, oid).to_dict()
+
+
+@app.post("/api/products/{pid}/match/check")
+def match_check(pid: str):
+    from . import match
+
+    p = _product_or_404(pid)
+    if not p.get("match"):
+        raise HTTPException(400, "还没绑定 1688 货源")
+    try:
+        v = match.ai_check(p, p["match"])
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"AI 核对失败：{e}") from e
+    return store.update_product(pid, lambda x: x["match"].update(ai=v))
+
+
+@app.post("/api/products/{pid}/match/confirm")
+def match_confirm(pid: str, confirmed: bool = Body(True, embed=True)):
+    _product_or_404(pid)
+    return store.update_product(pid, lambda x: x.get("match", {}).update(confirmed=confirmed))
+
+
+@app.delete("/api/products/{pid}/match")
+def match_unbind(pid: str):
+    def fn(x):
+        x.pop("match", None)
+        x["price_min"] = x["price_max"] = None
+        for s in x.get("skus") or []:
+            s["price"] = None
+    _product_or_404(pid)
+    return store.update_product(pid, fn)
+
+
 # ---------------- WB 店铺与上架 ----------------
 from .wb import listing as wb_listing  # noqa: E402
 from .wb import shops as wb_shops  # noqa: E402
@@ -601,6 +668,7 @@ def _listing_summary(p: dict, L: dict, shop_id: str | None = None) -> dict:
         cover = next((i for i in st.get("images", []) if i.get("file")), None)
         vs.append({**v, "cover": f"/data/products/{p['id']}/{cover['file']}?v={cover.get('v', 0)}" if cover else ""})
     return {"pid": p["id"], "key": L["key"], "product_title": p.get("title", ""), "offer_id": p.get("offer_id"),
+            "source": p.get("source"), "mode": p.get("mode") or "logo",
             "title": L.get("title", ""), "logo_name": L.get("logo_name", ""), "subject_name": L.get("subject_name", ""),
             "status": P.get("status") or "draft", "progress": P.get("progress"), "error": P.get("error", ""),
             "retry_at": P.get("retry_at") if P.get("status") == "waiting" else None,
@@ -640,7 +708,7 @@ def listing_get(pid: str, key: str):
     p, L = _listing(pid, key)
     shop = wb_shops.get(store.get_settings().get("wb_shop_id") or "")
     prefix = (shop or {}).get("vendor_prefix") or "ai"
-    sets = [s for s in p.get("sets") or [] if s.get("queued") and wb_listing.logo_key(s.get("logo_id")) == key]
+    sets = [s for s in p.get("sets") or [] if s.get("queued") and wb_listing.set_key(s) == key]
     options = {}
     for st in sets:
         cover = next((i for i in st.get("images", []) if i.get("file")), None)
@@ -843,7 +911,7 @@ def listing_remove(pid: str, key: str):
     """整张上架单移出待上架（套图本身保留在商品页）。"""
     def fn(p):
         for st in p.get("sets") or []:
-            if st.get("queued") and wb_listing.logo_key(st.get("logo_id")) == key:
+            if st.get("queued") and wb_listing.set_key(st) == key:
                 st["queued"] = False
         L = (p.get("listings") or {}).get(key)
         if L and wb_listing.busy(L):
@@ -884,7 +952,7 @@ def scrape(links: str = Body(""), shops: str = Body(""), max_pages: int = Body(5
     if not link_lines and not shop_lines:
         raise HTTPException(400, "请填写商品链接或店铺链接")
     max_pages = max(1, min(max_pages, 50))
-    if store.get_settings().get("scrape_mode") == "extension":
+    if store.get_settings().get("scrape_mode") == "extension" or store.get_settings().get("work_mode") == "direct":
         return extbridge.start_job(link_lines, shop_lines, max_pages).to_dict()
     job = jobs.Job("scrape", f"采集 {len(link_lines)} 个链接 / {len(shop_lines)} 个店铺")
     browser.submit(run_scrape, link_lines, shop_lines, max_pages, job)
@@ -919,8 +987,10 @@ def ext_status(status: str = Body(""), message: str = Body("")):
 
 
 @app.post("/api/ext/collect")
-def ext_collect(offer_id: str = Body(...), raw: dict = Body(...)):
-    return {"message": extbridge.collect_single(offer_id, raw)}
+def ext_collect(offer_id: str = Body(...), raw: dict = Body(...), platform: str = Body("1688")):
+    if platform not in ("1688", "pdd", "ozon"):
+        raise HTTPException(400, "不支持的平台")
+    return {"message": extbridge.collect_single(offer_id, raw, platform)}
 
 
 @app.post("/api/browser/open")

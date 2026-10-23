@@ -457,10 +457,11 @@ def extract_offer_ids(text: str) -> list[str]:
     return ids
 
 
-def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | None:
-    """把页面上提取到的数据解析后保存为商品。图片只保存原始网址，生图时再临时读取。"""
+def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job, mode: str = "logo") -> dict | None:
+    """把页面上提取到的数据解析后保存为商品。图片只保存原始网址，生图时再临时读取。
+    mode="direct"（采集上架模式）：另存一份 d1688-…，和印标模式的同一个商品互不影响。"""
     url = f"https://detail.1688.com/offer/{offer_id}.html"
-    pid = f"1688-{offer_id}"
+    pid = f"d1688-{offer_id}" if mode == "direct" else f"1688-{offer_id}"
     info = parse_offer(raw, offer_id, url)
     if not info["main_images"] and not info["sku_props"]:
         dump = store.DEBUG / f"{offer_id}.json"
@@ -484,7 +485,7 @@ def save_offer(b: Browser | None, raw: dict, offer_id: str, job: Job) -> dict | 
     if old:  # 重新采集：更新商品信息，保留已生成的套图和填写过的卖点、尺码表
         product = {**old, **info}
     else:
-        product = {"id": pid, "source": "1688", "created": time.time(), **info, "sets": [], "ai": {}}
+        product = {"id": pid, "source": "1688", "mode": mode, "created": time.time(), **info, "sets": [], "ai": {}}
     store.save_product(product)
     n_sku = sum(1 for p in info["sku_props"] for v in p["values"] if v["image"])
     job.note(f"{'↻ 已更新' if old else '✓'} {info['title'][:30] or offer_id}（{n_sku} 个 SKU 图 / {len(info['main_images'])} 主图 / "

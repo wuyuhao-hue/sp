@@ -1,4 +1,4 @@
-// 印标工作台 采集助手：向本机的印标工作台领取采集任务，在一个最小化的窗口里打开 1688 页面读取数据。
+// AI 套图工作台 采集助手：向本机工作台领取采集任务，在一个最小化的窗口里打开 1688 / 拼多多 / Ozon 页面读取数据。
 // 用的是你自己的 Chrome 和登录状态；遇到登录/人机验证时把窗口弹出来让你处理，处理完自动缩回去继续。
 
 const SERVER = 'http://127.0.0.1:8765';
@@ -99,8 +99,83 @@ function pageExtract() {
   };
 }
 
+// 拼多多：读页面里的商品数据对象（rawData），没有就在页面数据里有限地找一个带 goodsName + skus 的对象
+function pagePdd() {
+  const seen = new WeakSet();
+  const safe = v => JSON.parse(JSON.stringify(v, (k, val) => {
+    if (typeof val === 'function') return undefined;
+    if (val && typeof val === 'object') { if (seen.has(val)) return undefined; seen.add(val); }
+    return val;
+  }));
+  let goods = null;
+  try { goods = window.rawData && window.rawData.store && window.rawData.store.initDataObj && window.rawData.store.initDataObj.goods; } catch (e) { /* 忽略 */ }
+  if (!goods) {
+    const queue = [[window.rawData || {}, 0], [window.__NEXT_DATA__ || {}, 0], [window.__INITIAL_STATE__ || {}, 0]];
+    const visited = new WeakSet();
+    let n = 0;
+    while (queue.length && n < 80000 && !goods) {
+      const [o, d] = queue.shift();
+      if (!o || typeof o !== 'object' || visited.has(o) || d > 18) continue;
+      visited.add(o); n++;
+      try {
+        if (o.goodsName && Array.isArray(o.skus)) { goods = o; break; }
+        for (const k of Object.keys(o)) { const v = o[k]; if (v && typeof v === 'object') queue.push([v, d + 1]); }
+      } catch (e) { /* 忽略 */ }
+    }
+  }
+  return { goods: goods ? safe(goods) : null, title: document.title };
+}
+
+// Ozon：在页面里调用 Ozon 自己的页面数据接口（entrypoint），再逐个读取颜色/尺码变体（最多 30 个）
+async function pageOzon() {
+  const KEEP = ['webProductHeading', 'webGallery', 'webPrice', 'webAspects', 'webCharacteristics', 'webDescription'];
+  const trim = j => {
+    const ws = {};
+    for (const [k, v] of Object.entries((j && j.widgetStates) || {})) if (KEEP.includes(k.split('-')[0])) ws[k] = v;
+    return { widgetStates: ws, layoutTrackingInfo: j && j.layoutTrackingInfo, seo: j && j.seo ? { title: j.seo.title } : null };
+  };
+  const get = async path => {
+    const r = await fetch('/api/entrypoint-api.bx/page/json/v2?url=' + encodeURIComponent(path), { credentials: 'include' });
+    if (!r.ok) throw new Error('Ozon 接口返回 ' + r.status);
+    return r.json();
+  };
+  const path = location.pathname;
+  const first = await get(path);
+  const main = trim(first);
+  if (first.nextPage) { // 说明、特征常在第二页
+    try { const more = await get(first.nextPage); Object.assign(main.widgetStates, trim(more).widgetStates); } catch (e) { /* 忽略 */ }
+  }
+  const pages = [main];
+  const links = [];
+  for (const [k, v] of Object.entries(main.widgetStates)) {
+    if (!k.startsWith('webAspects')) continue;
+    try {
+      for (const a of JSON.parse(v).aspects || []) for (const x of a.variants || []) {
+        if (x.link && !x.active && !links.includes(x.link)) links.push(x.link);
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+  for (const link of links.slice(0, 30)) {
+    await new Promise(r => setTimeout(r, 400 + Math.random() * 500));
+    try { pages.push(trim(await get(link.split('?')[0]))); } catch (e) { /* 单个变体失败不影响其他 */ }
+  }
+  return { pages, url: location.href };
+}
+
+function platformOf(url) {
+  let m = url.match(/detail\.1688\.com\/offer\/(\d{8,15})/);
+  if (m) return { platform: '1688', id: m[1] };
+  m = url.match(/(?:yangkeduo|pinduoduo)\.com\/.*goods_id=(\d{6,15})/);
+  if (m) return { platform: 'pdd', id: m[1] };
+  m = url.match(/ozon\.\w+\/product\/(?:[\w%-]+-)?(\d{5,12})/);
+  if (m) return { platform: 'ozon', id: m[1] };
+  return null;
+}
+
 function pageBlocked() {
   const u = location.href;
+  if (u.includes('yangkeduo.com/login') || u.includes('pinduoduo.com/login')) return 'login';
+  if (u.includes('ozon.') && (document.title.includes('Доступ ограничен') || document.querySelector('#challenge, .challenge-form'))) return 'verify';
   if (u.includes('login.') || u.includes('/member/signin')) return 'login';
   if (u.includes('punish') || u.includes('_____tmd_____')) return 'verify';
   for (const sel of ['#nc_1_n1z', '#baxia-dialog-content', '.baxia-dialog', "iframe[src*='punish']"]) {
@@ -138,7 +213,7 @@ async function waitUnblocked(win, tabId) {
   let b = await blockedState(tabId);
   if (!b) return false;
   await post('/api/ext/status', {
-    status: b, message: b === 'login' ? '请在弹出的 Chrome 窗口中登录 1688' : '请在弹出的 Chrome 窗口中完成人机验证',
+    status: b, message: b === 'login' ? '请在弹出的 Chrome 窗口中登录（1688 / 拼多多）' : '请在弹出的 Chrome 窗口中完成人机验证',
   });
   await chrome.windows.update(win, { state: 'normal', focused: true });
   const t0 = Date.now();
@@ -173,6 +248,16 @@ async function doOffer(task) {
   await post('/api/ext/result', { task_id: task.id, ok: true, data: { raw } });
 }
 
+async function doPage(task) {
+  // 拼多多 / Ozon 商品页
+  const { win, tab } = await workerTab();
+  await navigate(tab, task.url);
+  await waitUnblocked(win, tab);
+  if (task.platform === 'pdd') await exec(tab, pageScrollAndCollect).catch(() => {});
+  const raw = await exec(tab, task.platform === 'pdd' ? pagePdd : pageOzon);
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { raw } });
+}
+
 async function doShop(task, delay) {
   const { win, tab } = await workerTab();
   let base = task.url.trim();
@@ -198,17 +283,18 @@ async function doShop(task, delay) {
 }
 
 async function doTabs(task) {
-  const tabs = await chrome.tabs.query({ url: '*://detail.1688.com/offer/*' });
-  const pages = [];
+  const tabs = await chrome.tabs.query({ url: ['*://detail.1688.com/offer/*', '*://mobile.yangkeduo.com/goods*', '*://*.ozon.ru/product/*'] });
+  const pages = [], others = [];
   for (const t of tabs) {
-    const m = t.url.match(/offer\/(\d{8,15})/);
-    if (!m) continue;
+    const pf = platformOf(t.url);
+    if (!pf) continue;
     try {
       if (await exec(t.id, pageBlocked)) continue;
-      pages.push({ offer_id: m[1], raw: await exec(t.id, pageExtract) });
+      if (pf.platform === '1688') pages.push({ offer_id: pf.id, raw: await exec(t.id, pageExtract) });
+      else others.push({ platform: pf.platform, id: pf.id, raw: await exec(t.id, pf.platform === 'pdd' ? pagePdd : pageOzon) });
     } catch (e) { /* 页面还没加载完之类，跳过 */ }
   }
-  await post('/api/ext/result', { task_id: task.id, ok: true, data: { pages } });
+  await post('/api/ext/result', { task_id: task.id, ok: true, data: { pages, others } });
 }
 
 let running = false;
@@ -225,6 +311,9 @@ async function loop() {
         if (task.kind === 'offer') {
           await doOffer(task);
           await sleep(rand(delay, delay * 2) * 1000); // 像人一样，看完一个再看下一个
+        } else if (task.kind === 'page') {
+          await doPage(task);
+          await sleep(rand(delay, delay * 2) * 1000);
         } else if (task.kind === 'shop') await doShop(task, delay);
         else if (task.kind === 'tabs') await doTabs(task);
       } catch (e) {
@@ -241,11 +330,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'kick') { loop(); sendResponse({ ok: true }); return; }
   if (msg.type === 'collect-page' && sender.tab) {
     (async () => {
-      const m = sender.tab.url.match(/offer\/(\d{8,15})/);
-      if (!m) return { ok: false, message: '不是商品详情页' };
-      await exec(sender.tab.id, pageScrollAndCollect).catch(() => {});
-      const raw = await exec(sender.tab.id, pageExtract);
-      const r = await post('/api/ext/collect', { offer_id: m[1], raw });
+      const pf = platformOf(sender.tab.url);
+      if (!pf) return { ok: false, message: '不是商品详情页' };
+      if (pf.platform !== 'ozon') await exec(sender.tab.id, pageScrollAndCollect).catch(() => {});
+      const fn = { '1688': pageExtract, pdd: pagePdd, ozon: pageOzon }[pf.platform];
+      const raw = await exec(sender.tab.id, fn);
+      const r = await post('/api/ext/collect', { offer_id: pf.id, raw, platform: pf.platform });
       return { ok: true, message: r.message || '已发送' };
     })().then(sendResponse, e => sendResponse({ ok: false, message: '发送失败，请确认印标工作台已启动（' + e.message + '）' }));
     return true;

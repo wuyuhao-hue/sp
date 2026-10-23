@@ -26,12 +26,14 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', dir: { colors: [], countries: [] },
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, aiCalls: null, showCalls: false, listingTestMsg: '', pStage: 'all', pLogo: '', qShopF: '', qSubject: null, qQuery: '',
+    dsel: { skus: [], main: [], detail: false }, matchUrl: '', dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
       const q = this.query.trim().toLowerCase();
-      return this.products.filter(p => (!q || (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q))
+      return this.products.filter(p => (p.mode || 'logo') === this.workMode
+        && (!q || (p.title || '').toLowerCase().includes(q) || (p.offer_id || '').includes(q))
         && (this.pStage === 'all' || p.stage === this.pStage) && this.logoMatch(p));
     },
     allSelected() { return this.filtered.length && this.filtered.every(p => this.selected.includes(p.id)); },
@@ -48,6 +50,13 @@ createApp({
       const all = (this.current && this.current.sets) || [];
       return all.filter(s => !this.skuView || s.sku === this.skuView).sort((a, b) => b.created - a.created);
     },
+    workMode() { return this.settings.work_mode || 'logo'; },
+    extOld() {
+      const v = (this.ext.version || '').split('.').map(Number), need = [1, 3, 0];
+      if (!this.ext.version) return false;
+      for (let i = 0; i < 3; i++) if ((v[i] || 0) !== need[i]) return (v[i] || 0) < need[i];
+      return false;
+    },
     styleOptions() { return { ...this.styles, random: '随机风格' }; },
     aiInfo() { return (this.current && this.current.ai) || {}; },
     guessGender() { const t = (this.current && this.current.title) || ''; return /女/.test(t) ? 'female' : /男/.test(t) ? 'male' : 'unisex'; },
@@ -61,11 +70,13 @@ createApp({
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },
     apiReady() { return !!(this.settings.api_base && this.settings.api_key); },
-    shownListings() { return this.listings.filter(l => this.listingMatch(l, this.qFilter) && (!this.qLogo || l.key === this.qLogo)); },
+    shownListings() { return this.listings.filter(l => this.qMatch(l)); },
+    otherShops() { return this.shops.filter(s => s.id !== this.shopCurrent); },
+    listingSubjects() { return [...new Set(this.listings.filter(l => (l.mode || 'logo') === this.workMode).map(l => l.subject_name || ''))].sort(); },
     listingLogos() {
       const m = {};
-      for (const l of this.listings) {
-        const g = m[l.key] || (m[l.key] = { key: l.key, name: l.logo_name || '无 logo', count: 0, img: '' });
+      for (const l of this.listings.filter(x => (x.mode || 'logo') === this.workMode)) {
+        const g = m[l.key] || (m[l.key] = { key: l.key, name: l.key === 'src' ? '采集上架（原图）' : (l.logo_name || '无 logo'), count: 0, img: '' });
         g.count++;
         const lg = this.logos.find(x => x.id === l.logo_id);
         if (lg) g.img = this.logoUrl(lg);
@@ -86,7 +97,7 @@ createApp({
       const full = Math.max(0, ...L.sizes.filter(s => s.enabled).map(s => calc(s.cny_override || s.cny || 0)));
       return { full, sale: Math.round(full * (100 - Math.min(99, Math.max(0, pr.discount || 0))) / 100) };
     },
-    queueCount() { return this.products.reduce((n, p) => n + (p.queued || 0), 0); },
+    queueCount() { return this.products.filter(p => (p.mode || 'logo') === this.workMode).reduce((n, p) => n + (p.queued || 0), 0); },
     visibleJobs() { return this.jobs.filter(j => !this.hiddenJobs.includes(j.id)).slice(0, 3); },
     extMode() { return (this.settings.scrape_mode || 'extension') === 'extension'; },
     statusTitle() { return this.extMode ? (this.ext.message || '') : this.browserState.message; },
@@ -108,7 +119,7 @@ createApp({
   },
   async mounted() {
     await Promise.all([this.loadProducts(), this.loadLogos(), this.poll(), this.loadShops().catch(() => {})]);
-    if (this.products.length) this.openProduct(this.products[0].id);
+    if (this.filtered.length) this.openProduct(this.filtered[0].id);
     setInterval(this.poll, 1500);
   },
   methods: {
@@ -175,6 +186,58 @@ createApp({
     async openProduct(id) {
       this.current = await api(`/api/products/${id}`);
       this.skuSel = []; this.skuView = null;
+      if (this.current.mode === 'direct') {
+        this.dsel = { skus: this.skus.filter(k => !this.directSetOf(k.name)).map(k => k.name), main: [...(this.current.main_images || [])], detail: false };
+        this.matchUrl = '';
+      }
+    },
+    async setMode(m) {
+      if (m === this.workMode) return;
+      await api('/api/mode', { body: { mode: m } });
+      this.settings.work_mode = m;
+      this.selected = []; this.pStage = 'all'; this.pLogo = '';
+      await this.loadProducts();
+      if (this.filtered.length) await this.openProduct(this.filtered[0].id); else this.current = null;
+      if (m === 'direct' && this.tab === 'logos') this.tab = 'products';
+    },
+    directSetOf(name) { return ((this.current && this.current.sets) || []).find(s => s.kind === 'source' && s.sku === name && s.queued); },
+    toggleDsku(n) { const i = this.dsel.skus.indexOf(n); i >= 0 ? this.dsel.skus.splice(i, 1) : this.dsel.skus.push(n); },
+    toggleDmain(u) { const i = this.dsel.main.indexOf(u); i >= 0 ? this.dsel.main.splice(i, 1) : this.dsel.main.push(u); },
+    async directToQueue() {
+      const again = this.dsel.skus.filter(n => this.directSetOf(n));
+      if (again.length && !confirm(`${again.join('、')} 已经在待上架，重新加入会用现在勾选的图替换。继续？`)) return;
+      try {
+        this.jobs.unshift(await api(`/api/products/${this.current.id}/to-queue`, { body: { skus: this.dsel.skus, main: this.dsel.main, include_detail: this.dsel.detail } }));
+        this.toast('正在下载原图并加入待上架，进度在右下角');
+      } catch (e) { this.toast(e.message, true); }
+    },
+    async batchDirectQueue() {
+      const ids = this.selected.filter(id => (this.products.find(p => p.id === id) || {}).mode === 'direct');
+      if (!confirm(`把 ${ids.length} 个商品的全部颜色（原图 + 全部主图）加入待上架？`)) return;
+      for (const id of ids) {
+        try { this.jobs.unshift(await api(`/api/products/${id}/to-queue`, { body: { skus: [], main: null, include_detail: false } })); }
+        catch (e) { this.toast(e.message, true); }
+      }
+    },
+    async matchBind() {
+      try { this.jobs.unshift(await api(`/api/products/${this.current.id}/match`, { body: { url: this.matchUrl } })); this.toast('采集助手正在读取 1688 货源…'); this.matchUrl = ''; }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async matchCheck() {
+      this.toast('AI 核对中…');
+      try { this.current = await api(`/api/products/${this.current.id}/match/check`, { body: {} }); this.toast('已重新核对'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    async matchConfirm(v) { this.current = await api(`/api/products/${this.current.id}/match/confirm`, { body: { confirmed: v } }); },
+    async matchUnbind() {
+      if (!confirm('解除和这个 1688 货源的绑定？进货价会清空。')) return;
+      this.current = await api(`/api/products/${this.current.id}/match`, { method: 'DELETE' });
+      this.loadProducts();
+    },
+    imageSearch() {
+      const img = (this.current.main_images || [])[0];
+      if (!img) { this.toast('这个商品没有主图', true); return; }
+      window.open('https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress=' + encodeURIComponent(img), '_blank');
     },
     async refreshCurrent() {
       const p = await api(`/api/products/${this.current.id}`).catch(() => null);
@@ -187,16 +250,36 @@ createApp({
       const st = l.status || 'draft';
       return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock' || st === 'waiting')) || st === f;
     },
-    listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f) && (!this.qLogo || l.key === this.qLogo)).length; },
+    qFilters() { return { status: this.qFilter, logo: this.qLogo, subject: this.qSubject, shop: this.qShopF }; },
+    qMatch(l, f = this.qFilters()) {
+      if ((l.mode || 'logo') !== this.workMode) return false;  // 只看当前模式（采集印标 / 采集上架）的商品卡
+      if (!this.listingMatch(l, f.status)) return false;
+      if (f.logo && l.key !== f.logo) return false;
+      if (f.subject !== null && (l.subject_name || '') !== f.subject) return false;
+      if (f.shop) {
+        const [kind, sid] = f.shop.split(':');
+        const on = (l.shops || []).some(x => x.shop_id === sid && ['uploaded', 'pending_stock'].includes(x.status));
+        if ((kind === 'on') !== on) return false;
+      }
+      const q = this.qQuery.trim().toLowerCase();
+      if (q && !((l.title || '') + ' ' + (l.product_title || '') + ' ' + (l.offer_id || '')).toLowerCase().includes(q)) return false;
+      return true;
+    },
+    facetCount(dim, val) {
+      // 左侧每一项的数字 = 选中它（其他筛选不变）之后能看到几张
+      const f = { ...this.qFilters(), [dim]: val };
+      return this.listings.filter(l => this.qMatch(l, f)).length;
+    },
+    sourceName(s) { return { '1688': '1688', pdd: '拼多多', ozon: 'Ozon', local: '本地' }[s] || s; },
     logoMatch(p) {
       const f = this.pLogo, ids = p.logo_ids || [];
       if (!f) return true;
       return f.startsWith('!') ? !ids.includes(f.slice(1)) : ids.includes(f);
     },
-    stageCount(k) { return this.products.filter(p => (k === 'all' || p.stage === k) && this.logoMatch(p)).length; },
+    stageCount(k) { return this.products.filter(p => (p.mode || 'logo') === this.workMode && (k === 'all' || p.stage === k) && this.logoMatch(p)).length; },
     setLive(st) {
       // 这套图在哪些店铺已上架（按上架记录里这个款式的 nmID）
-      const L = ((this.current && this.current.listings) || {})[st.logo_id || 'none'];
+      const L = ((this.current && this.current.listings) || {})[st.kind === 'source' ? 'src' : (st.logo_id || 'none')];
       const v = L && L.variants.find(x => x.sid === st.id);
       if (!v) return [];
       return Object.entries(L.pub || {}).filter(([, P]) => P.status && P.status !== 'draft' && P.codes && P.nm && P.nm[P.codes[v.sku]])

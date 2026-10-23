@@ -9,13 +9,11 @@ import json
 import re
 
 from .. import store
+from .sizes import parse_size
 
 CACHE = store.DATA / "wb_cache"
 CACHE.mkdir(parents=True, exist_ok=True)
 
-# 成人服装国际码 → 俄码
-RU_SIZE = {"XXS": "42", "XS": "44", "S": "46", "M": "48", "L": "50", "XL": "52", "XXL": "54", "2XL": "54",
-           "XXXL": "56", "3XL": "56", "4XL": "58", "5XL": "60", "6XL": "62", "7XL": "64", "8XL": "66", "9XL": "68"}
 GENDER = re.compile(r"\b(для\s+)?(женск\w*|мужск\w*|женщин\w*|мужчин\w*|девоч\w*|мальчик\w*|унисекс)\b", re.I)
 COLOR_CN = [("藏青|深蓝|海军蓝", "темно-синий"), ("浅蓝|天蓝", "голубой"), ("蓝", "синий"), ("黑", "черный"),
             ("白", "белый"), ("深灰|炭灰", "темно-серый"), ("浅灰", "светло-серый"), ("灰", "серый"),
@@ -26,21 +24,21 @@ COLOR_ID, COUNTRY_ID = 14177449, 14177451
 DROP_IDS = {88952}  # 旧的包装重量特征：重量只走 dimensions.weightBrutto
 
 
+def set_key(st: dict) -> str:
+    """一套图属于哪张上架单：采集上架的原图套图都归 "src"，印标套图按 logo 分。"""
+    return "src" if st.get("kind") == "source" else logo_key(st.get("logo_id"))
+
+
 def logo_key(logo_id: str | None) -> str:
     return logo_id or "none"
 
 
 def tech_size(label: str) -> str:
-    """从 1688 尺码名里取前导国际码：'M建议80-100斤' → 'M'；'2XL【140-160斤】' → '2XL'。"""
-    s = str(label).strip().upper().replace("Ｌ", "L").replace("Ｍ", "M")
-    if re.match(r"^(均码|F\b|FREE|ONE ?SIZE|默认|单码)", s) or not s:
-        return ""  # 均码：WB 上按无尺码商品上架
-    m = re.match(r"^(XXXL|XXL|XXS|XS|\dXL|XL|S|M|L|\d{2,3})", s)
-    return (m.group(1) if m else re.sub(r"[^\w\-/.]", "", s))[:15]
+    return parse_size(label)["tech"]
 
 
-def ru_size(tech: str) -> str:
-    return RU_SIZE.get(tech.upper(), "")
+def ru_size(label: str) -> str:
+    return parse_size(label)["wb"]
 
 
 def clean_title(t: str) -> str:
@@ -50,6 +48,8 @@ def clean_title(t: str) -> str:
 
 
 def guess_color(name: str) -> str:
+    if re.search(r"[а-яё]", name or "", re.I):  # Ozon 的颜色名本来就是俄文
+        return name.strip().lower()
     for pat, ru in COLOR_CN:
         if re.search(pat, name or ""):
             return ru
@@ -111,7 +111,7 @@ def sync(p: dict) -> dict:
     queued = [st for st in p.get("sets") or [] if st.get("queued")]
     groups: dict[str, list[dict]] = {}
     for st in sorted(queued, key=lambda x: x.get("created", 0)):
-        groups.setdefault(logo_key(st.get("logo_id")), []).append(st)
+        groups.setdefault(set_key(st), []).append(st)
     info = p.get("ai") or {}
     names = _sku_names(p)
     for key, sets in groups.items():
@@ -124,6 +124,15 @@ def sync(p: dict) -> dict:
             "package": {"length": None, "width": None, "height": None, "weight": None},
             "stock": 0, "pub": {},
         })
+        if key == "src" and not L.get("src_init"):  # 采集上架：Ozon 自带的俄文标题、说明、包装尺寸直接带进来
+            L["src_init"] = True
+            if p.get("title_ru"):
+                L["title"] = clean_title(p["title_ru"])
+            if p.get("description_ru"):
+                L["description"] = p["description_ru"][:5000]
+            pk = p.get("package_source") or {}
+            if all(pk.get(k) for k in ("length", "width", "height", "weight")):
+                L["package"] = dict(pk)
         _migrate(L)
         if L.get("brand") and L["brand"] == L.get("logo_name") and re.search(r"[\u4e00-\u9fff]", L["brand"]):
             L["brand"] = _logo_brand(L.get("logo_id"))  # 旧版本把 logo 名当品牌：改成 Logo 库里的 WB 品牌名
@@ -147,11 +156,20 @@ def sync(p: dict) -> dict:
                 v["index"] = max(seen | {x["index"] for x in L["variants"]}) + 1
             seen.add(v["index"])
         L["variants"].sort(key=lambda v: v["index"])
+        for sz in L["sizes"]:  # 旧版本没认出来的俄码：用新的尺码解析补上
+            if not sz.get("wb") and not sz.get("note_user"):
+                ps = parse_size(sz["label"])
+                if ps["wb"]:
+                    sz.update(tech=ps["tech"], wb=ps["wb"], note=ps["note"])
         if not L["sizes"]:
-            L["sizes"] = [{"label": s, "tech": tech_size(s), "wb": ru_size(tech_size(s)), "enabled": True,
+            L["sizes"] = [{"label": s, **parse_size(s), "enabled": True,
                            "cny": max([c for c in (_cny(p, v["sku"], s) for v in L["variants"]) if c] or
                                       [p.get("price_max") or p.get("price_min") or 0])}
                           for s in (p.get("sizes") or ["均码"])]
+        for sz in L["sizes"]:  # 后来才有采购价（例如 Ozon 商品刚绑定了 1688 货源）：补上
+            if not sz.get("cny"):
+                sz["cny"] = max([c for c in (_cny(p, v["sku"], sz["label"]) for v in L["variants"]) if c] or
+                                [p.get("price_max") or p.get("price_min") or 0])
     for key in list(listings):
         L = listings[key]
         _migrate(L)
@@ -209,7 +227,8 @@ def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai", shop_id: str | No
     if frozen:
         return frozen
     src = re.sub(r"[^\w\-]", "", str(p.get("offer_id") or p["id"]))
-    lg = re.sub(r"[^\w]", "", L.get("logo_id") or "n")[:6]
+    src = {"pdd": "pdd", "ozon": "oz"}.get(p.get("source") or "", "") + src
+    lg = "s" if L.get("key") == "src" else re.sub(r"[^\w]", "", L.get("logo_id") or "n")[:6]
     return f"{prefix}-{src}-{lg}-{v['index']}"[:72]
 
 
@@ -424,11 +443,15 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
             errors.append(f"尺码「{s['label']}」的卖家尺码为空或超过 15 字符（只有一个均码时可以留空）")
         if not single and not s.get("wb"):
             errors.append(f"尺码「{s['label']}」没有俄码，请手动填写")
+    for s in sizes:
+        if re.search(r"[\u4e00-\u9fff]", s.get("tech") or ""):
+            errors.append(f"尺码「{s['label']}」的卖家尺码「{s['tech']}」含中文，请改成字母或数字（例如 XL、2XL、48）")
+        if not (s.get("cny_override") or s.get("cny")):
+            errors.append(f"尺码「{s['label']}」没有采购价" + ("（Ozon 商品请先在商品页绑定 1688 货源，或在这里手动填进货价）"
+                                                       if p.get("source") == "ozon" else ""))
     techs = [s.get("tech") for s in sizes]
     if len(set(techs)) < len(techs):
         errors.append("有重复的卖家尺码")
-        if not (s.get("cny_override") or s.get("cny")):
-            errors.append(f"尺码「{s['label']}」没有采购价")
     pk = L["package"]
     for k, nm in (("length", "长"), ("width", "宽"), ("height", "高")):
         try:

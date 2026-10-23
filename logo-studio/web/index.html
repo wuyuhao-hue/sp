@@ -19,26 +19,31 @@
       <button :class="{on: tab==='logos'}" @click="tab='logos'">Logo 库</button>
       <button :class="{on: tab==='settings'}" @click="tab='settings'">设置</button>
     </nav>
+    <div class="mode-switch" title="采集印标：AI 生成套图并印你的 logo；采集上架：1688 / 拼多多 / Ozon 采集后用原图直接上架">
+      <button :class="{on: workMode==='logo'}" @click="setMode('logo')">采集印标</button>
+      <button :class="{on: workMode==='direct'}" @click="setMode('direct')">采集上架</button>
+    </div>
     <div class="spacer"></div>
+    <span class="pill" v-if="workMode==='direct' && extOld" title="到 chrome://extensions 点采集助手的刷新按钮">⚠ 请更新采集助手到 1.3.0（拼多多 / Ozon 需要）</span>
     <span class="pill" v-if="!apiReady" style="cursor:pointer" @click="tab='settings'"><i class="dot err"></i>未配置中转站</span>
     <span class="pill" :title="statusTitle"><i class="dot" :class="browserDot"></i>{{ browserLabel }}</span>
     <button class="btn sm" v-if="!extMode" @click="openBrowser">打开浏览器</button>
   </header>
 
   <!-- ================= 商品 ================= -->
-  <main class="workspace" v-if="tab==='products'">
+  <main class="workspace" :class="{direct: workMode==='direct'}" v-if="tab==='products'">
     <aside class="sidebar" :class="{selecting: selected.length}">
       <div class="side-head">
         <div class="row">
           <button class="btn primary grow" @click="showScrape=true">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>采集 1688
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>{{ workMode==='direct' ? '采集 1688 / 拼多多 / Ozon' : '采集 1688' }}
           </button>
-          <button class="btn" @click="$refs.importInput.click()" title="导入本地图片作为一个商品：第一张是 SKU 图，其余是参考图">导入图片</button>
+          <button class="btn" v-if="workMode!=='direct'" @click="$refs.importInput.click()" title="导入本地图片作为一个商品：第一张是 SKU 图，其余是参考图">导入图片</button>
           <input ref="importInput" type="file" accept="image/*" multiple hidden @change="importLocal">
         </div>
         <input class="search" v-model="query" placeholder="搜索标题 / 商品ID">
         <div class="seg stage-seg">
-          <button v-for="(n, k) in {all: '全部', new: '未生成', generated: '已生成', queued: '待上架', live: '已上架'}" :key="k"
+          <button v-for="(n, k) in (workMode==='direct' ? {all: '全部', new: '未加入', queued: '待上架', live: '已上架'} : {all: '全部', new: '未生成', generated: '已生成', queued: '待上架', live: '已上架'})" :key="k"
                   :class="{on: pStage===k}" @click="pStage=k" :title="k==='live' ? '已上到当前店铺「' + (shopName(shopCurrent) || '未选') + '」' : ''">{{ n }} {{ stageCount(k) }}</button>
         </div>
         <select class="input sm" v-model="pLogo" v-if="logos.length">
@@ -59,7 +64,10 @@
           <div class="grow">
             <div class="t">{{ p.title || '（无标题）' }}</div>
             <div class="meta">
+              <span class="tag src" v-if="workMode==='direct'">{{ sourceName(p.source) }}</span>
               <span class="price" v-if="p.price_min">¥{{ fmtPrice(p.price_min, p.price_max) }}</span>
+              <span class="price rub" v-else-if="p.market_price_rub">{{ Math.round(p.market_price_rub) }} ₽</span>
+              <span class="tag warn" v-if="p.source==='ozon' && !p.match">未绑 1688</span>
               <span class="tag">{{ p.sku_count }} SKU</span>
               <span class="tag accent" v-if="p.set_count">{{ p.set_count }} 套图</span>
               <span class="tag ok" v-if="p.queued">{{ p.queued }} 待上架</span>
@@ -69,14 +77,17 @@
           </div>
         </div>
         <div v-if="!products.length" class="empty" style="padding:40px 10px">
-          <div class="faint">还没有商品<br>点「采集 1688」或「导入图片」开始</div>
+          <div class="faint" v-if="workMode==='direct'">还没有商品<br>点上面的「采集」，或在 1688 / 拼多多 / Ozon 商品页点「采集到工作台」</div>
+          <div class="faint" v-else>还没有商品<br>点「采集 1688」或「导入图片」开始</div>
         </div>
       </div>
       <div class="batchbar" v-if="selected.length">
         <div class="row">
-          <span class="faint grow">已选 {{ selected.length }} 个商品，批量生成：</span>
+          <span class="faint grow">已选 {{ selected.length }} 个商品{{ workMode==='direct' ? '' : '，批量生成：' }}</span>
           <button class="btn sm ghost danger" @click="deleteSel">删除</button>
         </div>
+        <button class="btn primary block" v-if="workMode==='direct'" @click="batchDirectQueue">全部颜色加入待上架（原图）</button>
+        <template v-if="workMode!=='direct'">
         <div class="row">
           <select class="input sm grow" v-model="batch.logo_id"><option :value="null">不印标</option><option v-for="l in logos" :key="l.id" :value="l.id">{{ l.name }}</option></select>
           <select class="input sm grow" v-model="batch.style"><option v-for="(n, k) in styleOptions" :key="k" :value="k">{{ n }}</option></select>
@@ -86,11 +97,12 @@
         </div>
         <button class="btn primary block" @click="batchGenerate">批量生成套图</button>
         <button class="btn block" @click="batchQueue">把已完成的套图全部移入待上架</button>
+        </template>
       </div>
     </aside>
 
     <!-- 中间 -->
-    <section class="stage scroll" v-if="current">
+    <section class="stage scroll" v-if="current && workMode!=='direct'">
       <div class="stage-head">
         <div class="grow">
           <h2 :title="current.title">{{ current.title || '（无标题）' }}</h2>
@@ -167,6 +179,85 @@
         <div class="faint">还没有套图。勾选上方的 SKU，在右侧选 logo，然后点「生成套图」。</div>
       </div>
     </section>
+    <!-- 采集上架：货源原图直接上架 -->
+    <section class="stage scroll" v-else-if="current && workMode==='direct'">
+      <div class="stage-head">
+        <div class="grow">
+          <h2 :title="current.title">{{ current.title || '（无标题）' }}</h2>
+          <div class="faint" style="margin-top:4px">
+            <span class="tag src">{{ sourceName(current.source) }}</span> {{ current.offer_id }} ·
+            {{ skus.length }} 个颜色 · {{ (current.sizes||[]).length || 1 }} 个尺码 · {{ (current.main_images||[]).length }} 主图 · {{ (current.detail_images||[]).length }} 详情图
+            <template v-if="current.price_min"> · 进货价 <span class="price">¥{{ fmtPrice(current.price_min, current.price_max) }}</span></template>
+            <template v-if="current.market_price_rub"> · Ozon 售价 {{ Math.round(current.market_price_rub) }} ₽</template>
+            · <a :href="current.url" target="_blank">打开原链接</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="block match-card" v-if="current.source==='ozon'">
+        <div class="block-head"><b>1688 货源</b><span class="faint">Ozon 卢布价只是市场参考，WB 定价按 1688 进货价（人民币）算</span></div>
+        <div v-if="current.match" class="match-row">
+          <img :src="imgSrc(current.match.image)" @click="zoom(imgSrc(current.match.image))">
+          <div class="grow">
+            <div class="t">{{ current.match.title }}</div>
+            <div class="row" style="margin-top:6px">
+              <span class="price">¥{{ fmtPrice(current.match.price_min, current.match.price_max) }}</span>
+              <span class="tag ok" v-if="current.match.confirmed">已确认同款</span>
+              <template v-else-if="current.match.ai">
+                <span class="tag" :class="current.match.ai.same ? 'ok' : 'warn'">AI：{{ current.match.ai.same ? '同款' : '可能不是同款' }}（{{ Math.round((current.match.ai.confidence||0)*100) }}%）</span>
+              </template>
+              <a :href="current.match.url" target="_blank">打开 1688</a>
+            </div>
+            <div class="faint" v-if="current.match.ai" style="margin-top:4px">{{ current.match.ai.reason }}</div>
+          </div>
+          <div class="col-btns">
+            <button class="btn sm primary" v-if="!current.match.confirmed" @click="matchConfirm(true)">确认是同款</button>
+            <button class="btn sm" @click="matchCheck">AI 重新核对</button>
+            <button class="btn sm ghost danger" @click="matchUnbind">解除绑定</button>
+          </div>
+        </div>
+        <div v-else>
+          <div class="row">
+            <input class="input grow" v-model="matchUrl" placeholder="粘贴 1688 同款商品链接，例如 https://detail.1688.com/offer/123456789012.html">
+            <button class="btn primary" :disabled="!matchUrl" @click="matchBind">绑定并读取价格</button>
+          </div>
+          <div class="row" style="margin-top:8px">
+            <button class="btn sm" @click="imageSearch">在 1688 以图搜同款（新标签页）</button>
+            <span class="faint">找到同款后复制它的链接粘贴到上面。绑定后会自动读取价格，并用 AI 看图核对是不是同款。</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="block">
+        <div class="block-head"><b>选择要上架的颜色</b><span class="spacer"></span>
+          <button class="btn sm ghost" @click="dsel.skus = dsel.skus.length === skus.length ? [] : skus.map(k => k.name)">{{ dsel.skus.length === skus.length ? '全不选' : '全选' }}</button></div>
+        <div class="sku-grid">
+          <div v-for="k in skus" :key="k.name" class="sku-card" :class="{on: dsel.skus.includes(k.name)}" @click="toggleDsku(k.name)">
+            <img :src="imgSrc(k.image)">
+            <i class="check big" :class="{on: dsel.skus.includes(k.name)}"></i>
+            <div class="nm" :title="k.name">{{ k.name }}</div>
+            <div class="faint">{{ directSetOf(k.name) ? '已在待上架 · ' + directSetOf(k.name).images.length + ' 张' : '未加入' }}</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="block">
+        <div class="block-head"><b>上架用的图</b><span class="faint">每个颜色：自己的 SKU 图（Ozon 为该颜色全部图）在最前，后面接下面勾选的主图，最多 15 张</span></div>
+        <div class="faint" style="margin:4px 0 8px">主图（{{ dsel.main.length }}/{{ (current.main_images||[]).length }}）</div>
+        <div class="pick-grid">
+          <div v-for="u in current.main_images || []" :key="u" class="pick" :class="{on: dsel.main.includes(u)}" @click="toggleDmain(u)">
+            <img :src="imgSrc(u)"><i class="check" :class="{on: dsel.main.includes(u)}"></i>
+          </div>
+        </div>
+        <label class="row" style="margin-top:12px;cursor:pointer" v-if="(current.detail_images||[]).length">
+          <input type="checkbox" v-model="dsel.detail"> 也带上详情图（{{ current.detail_images.length }} 张，一般是中文长图，不建议）
+        </label>
+        <div class="row" style="margin-top:14px">
+          <button class="btn primary" :disabled="!dsel.skus.length" @click="directToQueue">把选中的 {{ dsel.skus.length }} 个颜色加入待上架</button>
+          <span class="faint">加入后到「待上架」里 AI 填写类目、标题、属性，预检后上架（和印标模式完全一样）。</span>
+        </div>
+      </div>
+    </section>
     <section class="stage" v-else>
       <div class="empty">
         <div class="ill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.38 3.46 16 2a4 4 0 0 1-8 0L3.62 3.46a2 2 0 0 0-1.34 2.23l.58 3.47a1 1 0 0 0 .99.84H6v10c0 1.1.9 2 2 2h8a2 2 0 0 0 2-2V10h2.15a1 1 0 0 0 .99-.84l.58-3.47a2 2 0 0 0-1.34-2.23z"/></svg></div>
@@ -176,7 +267,7 @@
     </section>
 
     <!-- 右侧 -->
-    <aside class="rightbar">
+    <aside class="rightbar" v-if="workMode!=='direct'">
       <template v-if="current">
         <div class="sec">
           <h3>Logo <button class="btn sm ghost" @click="tab='logos'">管理</button></h3>
@@ -240,42 +331,76 @@
   </main>
 
   <!-- ================= 待上架 ================= -->
-  <main class="page" v-if="tab==='queue'">
-    <div class="page-inner" style="max-width:1280px">
-      <div class="row between" style="align-items:flex-start">
-        <div><h1>待上架</h1><div class="sub">同一个商品 + 同一个 logo 的待上架套图合成一张 WB 商品卡，每个颜色是卡里的一个款式。填好资料 → 预检 → 上架。</div></div>
+  <main class="workspace queue-ws" v-if="tab==='queue'">
+    <aside class="sidebar q-side">
+      <!-- 当前店铺 -->
+      <div class="shop-card" v-if="shops.length">
         <div class="row">
-          <span class="faint">店铺</span>
-          <select class="input" style="width:180px" :value="shopCurrent" @change="setCurrentShop($event.target.value)" v-if="shops.length">
-            <option v-for="s in shops" :key="s.id" :value="s.id">{{ s.name }}</option>
-          </select>
-          <button class="btn" @click="openShops">店铺管理</button>
-        </div>
-      </div>
-
-      <div class="note" style="margin-top:16px" v-if="!shops.length">
-        <b>还没有绑定 WB 店铺。</b>点右上角「店铺管理」→ 填写店铺名和 WB 卖家后台生成的 API 令牌（需要勾选 内容 Content、价格和折扣 Prices、市场 Marketplace 三个权限）。
-        令牌只保存在这台电脑的 data/shops.json 里。
-      </div>
-
-      <div class="logo-tabs" v-if="listingLogos.length > 1">
-        <button :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]">全部商标 <span>{{ listings.length }}</span></button>
-        <button v-for="g in listingLogos" :key="g.key" :class="{on: qLogo===g.key}" @click="qLogo=g.key; qSel=[]">
-          <img v-if="g.img" :src="g.img">{{ g.name }} <span>{{ g.count }}</span></button>
-      </div>
-      <div class="row between" style="margin-top:18px" v-if="listings.length">
-        <div class="row">
-          <span class="row" style="cursor:pointer" @click="qSel = qSel.length === shownListings.length ? [] : shownListings.map(lkey)"><i class="check" :class="{on: shownListings.length && qSel.length === shownListings.length}"></i><span class="faint">全选（{{ qSel.length }}/{{ shownListings.length }}）</span></span>
-          <div class="seg" style="margin-left:10px">
-            <button v-for="(n, k) in {all: '全部', todo: '未上架', running: '上架中', uploaded: '已上架', failed: '失败'}" :key="k" :class="{on: qFilter===k}" @click="qFilter=k; qSel=[]">{{ n }} {{ listingCount(k) }}</button>
+          <div class="shop-avatar">{{ (shopName(shopCurrent) || '?').slice(0, 1) }}</div>
+          <div class="grow">
+            <div class="faint">当前店铺（上架到这里）</div>
+            <select class="shop-select" :value="shopCurrent" @change="setCurrentShop($event.target.value)">
+              <option v-for="s in shops" :key="s.id" :value="s.id">{{ s.name }}</option>
+            </select>
           </div>
         </div>
-        <div class="row">
-          <button class="btn" :disabled="!qSel.length" @click="exportQueue">导出图片</button>
-          <button class="btn" :disabled="!qSel.length || !shops.length" @click="batchAi" title="自动匹配类目，AI 填写标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">批量 AI 填写</button>
-          <button class="btn" :disabled="!qSel.length" @click="openBatchEdit">批量修改价格/折扣/重量/库存/尺寸</button>
-          <button class="btn primary" :disabled="!qSel.length || !shops.length" @click="batchUpload">批量上架选中</button>
+        <div class="shop-meta">
+          <span>令牌 {{ (shops.find(s => s.id === shopCurrent) || {}).token_hint }}</span>
+          <span>仓库 {{ (shops.find(s => s.id === shopCurrent) || {}).warehouse_name || '自动' }}</span>
         </div>
+        <button class="btn sm block" @click="openShops">店铺管理 / 上架诊断</button>
+      </div>
+      <div class="shop-card empty-shop" v-else>
+        <b>还没有绑定 WB 店铺</b>
+        <div class="faint">绑定后才能上架。令牌只保存在这台电脑。</div>
+        <button class="btn primary sm block" @click="openShops">绑定店铺</button>
+      </div>
+
+      <div class="f-group">
+        <div class="f-title">状态（{{ shopName(shopCurrent) || '当前店铺' }}）</div>
+        <button v-for="(n, k) in {all: '全部', todo: '未上架', running: '上架中 / 等待', uploaded: '已上架', failed: '失败'}" :key="k"
+                class="f-row" :class="{on: qFilter===k}" @click="qFilter=k; qSel=[]"><span>{{ n }}</span><b>{{ facetCount('status', k) }}</b></button>
+      </div>
+
+      <div class="f-group" v-if="otherShops.length">
+        <div class="f-title">其他店铺上架情况</div>
+        <button class="f-row" :class="{on: qShopF===''}" @click="qShopF=''; qSel=[]"><span>不限</span></button>
+        <template v-for="s in otherShops" :key="s.id">
+          <button class="f-row" :class="{on: qShopF==='on:' + s.id}" @click="qShopF='on:' + s.id; qSel=[]"><span>已上到「{{ s.name }}」</span><b>{{ facetCount('shop', 'on:' + s.id) }}</b></button>
+          <button class="f-row" :class="{on: qShopF==='off:' + s.id}" @click="qShopF='off:' + s.id; qSel=[]"><span>还没上到「{{ s.name }}」</span><b>{{ facetCount('shop', 'off:' + s.id) }}</b></button>
+        </template>
+      </div>
+
+      <div class="f-group" v-if="listingLogos.length">
+        <div class="f-title">商标 / 来源</div>
+        <button class="f-row" :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]"><span>全部</span><b>{{ facetCount('logo', '') }}</b></button>
+        <button v-for="g in listingLogos" :key="g.key" class="f-row" :class="{on: qLogo===g.key}" @click="qLogo=g.key; qSel=[]">
+          <span class="row"><img v-if="g.img" :src="g.img" class="f-logo">{{ g.name }}</span><b>{{ facetCount('logo', g.key) }}</b></button>
+      </div>
+
+      <div class="f-group" v-if="listingSubjects.length > 1">
+        <div class="f-title">类目</div>
+        <button class="f-row" :class="{on: qSubject===null}" @click="qSubject=null; qSel=[]"><span>全部</span></button>
+        <button v-for="c in listingSubjects" :key="c" class="f-row" :class="{on: qSubject===c}" @click="qSubject=c; qSel=[]">
+          <span>{{ c || '未选类目' }}</span><b>{{ facetCount('subject', c) }}</b></button>
+      </div>
+    </aside>
+
+    <section class="q-main">
+      <div class="q-head">
+        <div>
+          <h2>待上架 <span class="faint">{{ shownListings.length }} 张商品卡</span></h2>
+          <div class="faint">同一个商品 + 同一个 logo（或同一个货源）合成一张 WB 商品卡，每个颜色是卡里的一个款式。填好资料 → 预检 → 上架。</div>
+        </div>
+        <input class="search" style="width:240px" v-model="qQuery" placeholder="搜索标题 / 商品ID">
+      </div>
+      <div class="toolbar q-tools" v-if="listings.length">
+        <span class="row" style="cursor:pointer;padding:0 6px" @click="qSel = qSel.length === shownListings.length ? [] : shownListings.map(lkey)"><i class="check" :class="{on: shownListings.length && qSel.length === shownListings.length}"></i><span class="faint">全选（{{ qSel.length }}/{{ shownListings.length }}）</span></span>
+        <span class="spacer"></span>
+        <button class="btn sm" :disabled="!qSel.length" @click="exportQueue">导出图片</button>
+        <button class="btn sm" :disabled="!qSel.length || !shops.length" @click="batchAi" title="自动匹配类目，AI 填写标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">批量 AI 填写</button>
+        <button class="btn sm" :disabled="!qSel.length" @click="openBatchEdit">批量改价格/折扣/重量/库存/尺寸</button>
+        <button class="btn sm primary" :disabled="!qSel.length || !shops.length" @click="batchUpload">批量上架到「{{ shopName(shopCurrent) || '店铺' }}」</button>
       </div>
 
       <div class="q-grid wide">
@@ -284,6 +409,7 @@
             <img :src="(l.variants.find(v => v.enabled && v.cover) || l.variants[0] || {}).cover">
             <i class="check" :class="{on: qSel.includes(lkey(l))}"></i>
             <span class="q-status" :class="l.status">{{ statusName(l.status) }}<template v-if="l.status==='waiting'"> · {{ hhmm(l.retry_at) }}</template></span>
+            <span class="q-src" v-if="l.source && l.mode === 'direct'">{{ sourceName(l.source) }}</span>
           </div>
           <div class="q-vars">
             <div class="q-var" v-for="v in l.variants" :key="v.sku" :class="{off: !v.enabled}" :title="v.sku + (v.color ? ' → ' + v.color : '')">
@@ -298,20 +424,22 @@
               <span class="tag warn" v-else>未选类目</span>
               <span class="tag">{{ l.variants.filter(v => v.enabled).length }} 个款式</span>
               <span class="tag ok" v-if="l.ai_filled">AI 已填</span>
-              <span class="tag" v-if="l.price" :title="'WB 原价 ' + l.price + ' ₽，折扣 ' + (l.discount || 0) + '%'">原价 {{ l.price }} ₽<template v-if="l.discount"> → {{ Math.round(l.price * (100 - l.discount) / 100) }} ₽</template></span>
+              <span class="tag" v-if="l.price" :title="'WB 原价 ' + l.price + ' ₽，折扣 ' + (l.discount || 0) + '%'">{{ l.price }} ₽<template v-if="l.discount"> → {{ Math.round(l.price * (100 - l.discount) / 100) }} ₽</template></span>
               <span class="tag" v-if="l.stock">库存 {{ l.stock }}</span>
             </div>
-            <div v-if="l.status==='uploading' || l.status==='pending_stock'" style="margin-top:8px">
-              <div class="bar"><i :style="{width: ((l.progress||{}).pct||0)+'%'}"></i></div>
-              <div class="faint">{{ (l.progress||{}).stage }}</div>
+            <div class="q-info">
+              <div v-if="l.status==='uploading' || l.status==='pending_stock'">
+                <div class="bar"><i :style="{width: ((l.progress||{}).pct||0)+'%'}"></i></div>
+                <div class="faint">{{ (l.progress||{}).stage }}</div>
+              </div>
+              <div class="err-text" v-if="l.status==='failed' && l.error" :title="l.error">{{ l.error }}</div>
+              <div class="wait-text" v-if="l.status==='waiting'">WB 限流中，{{ hhmm(l.retry_at) }} 后自动继续</div>
+              <div class="faint" v-if="Object.keys(l.nm||{}).length">nmID：{{ Object.values(l.nm).join('、') }}</div>
+              <div class="meta" v-if="l.shops.filter(x => x.shop_id !== shopCurrent).length">
+                <span class="tag live" v-for="x in l.shops.filter(x => x.shop_id !== shopCurrent)" :key="x.shop_id">{{ x.shop }}：{{ statusName(x.status) }}</span>
+              </div>
             </div>
-            <div class="err-text" v-if="l.status==='failed' && l.error">{{ l.error }}</div>
-            <div class="wait-text" v-if="l.status==='waiting'">WB 限流中，{{ hhmm(l.retry_at) }} 后自动继续（卡已建好，不会重复建卡；不用再点）<br><span class="faint">{{ l.error }}</span></div>
-            <div class="faint" style="margin-top:6px" v-if="Object.keys(l.nm||{}).length">nmID：{{ Object.values(l.nm).join('、') }}</div>
-            <div class="meta" style="margin-top:6px" v-if="l.shops.filter(x => x.shop_id !== shopCurrent).length">
-              <span class="tag live" v-for="x in l.shops.filter(x => x.shop_id !== shopCurrent)" :key="x.shop_id">{{ x.shop }}：{{ statusName(x.status) }}</span>
-            </div>
-            <div class="row" style="margin-top:10px">
+            <div class="row q-actions">
               <button class="btn sm primary grow" @click="openEditor(l)">{{ l.status==='draft' ? '填写上架资料' : '查看 / 编辑' }}</button>
               <button class="btn sm" v-if="l.status!=='uploaded'" :disabled="l.status==='uploading' || l.status==='pending_stock' || !shops.length" @click="uploadListing(l)">{{ l.status==='failed' ? '续传' : '上架' }}</button>
               <button class="btn sm ghost" v-if="!l.on_wb" title="移出待上架（套图保留在商品页）" :disabled="l.status==='uploading'" @click="removeListing(l)">移出</button>
@@ -319,8 +447,8 @@
           </div>
         </div>
       </div>
-      <div class="empty" v-if="!listings.length" style="padding:80px 0"><div class="faint">还没有待上架的套图。在商品页生成套图后点「移入待上架」。</div></div>
-    </div>
+      <div class="empty" v-if="!shownListings.length" style="padding:80px 0"><div class="faint">{{ listings.length ? '没有符合筛选条件的商品卡' : '还没有待上架的商品。印标模式：生成套图后点「移入待上架」；采集上架模式：在商品页点「加入待上架」。' }}</div></div>
+    </section>
   </main>
 
   <!-- 店铺管理 -->
@@ -509,7 +637,7 @@
               <tbody>
                 <tr v-for="s in ed.L.sizes" :key="s.label" :class="{off: !s.enabled}">
                   <td><i class="check" :class="{on: s.enabled}" @click="s.enabled = !s.enabled" style="cursor:pointer"></i></td>
-                  <td>{{ s.label }}</td>
+                  <td>{{ s.label }}<div class="faint" v-if="s.note && s.note !== '均码'" :style="{color: /请/.test(s.note) ? '#b45309' : ''}">{{ s.note }}</div></td>
                   <td><input class="input sm" v-model="s.tech" maxlength="15"></td>
                   <td><input class="input sm" v-model="s.wb" placeholder="如 48"></td>
                   <td><input class="input sm" type="number" step="0.01" v-model.number="s.cny_override" :placeholder="s.cny"></td>
@@ -756,6 +884,7 @@
     <div class="modal">
       <div class="modal-head"><h3>采集 1688 商品</h3><button class="btn sm ghost" @click="showScrape=false">✕</button></div>
       <div class="modal-body">
+        <div class="note" v-if="workMode==='direct'"><b>采集上架模式</b>：1688、拼多多（mobile.yangkeduo.com）、Ozon 的商品链接都可以混在一起粘贴。采集后用货源原图直接上架 WB，不印标。需要「采集助手」1.3.0 以上。</div>
         <div class="field"><label>商品链接（每行一个，可以直接粘贴一大段包含链接的文字）</label>
           <textarea class="input" rows="6" v-model="scrapeForm.links" placeholder="https://detail.1688.com/offer/123456789012.html"></textarea></div>
         <div class="field"><label>店铺链接（整店采集，每行一个）</label>

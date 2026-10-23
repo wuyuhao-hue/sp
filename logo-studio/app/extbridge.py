@@ -10,7 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from . import jobs, store
+from . import jobs, sources, store
 from .scraper import extract_offer_ids, save_offer
 
 _lock = threading.Lock()
@@ -35,18 +35,28 @@ def _new_task(job: jobs.Job, kind: str, **kw) -> dict:
     return t
 
 
+def _mode() -> str:
+    return store.get_settings().get("work_mode") or "logo"
+
+
 def start_job(links: list[str], shops: list[str], max_pages: int) -> jobs.Job:
     job = jobs.Job("scrape", f"采集 {len(links)} 个链接 / {len(shops)} 个店铺")
     job.status = "running"
     job.pending_shops = len(shops)
+    job.mode = _mode()  # 在哪个模式下发起的采集，商品就进哪个模式
     ids: list[str] = []
+    others: list[dict] = []
     for text in links:
         ids += [i for i in extract_offer_ids(text) if i not in ids]
+        others += [x for x in sources.parse_links(text) if x not in others]
     with _lock:
         for s in shops:
             _new_task(job, "shop", url=s, max_pages=max_pages)
         _enqueue_offers(job, ids)
-    if not ids and not shops:
+        for x in others:  # 拼多多 / Ozon：一律进「采集上架」
+            job.total += 1
+            _new_task(job, "page", platform=x["platform"], item_id=x["id"], url=x["url"])
+    if not ids and not shops and not others:
         job.fail("没有识别到商品链接")
     elif not connected():
         job.note("等待 Chrome 采集助手连接…（请确认已安装扩展，并打开过一次本页面）")
@@ -106,6 +116,8 @@ def next_task(version: str = "") -> dict | None:
                 j.note(f"正在打开第 {j.done + 1}/{j.total} 个商品…")
             elif t["kind"] == "shop":
                 j.note(f"正在翻店铺商品列表：{t['url']}")
+            elif t["kind"] == "page":
+                j.note(f"正在打开{sources.PLATFORM_NAME[t['platform']]}商品 {t['item_id']}（{j.done + 1}/{j.total}）…")
             return {k: v for k, v in t.items() if k != "taken"}
     return None
 
@@ -123,9 +135,16 @@ def set_status(status: str, message: str) -> None:
                 j.note(message)
 
 
-def _process_offer(job: jobs.Job, offer_id: str, raw: dict) -> None:
+def _process_offer(job: jobs.Job, offer_id: str, raw: dict, platform: str = "1688", match_for: str = "") -> None:
     try:
-        p = save_offer(None, raw, offer_id, job)
+        if match_for:  # Ozon 商品绑定 1688 货源：读这个 1688 商品的价格和图，不另存商品
+            from . import match
+            match.bind_result(match_for, offer_id, raw, job)
+            p = None
+        elif platform == "1688":
+            p = save_offer(None, raw, offer_id, job, getattr(job, "mode", "logo"))
+        else:
+            p = sources.save(platform, raw, offer_id, job)
         if p:
             job.results.append(p["id"])
     except Exception as e:  # noqa: BLE001
@@ -149,7 +168,7 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             return
         if not ok:
             job.note(f"✗ {t.get('offer_id') or t['kind']}：{data.get('error', '失败')}")
-            if t["kind"] == "offer":
+            if t["kind"] in ("offer", "page"):
                 job.done += 1
             _maybe_finish(job)
             return
@@ -158,30 +177,50 @@ def submit_result(task_id: str, ok: bool, data: dict) -> None:
             job.note(f"店铺共发现 {len(ids)} 个商品")
             _enqueue_offers(job, ids, skip_existing=True)
             return
-        pages = [(t["offer_id"], data.get("raw") or {})] if t["kind"] == "offer" else \
-            [(p["offer_id"], p["raw"]) for p in data.get("pages", [])]
-        if t["kind"] == "tabs":
+        if t["kind"] == "offer":
+            pages = [(t["offer_id"], data.get("raw") or {}, "1688", t.get("match_for", ""))]
+        elif t["kind"] == "page":
+            pages = [(t["item_id"], data.get("raw") or {}, t["platform"], "")]
+        else:  # tabs：1688 + 拼多多 + Ozon 已打开的商品页
+            pages = [(p["offer_id"], p["raw"], "1688", "") for p in data.get("pages", [])] + \
+                [(p["id"], p["raw"], p["platform"], "") for p in data.get("others", [])]
             job.total += len(pages)
             if not pages:
-                job.fail("Chrome 里没有打开的 1688 商品详情页")
+                job.fail("Chrome 里没有打开的 1688 / 拼多多 / Ozon 商品页")
                 return
         job.inflight = getattr(job, "inflight", 0) + len(pages)
-    for oid, raw in pages:
-        _workers.submit(_process_offer, job, oid, raw)
+    for oid, raw, platform, match_for in pages:
+        _workers.submit(_process_offer, job, oid, raw, platform, match_for)
 
 
-def collect_single(offer_id: str, raw: dict) -> str:
-    """商品页上的「采集到印标工作台」按钮。"""
+def collect_single(offer_id: str, raw: dict, platform: str = "1688") -> str:
+    """商品页上的「采集到工作台」按钮。1688 按工作台当前模式存；拼多多/Ozon 进「采集上架」。"""
     global _manual_job
     state["last_seen"] = time.time()
-    existed = store.get_product(f"1688-{offer_id}") is not None
+    mode = _mode() if platform == "1688" else "direct"
+    pid = (f"d1688-{offer_id}" if mode == "direct" else f"1688-{offer_id}") if platform == "1688" else f"{platform}-{offer_id}"
+    existed = store.get_product(pid) is not None
     with _lock:
         if _manual_job is None or _manual_job.status != "running" or jobs.get(_manual_job.id) is None:
             _manual_job = jobs.Job("scrape", "商品页一键采集")
             _manual_job.status = "running"
             _manual_job.inflight = 0
         job = _manual_job
+        job.mode = mode
         job.total += 1
         job.inflight += 1
-    _workers.submit(_process_offer, job, offer_id, raw)
-    return "已更新到工作台" if existed else "已发送到工作台"
+    _workers.submit(_process_offer, job, offer_id, raw, platform)
+    where = "采集上架" if mode == "direct" else "采集印标"
+    return f"已更新到工作台（{where}）" if existed else f"已发送到工作台（{where}）"
+
+
+def enqueue_match(pid: str, offer_id: str) -> jobs.Job:
+    """Ozon 商品绑定 1688 货源：让插件打开这个 1688 商品页读价格和图。"""
+    job = jobs.Job("scrape", f"读取 1688 货源 {offer_id}")
+    job.status = "running"
+    job.total = 1
+    with _lock:
+        _new_task(job, "offer", offer_id=offer_id, url=f"https://detail.1688.com/offer/{offer_id}.html", match_for=pid)
+    if not connected():
+        job.note("等待 Chrome 采集助手连接…")
+    return job

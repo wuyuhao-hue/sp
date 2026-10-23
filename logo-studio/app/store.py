@@ -132,6 +132,7 @@ DEFAULT_SETTINGS = {
     "copy_lang": "ru",         # 首图卖点文字语言
     "style_refs": [],          # 风格参考图文件名（data/style_refs/ 下）
     "wb_shop_id": "",          # 当前选中的 WB 店铺
+    "work_mode": "logo",       # 工作台模式：logo 采集印标 / direct 采集上架（1688/拼多多/Ozon 原图直接上架）
     "scrape_mode": "extension",  # extension（Chrome 扩展，推荐） / browser（独立浏览器窗口）
     "browser": "chrome",  # chrome / edge
     "scrape_delay": 3.0,
