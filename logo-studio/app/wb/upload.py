@@ -93,32 +93,41 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
             if not media[vc]:
                 raise WBError(0, f"款式「{v['sku']}」没有可读的本地图片")
 
-        # 查已有商品卡：全部已存在就直接续传；部分存在部分不存在就停下（禁止拆成另一张卡）
-        _stage(pid, key, job, "查询 WB 已有商品卡", 8)
-        found = {vc: cli.find_cards(vc) for vc in codes}
-        existing = {vc: c[0] for vc, c in found.items() if c}
-        if not existing:
-            trash = {vc: cli.find_trash(vc) for vc in codes}
-            trash = {vc: c[0] for vc, c in trash.items() if c}
-            if trash:
-                _stage(pid, key, job, "恢复 WB 回收站中的原商品卡", 10)
-                cli.recover([c["nmID"] for c in trash.values()])
-                existing = _wait_cards(cli, list(trash), job, pid, key, limit=12)
-        if existing and len(existing) < len(codes):
-            missing = [codes[vc]["sku"] for vc in codes if vc not in existing]
-            raise WBError(0, f"WB 上已有这张卡的部分款式，缺少：{'、'.join(missing)}。为避免拆成两张卡已停止，请在 WB 后台核对")
+        # 供应商编码第一次上架时固定下来，以后改前缀/重新采集都不会变 → 永远能按编码找回原卡
+        frozen = {v["sku"]: vc for vc, v in codes.items()}
+        _update(pid, key, lambda L: L.update(codes={**(L.get("codes") or {}), **frozen}))
 
-        if not existing:
+        # 先按供应商编码查 WB 已有的卡：已存在的直接续传，不再新建
+        _stage(pid, key, job, "查询 WB 已有商品卡", 8)
+        existing = {vc: c[0] for vc in codes if (c := cli.find_cards(vc))}
+        missing = [vc for vc in codes if vc not in existing]
+        if missing:  # 在回收站里的恢复原卡，不新建
+            trash = {vc: c[0] for vc in missing if (c := cli.find_trash(vc))}
+            if trash:
+                _stage(pid, key, job, f"恢复 WB 回收站中的原商品卡（{len(trash)} 个款式）", 10)
+                cli.recover([c["nmID"] for c in trash.values()])
+                existing.update(_wait_cards(cli, list(trash), job, pid, key, limit=12))
+                missing = [vc for vc in codes if vc not in existing]
+
+        if missing:
             sizes = [s for s in L["sizes"] if s.get("enabled")]
+            per = 1 if LS.one_size(L) else len(sizes)
             _stage(pid, key, job, "生成条码", 12)
-            bcs = cli.barcodes(len(codes) * len(sizes))
-            barcodes = {vc: bcs[i * len(sizes):(i + 1) * len(sizes)] for i, vc in enumerate(codes)}
-            payload = LS.build_payload(p, L, barcodes, meta, prefix)
-            _stage(pid, key, job, "创建商品卡", 20)
-            errors_before = {(e.get("vendorCode"), e.get("updateAt")) for e in cli.error_list()}
+            bcs = cli.barcodes(len(missing) * per)
+            barcodes = {vc: bcs[i * per:(i + 1) * per] for i, vc in enumerate(missing)}
+            errors_before = {(e["vendorCode"], e["key"]) for e in cli.error_list()}
+            target = _main_imt(existing)
             ambiguous = False
             try:
-                cli.upload_cards(payload)
+                if target and len(existing) + len(missing) <= 30:
+                    # 这张卡已经在 WB 上（之前上过其他颜色）：新颜色追加进原卡，不另建卡
+                    _stage(pid, key, job, f"给已有商品卡追加 {len(missing)} 个新款式", 20)
+                    cli.upload_add(target, LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing)))
+                else:
+                    _stage(pid, key, job, "创建商品卡", 20)
+                    variants = LS.build_variants(p, L, barcodes, meta, prefix, only=set(missing))
+                    cli.upload_cards([{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]}
+                                      for i in range(0, len(variants), 30)])
             except WBError as e:
                 if not e.ambiguous:
                     raise
@@ -126,10 +135,20 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 _stage(pid, key, job, f"创建请求结果不确定（{e.status}），不重发，按供应商编码回查", 22)
             _update(pid, key, lambda L: L.update(card_submitted=time.time()))
             _stage(pid, key, job, "等待商品卡生效", 30)
-            existing = _wait_cards(cli, list(codes), job, pid, key, errors_before=errors_before,
-                                   limit=POLL_AMBIGUOUS if ambiguous else None)
+            existing.update(_wait_cards(cli, missing, job, pid, key, errors_before=errors_before,
+                                        limit=POLL_AMBIGUOUS if ambiguous else None))
             _stage(pid, key, job, "等待 WB 新卡跨服务生效", 34)
             time.sleep(SYNC_WAIT)
+
+        # 同一商品的不同颜色应该在同一个 imtID 下（WB 上显示为一个商品的多个颜色）；分散了就合并
+        imts = {c.get("imtID") for c in existing.values() if c.get("imtID")}
+        if len(imts) > 1 and len(existing) <= 30:
+            target = _main_imt(existing)
+            try:
+                cli.merge(target, [c["nmID"] for c in existing.values() if c.get("imtID") != target])
+                _stage(pid, key, job, f"已把 {len(existing)} 个款式合并到同一商品（imtID {target}）", 36)
+            except WBError as e:
+                _stage(pid, key, job, f"款式合并没成功（不影响上架，可在 WB 后台手动合并）：{e}", 36)
 
         nm = {vc: c["nmID"] for vc, c in existing.items()}
         _update(pid, key, lambda L: L.update(nm=nm))
@@ -171,11 +190,10 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
                 if not whs:
                     raise WBError(0, "店铺没有可用仓库，无法写库存")
                 wh = whs[0]["id"]
-            chrts = [s["chrtID"] for vc in codes for s in (existing[vc].get("sizes") or []) if s.get("chrtID")]
-            if not chrts:  # 回查一次拿最新的尺码 chrtID
-                chrts = [s["chrtID"] for vc in codes for c in cli.find_cards(vc) for s in c.get("sizes") or []
-                         if s.get("chrtID")]
-            rows = [{"chrtId": c, "amount": stock} for c in chrts]
+            sz = [s for vc in codes for s in (existing[vc].get("sizes") or []) if s.get("chrtID")]
+            if len(sz) < len(codes):  # 回查一次拿最新的尺码 chrtID
+                sz = [s for vc in codes for c in cli.find_cards(vc) for s in c.get("sizes") or [] if s.get("chrtID")]
+            rows = [{"chrtId": s["chrtID"], "sku": (s.get("skus") or [""])[0], "amount": stock} for s in sz]
             try:
                 cli.set_stocks(int(wh), rows)
             except WBError as e:
@@ -218,11 +236,19 @@ def _wait_cards(cli, codes: list[str], job, pid, key, limit: int | None = None, 
         if len(found) == len(codes):
             return found
         if errors_before is not None and i % 2 == 1:
-            for e in cli.error_list():
-                if e.get("vendorCode") in codes and (e.get("vendorCode"), e.get("updateAt")) not in errors_before:
-                    raise WBError(400, f"WB 拒绝了商品卡（{e['vendorCode']}）：{'; '.join(map(str, e.get('errors') or []))}")
+            bad = [e for e in cli.error_list() if e["vendorCode"] in codes and e["vendorCode"] not in found
+                   and (e["vendorCode"], e["key"]) not in errors_before]
+            if bad:
+                raise WBError(400, "WB 拒绝了商品卡：" + "；".join(
+                    f"{e['vendorCode']}：{'; '.join(e['errors']) or '未给出原因'}" for e in bad[:5]))
         time.sleep(POLL_EVERY)
     raise WBError(0, f"等待商品卡超时：{len(found)}/{len(codes)} 个款式已出现。请稍后点「上架」续传（不会重复建卡）")
+
+
+def _main_imt(existing: dict) -> int | None:
+    """已有款式里最多的那个 imtID（追加/合并的目标）。"""
+    imts = [c.get("imtID") for c in existing.values() if c.get("imtID")]
+    return max(set(imts), key=imts.count) if imts else None
 
 
 def _set_prices(cli, rows: list[dict]) -> None:

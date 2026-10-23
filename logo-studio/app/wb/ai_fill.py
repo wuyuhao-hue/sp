@@ -143,24 +143,29 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
     if any(pe.get(k) for k in ("lengthCm", "widthCm", "heightCm", "weightKg")):
         out["package_estimate"] = pe
 
-    # 规格级：每个款式一张自己的 SKU 图，选官方颜色 + 写款式标题
-    vs = [v for v in L["variants"] if v.get("enabled")][:10]
-    if vs and colors:
+    # 规格级：每个颜色/规格是 WB 上一个独立链接（独立标题），每次只看自己那张 SKU 图，分批识别
+    vs = [v for v in L["variants"] if v.get("enabled")]
+    st_by = {s["id"]: s for s in p.get("sets") or []}
+    sku_img = {k["name"]: k["image"] for k in sku_list(p)}
+    out["variants"] = {}
+    for i in range(0, len(vs) if colors else 0, 8):
+        chunk = vs[i:i + 8]
         vcontent = [{"type": "text", "text": VARIANT_PROMPT.format(
-            title=p.get("title", ""), variants=json.dumps([{"name": v["sku"], "image": i + 1} for i, v in enumerate(vs)],
+            title=p.get("title", ""), variants=json.dumps([{"name": v["sku"], "image": k + 1} for k, v in enumerate(chunk)],
                                                           ensure_ascii=False),
             colors=json.dumps(colors, ensure_ascii=False))}]
-        st_by = {s["id"]: s for s in p.get("sets") or []}
-        for v in vs:
-            src = (st_by.get(v["sid"]) or {}).get("sku_image")
-            if src:
-                try:
-                    vcontent.append({"type": "image_url", "image_url": {"url": _img_b64(src)}})
-                except Exception:  # noqa: BLE001
-                    pass
+        for v in chunk:
+            src = sku_img.get(v["sku"]) or (st_by.get(v["sid"]) or {}).get("sku_image")
+            if not src:
+                st = st_by.get(v["sid"]) or {}
+                f = next((im["file"] for im in st.get("images") or [] if im.get("file")), None)
+                src = f"local:{p['id']}/{f}" if f else ""
+            try:
+                vcontent.append({"type": "image_url", "image_url": {"url": _img_b64(src)}})
+            except Exception:  # noqa: BLE001
+                vcontent.append({"type": "text", "text": f"（{v['sku']} 的图片读取失败，只按名称判断）"})
         try:
             vr = _chat(vcontent, 1800)
-            out["variants"] = {}
             for item in vr.get("variants") or []:
                 col = match_official(item.get("color", ""), colors)
                 if not col:
@@ -171,3 +176,60 @@ def fill(p: dict, L: dict, meta: list[dict], colors: list[str], countries: list[
     out["notes"] = res.get("notes") or []
     out["rejected"] = rejected
     return out
+
+
+def fill_listing(pid: str, key: str, cli, auto_subject: bool = True) -> dict:
+    """完整的一次 AI 填写：没有类目先自动匹配类目 → 读官方目录 → AI 填写 → 校验后保存。"""
+    from . import category
+    from .upload import charc_meta
+
+    p = store.get_product(pid)
+    L = p["listings"][key]
+    sug = None
+    if not L.get("subject_id"):
+        sug = category.suggest(p, cli) if auto_subject else None
+        if not sug:
+            raise RuntimeError("没能自动匹配 WB 类目，请在编辑里手动选择类目")
+        store.update_product(pid, lambda x: x["listings"][key].update(subject_id=sug["id"], subject_name=sug["name"]))
+        p = store.get_product(pid)
+        L = p["listings"][key]
+    sid = int(L["subject_id"])
+    meta = charc_meta(cli, sid)
+    colors = sorted({r.get("name") for r in LS.cached("colors", cli.colors) if r.get("name")})
+    countries = sorted({r.get("name") for r in LS.cached("countries", cli.countries) if r.get("name")})
+    try:
+        tn = [str(r.get("tnved")) for r in LS.cached(f"tnved-{sid}", lambda: cli.tnved(sid)) if r.get("tnved")]
+    except Exception:  # noqa: BLE001
+        tn = []
+    res = fill(p, L, meta, colors, countries, tn)
+
+    def apply(x):
+        LL = x["listings"][key]
+        for k in ("title", "description", "country", "tnved"):
+            if res.get(k):
+                LL[k] = res[k]
+        LL.setdefault("charcs", {}).update(res.get("charcs") or {})
+        for v in LL["variants"]:
+            r = (res.get("variants") or {}).get(v["sku"]) or {}
+            if r.get("color"):
+                v["color"] = r["color"]
+            if r.get("title"):
+                v["title"] = r["title"]
+        pe = res.get("package_estimate")
+        if pe:
+            LL["package_estimate"] = pe
+            pk = LL.setdefault("package", {})
+            vals = {"length": pe.get("lengthCm"), "width": pe.get("widthCm"), "height": pe.get("heightCm"),
+                    "weight": pe.get("weightKg")}
+            if not any(pk.get(k) for k in vals) and all(_pos(v) for v in vals.values()):
+                pk.update({k: float(v) for k, v in vals.items()})  # 包装还没填：直接用 AI 估算值
+        LL["ai_filled"] = True
+    store.update_product(pid, apply)
+    return {"notes": res.get("notes") or [], "rejected": res.get("rejected") or [], "subject": sug}
+
+
+def _pos(v) -> bool:
+    try:
+        return float(v) > 0
+    except (TypeError, ValueError):
+        return False

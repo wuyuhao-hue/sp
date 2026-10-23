@@ -26,7 +26,7 @@ createApp({
     toastMsg: '', toastErr: false, dropOver: false, testMsg: '',
     // WB 上架
     listings: [], shops: [], shopCurrent: '', showShops: false, shopForm: { name: '', token: '' }, shopBusy: false,
-    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', dir: { colors: [], countries: [] },
+    warehouses: {}, shopTest: {}, ed: null, qFilter: 'all', qLogo: '', diag: null, bulk: null, dir: { colors: [], countries: [] },
   }),
   computed: {
     filtered() {
@@ -60,7 +60,17 @@ createApp({
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },
     apiReady() { return !!(this.settings.api_base && this.settings.api_key); },
-    shownListings() { return this.listings.filter(l => this.listingMatch(l, this.qFilter)); },
+    shownListings() { return this.listings.filter(l => this.listingMatch(l, this.qFilter) && (!this.qLogo || l.key === this.qLogo)); },
+    listingLogos() {
+      const m = {};
+      for (const l of this.listings) {
+        const g = m[l.key] || (m[l.key] = { key: l.key, name: l.logo_name || '无 logo', count: 0, img: '' });
+        g.count++;
+        const lg = this.logos.find(x => x.id === l.logo_id);
+        if (lg) g.img = this.logoUrl(lg);
+      }
+      return Object.values(m);
+    },
     visibleCharcs() {
       if (!this.ed) return [];
       const skip = c => /^(цвет|бренд)$/i.test(c.name.trim()) || /^страна производства/i.test(c.name) || /ТНВЭД/i.test(c.name.replace(/\s/g, '')) || c.charcID === 88952;
@@ -176,7 +186,7 @@ createApp({
       const st = l.status || 'draft';
       return f === 'all' || (f === 'todo' && st === 'draft') || (f === 'running' && (st === 'uploading' || st === 'pending_stock')) || st === f;
     },
-    listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f)).length; },
+    listingCount(f) { return this.listings.filter(l => this.listingMatch(l, f) && (!this.qLogo || l.key === this.qLogo)).length; },
     lkey(l) { return `${l.pid}:${l.key}`; },
     toggleQ(id) { const i = this.qSel.indexOf(id); i >= 0 ? this.qSel.splice(i, 1) : this.qSel.push(id); },
 
@@ -318,7 +328,7 @@ createApp({
     async openEditor(l) {
       try {
         const r = await api(`/api/listings/${l.pid}/${l.key}`);
-        this.ed = { ...this.edFrom(r), meta: [], tnved: [], subjQ: '', subjResults: [], pf: null, aiNotes: [], aiRejected: [], allCharcs: false, busy: '' };
+        this.ed = { ...this.edFrom(r), meta: [], tnved: [], subjQ: '', subjResults: [], sugReason: '', pf: null, aiNotes: [], aiRejected: [], allCharcs: false, busy: '' };
         if (this.ed.L.subject_id) this.loadSubjectData();
       } catch (e) { this.toast(e.message, true); }
     },
@@ -352,9 +362,10 @@ createApp({
       this.ed.busy = '';
     },
     pickSubject(r) {
+      if (this.ed.L.subject_id === r.id) return;
       if (this.ed.L.subject_id && this.ed.L.subject_id !== r.id && Object.keys(this.ed.L.charcs).length && !confirm('换类目会清空已经填写的属性，继续？')) return;
-      if (this.ed.L.subject_id !== r.id) { this.ed.L.charcs = {}; this.ed.L.tnved = ''; }
-      this.ed.L.subject_id = r.id; this.ed.L.subject_name = r.name; this.ed.subjResults = [];
+      this.ed.L.charcs = {}; this.ed.L.tnved = '';
+      this.ed.L.subject_id = r.id; this.ed.L.subject_name = r.name;
       this.loadSubjectData();
     },
     charcText(c) { return (this.ed.L.charcs[c.charcID] || []).join(', '); },
@@ -435,6 +446,52 @@ createApp({
       if (!confirm(`确认把 ${items.length} 张商品卡（共 ${n} 个款式）上架到 WB 店铺「${this.shopName(this.shopCurrent)}」？会按顺序逐张上架。`)) return;
       try { this.jobs.unshift(await api('/api/listings/batch-upload', { body: { items: items.map(l => ({ pid: l.pid, key: l.key })) } })); this.toast('已开始批量上架'); }
       catch (e) { this.toast(e.message, true); }
+    },
+    selectedListings() { return this.listings.filter(l => this.qSel.includes(this.lkey(l))).map(l => ({ pid: l.pid, key: l.key })); },
+    async batchAi() {
+      if (!this.settings.text_model) { this.toast('请先在「设置」里填写能看图的「商品理解模型」', true); return; }
+      if (!confirm(`对 ${this.qSel.length} 张商品卡做 AI 填写？\n没选类目的会自动匹配类目；标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码会被覆盖。\n每张卡约 2 次 AI 调用。`)) return;
+      try { this.jobs.unshift(await api('/api/listings/batch-ai', { body: { items: this.selectedListings() } })); this.toast('已开始，进度在右下角'); }
+      catch (e) { this.toast(e.message, true); }
+    },
+    openBatchEdit() { this.bulk = { mode: '', add: 0, mul: 12, add2: 0, fixed: '', discount: '', length: '', width: '', height: '', weight: '', stock: '' }; },
+    async applyBulk() {
+      const b = this.bulk, patch = { pricing: {}, package: {} };
+      if (b.mode === 'formula') Object.assign(patch.pricing, { mode: 'formula', add: b.add || 0, mul: b.mul || 1, add2: b.add2 || 0 });
+      if (b.mode === 'fixed') { if (!(b.fixed > 0)) { this.toast('请填写固定价', true); return; } Object.assign(patch.pricing, { mode: 'fixed', fixed: b.fixed }); }
+      if (b.discount !== '') patch.pricing.discount = Number(b.discount);
+      for (const k of ['length', 'width', 'height', 'weight']) if (b[k] !== '') patch.package[k] = Number(b[k]);
+      if (b.stock !== '') patch.stock = Number(b.stock);
+      try {
+        const r = await api('/api/listings/batch-edit', { body: { items: this.selectedListings(), patch } });
+        this.toast(`已修改 ${r.count} 张`); this.bulk = null; this.loadQueue();
+      } catch (e) { this.toast(e.message, true); }
+    },
+    diagText(d) {
+      if (typeof d === 'string') return d;
+      if (d && d.errors) return [...d.errors.map(e => '✗ ' + e), ...d.warnings.map(w => '! ' + w)].join('　') || '全部通过';
+      return Array.isArray(d) ? d.join('、') || '（空）' : JSON.stringify(d);
+    },
+    openDiag(s) { this.diag = { shop: s, target: this.listings[0] ? this.lkey(this.listings[0]) : '', report: null, busy: false }; },
+    async runDiag() {
+      this.diag.busy = true;
+      const [pid, key] = this.diag.target ? this.diag.target.split(':') : [null, null];
+      try { this.diag.report = await api(`/api/shops/${this.diag.shop.id}/diagnose`, { body: { pid, key } }); }
+      catch (e) { this.toast(e.message, true); }
+      if (this.diag) this.diag.busy = false;
+    },
+    async suggestSubject() {
+      this.ed.busy = 'sug';
+      try {
+        const r = await api(`/api/listings/${this.ed.summary.pid}/${this.ed.summary.key}/suggest-subject`, { body: {} });
+        this.ed.subjResults = r.options;
+        if (r.suggest) {
+          const src = { memory: '记住的选择', ai: 'AI 匹配', keyword: '关键词匹配' }[r.suggest.source];
+          this.ed.sugReason = `${src}：${r.suggest.name}。${r.suggest.reason || ''}　下面是其他候选，点一下可以换。`;
+          this.pickSubject({ id: r.suggest.id, name: r.suggest.name });
+        } else this.ed.sugReason = '没能自动匹配，请从候选里选或搜索。';
+      } catch (e) { this.toast(e.message, true); }
+      if (this.ed) this.ed.busy = '';
     },
     async removeListing(l) {
       if (!confirm('把这张卡移出待上架？套图会保留在商品页，可以再移回来。')) return;

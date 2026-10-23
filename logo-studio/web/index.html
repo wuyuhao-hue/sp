@@ -246,6 +246,11 @@
         令牌只保存在这台电脑的 data/shops.json 里。
       </div>
 
+      <div class="logo-tabs" v-if="listingLogos.length > 1">
+        <button :class="{on: qLogo===''}" @click="qLogo=''; qSel=[]">全部商标 <span>{{ listings.length }}</span></button>
+        <button v-for="g in listingLogos" :key="g.key" :class="{on: qLogo===g.key}" @click="qLogo=g.key; qSel=[]">
+          <img v-if="g.img" :src="g.img">{{ g.name }} <span>{{ g.count }}</span></button>
+      </div>
       <div class="row between" style="margin-top:18px" v-if="listings.length">
         <div class="row">
           <span class="row" style="cursor:pointer" @click="qSel = qSel.length === shownListings.length ? [] : shownListings.map(lkey)"><i class="check" :class="{on: shownListings.length && qSel.length === shownListings.length}"></i><span class="faint">全选（{{ qSel.length }}/{{ shownListings.length }}）</span></span>
@@ -255,6 +260,8 @@
         </div>
         <div class="row">
           <button class="btn" :disabled="!qSel.length" @click="exportQueue">导出图片</button>
+          <button class="btn" :disabled="!qSel.length || !shops.length" @click="batchAi" title="自动匹配类目，AI 填写标题（每个颜色独立标题）、说明、属性、包装尺寸重量、海关编码">批量 AI 填写</button>
+          <button class="btn" :disabled="!qSel.length" @click="openBatchEdit">批量修改价格/重量/库存/尺寸</button>
           <button class="btn primary" :disabled="!qSel.length || !shops.length" @click="batchUpload">批量上架选中</button>
         </div>
       </div>
@@ -278,6 +285,9 @@
               <span class="tag" v-if="l.subject_name">{{ l.subject_name }}</span>
               <span class="tag warn" v-else>未选类目</span>
               <span class="tag">{{ l.variants.filter(v => v.enabled).length }} 个款式</span>
+              <span class="tag ok" v-if="l.ai_filled">AI 已填</span>
+              <span class="tag" v-if="l.price">{{ l.price }} ₽</span>
+              <span class="tag" v-if="l.stock">库存 {{ l.stock }}</span>
             </div>
             <div v-if="l.status==='uploading' || l.status==='pending_stock'" style="margin-top:8px">
               <div class="bar"><i :style="{width: ((l.progress||{}).pct||0)+'%'}"></i></div>
@@ -308,6 +318,7 @@
             <div class="row">
               <button class="btn sm" v-if="s.id!==shopCurrent" @click="setCurrentShop(s.id)">设为当前</button>
               <button class="btn sm" @click="testShop(s)">测试权限</button>
+              <button class="btn sm" @click="openDiag(s)" title="只读检查上架要用的所有 WB 接口，不写入任何数据">上架诊断</button>
               <button class="btn sm ghost danger" @click="deleteShop(s)">删除</button>
             </div>
           </div>
@@ -341,6 +352,58 @@
     </div>
   </div>
 
+  <!-- 上架诊断 -->
+  <div class="modal-bg" v-if="diag" @mousedown.self="diag=null">
+    <div class="modal" style="width:820px">
+      <div class="modal-head"><h3>上架诊断 · {{ diag.shop.name }}</h3><button class="btn sm ghost" @click="diag=null">✕</button></div>
+      <div class="modal-body">
+        <div class="note">只读检查：逐个调用上架要用的 WB 接口看返回是否正常，<b>不会创建、修改任何商品</b>。选一张上架单还会做预检，并生成「将要提交给 WB 的商品卡」预览。报告不含令牌，可以直接发给开发者排查。</div>
+        <div class="row">
+          <select class="input grow" v-model="diag.target">
+            <option value="">不检查具体商品</option>
+            <option v-for="l in listings" :key="lkey(l)" :value="lkey(l)">{{ (l.title || l.product_title).slice(0, 40) }} · {{ l.logo_name || '无 logo' }}</option>
+          </select>
+          <button class="btn primary" :disabled="diag.busy" @click="runDiag">{{ diag.busy ? '检查中…' : '开始诊断' }}</button>
+        </div>
+        <div v-if="diag.report">
+          <div class="diag-step" v-for="(st, i) in diag.report.steps" :key="i" :class="{bad: !st.ok}">
+            <span class="ic">{{ st.ok ? '✓' : '✗' }}</span><b>{{ st.name }}</b><span class="faint" v-if="st.ms != null"> {{ st.ms }}ms</span>
+            <div class="d">{{ diagText(st.detail) }}</div>
+          </div>
+          <details v-if="diag.report.payload_preview" style="margin-top:8px"><summary class="faint">将要提交的商品卡（预览）</summary>
+            <pre class="log-box">{{ JSON.stringify(diag.report.payload_preview, null, 2) }}</pre></details>
+          <div class="row" style="margin-top:10px"><span class="faint grow">报告已保存：{{ diag.report.file }}</span><button class="btn sm" @click="openFolder(diag.report.dir)">打开文件夹</button></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 批量修改 -->
+  <div class="modal-bg" v-if="bulk" @mousedown.self="bulk=null">
+    <div class="modal" style="width:640px">
+      <div class="modal-head"><h3>批量修改 {{ qSel.length }} 张商品卡</h3><button class="btn sm ghost" @click="bulk=null">✕</button></div>
+      <div class="modal-body">
+        <div class="note">只改填了的项，留空的保持原样。正在上架中的卡会跳过。</div>
+        <div class="field"><label>价格</label>
+          <div class="seg" style="margin-bottom:8px;align-self:flex-start">
+            <button :class="{on: bulk.mode===''}" @click="bulk.mode=''">不改</button>
+            <button :class="{on: bulk.mode==='formula'}" @click="bulk.mode='formula'">按采购价公式</button>
+            <button :class="{on: bulk.mode==='fixed'}" @click="bulk.mode='fixed'">固定价</button>
+          </div>
+          <div class="row formula" v-if="bulk.mode==='formula'">( 采购价 + <input class="input sm" type="number" v-model.number="bulk.add"> ) ×
+            <input class="input sm" type="number" step="0.1" v-model.number="bulk.mul"> + <input class="input sm" type="number" v-model.number="bulk.add2"> = 原价 ₽</div>
+          <div class="row" v-if="bulk.mode==='fixed'"><input class="input sm" type="number" style="width:120px" v-model.number="bulk.fixed"> ₽</div>
+        </div>
+        <div class="field"><label>折扣 %（留空不改）</label><input class="input sm" style="width:120px" type="number" min="0" max="99" v-model="bulk.discount"></div>
+        <div class="field"><label>包装尺寸和重量（留空不改）</label>
+          <div class="row wrap">长 <input class="input sm num" type="number" v-model="bulk.length"> cm 宽 <input class="input sm num" type="number" v-model="bulk.width"> cm
+            高 <input class="input sm num" type="number" v-model="bulk.height"> cm 重量 <input class="input sm num" type="number" step="0.01" v-model="bulk.weight"> kg</div></div>
+        <div class="field"><label>库存（每个尺码，留空不改）</label><input class="input sm" style="width:120px" type="number" min="0" v-model="bulk.stock"></div>
+      </div>
+      <div class="modal-foot"><button class="btn" @click="bulk=null">取消</button><button class="btn primary" @click="applyBulk">应用到 {{ qSel.length }} 张</button></div>
+    </div>
+  </div>
+
   <!-- 上架资料编辑 -->
   <div class="modal-bg" v-if="ed" @mousedown.self="closeEditor">
     <div class="modal editor">
@@ -369,7 +432,9 @@
             <span class="tag accent" v-if="ed.L.subject_id">{{ ed.L.subject_name }}（{{ ed.L.subject_id }}）</span>
             <input class="input grow" v-model="ed.subjQ" placeholder="搜索类目，中文或俄文都行，例如：夹克 / Куртки" @keyup.enter="searchSubjects">
             <button class="btn" @click="searchSubjects" :disabled="ed.busy==='subj'">搜索</button>
+            <button class="btn" @click="suggestSubject" :disabled="!!ed.busy" title="按 1688 标题自动匹配；你选过的同类商品会被记住">{{ ed.busy==='sug' ? '匹配中…' : '自动匹配' }}</button>
           </div>
+          <div class="faint" v-if="ed.sugReason">{{ ed.sugReason }}</div>
           <div class="subj-list" v-if="ed.subjResults.length">
             <button class="btn sm" v-for="r in ed.subjResults" :key="r.id" @click="pickSubject(r)">{{ r.parent }} / <b>{{ r.name }}</b></button>
           </div>
@@ -392,7 +457,7 @@
 
         <!-- 款式 -->
         <section class="ed-sec">
-          <div class="sec-title">3. 款式（每个颜色一个款式，共用尺码）</div>
+          <div class="sec-title">3. 款式（每个颜色在 WB 上是一个独立链接、独立标题，上架后自动合并为同一商品）</div>
           <table class="shot-table ed-table">
             <thead><tr><th style="width:30px"></th><th style="width:60px">套图</th><th>1688 颜色</th><th>WB 颜色 <span class="req">*</span></th><th>款式标题（留空用主标题）</th><th>供应商编码</th><th style="width:70px">售价 ₽</th></tr></thead>
             <tbody>

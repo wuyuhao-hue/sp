@@ -125,10 +125,22 @@ class WBClient:
         return self._req("GET", f"{CONTENT}/content/v2/directory/countries", "content_read",
                          params={"locale": "ru"}).get("data") or []
 
-    def directory(self, kind: str) -> list[dict]:
-        """官方目录：seasons 季节 / kinds 性别 / vat 税率等。"""
-        return self._req("GET", f"{CONTENT}/content/v2/directory/{kind}", "content_read",
+    def directory(self, kind: str) -> list[str]:
+        """官方目录：seasons 季节 / kinds 性别 / vat 税率等。WB 返回字符串数组或对象数组，统一成名字列表。"""
+        rows = self._req("GET", f"{CONTENT}/content/v2/directory/{kind}", "content_read",
                          params={"locale": "ru"}).get("data") or []
+        return [r if isinstance(r, str) else str(r.get("name") or "") for r in rows if r]
+
+    def subjects_all(self) -> list[dict]:
+        """全部类目（分页拉完），用于自动匹配类目。"""
+        out, offset = [], 0
+        while True:
+            page = self._req("GET", f"{CONTENT}/content/v2/object/all", "content_read",
+                             params={"locale": "ru", "limit": 1000, "offset": offset}).get("data") or []
+            out += page
+            if len(page) < 1000 or offset > 20000:
+                return out
+            offset += 1000
 
     def brand_exists(self, subject_id: int, name: str, max_pages: int = 30) -> bool | None:
         """在 WB 品牌库里找品牌（按类目分页）。True 找到 / False 没找到 / None 接口不可用。"""
@@ -155,22 +167,37 @@ class WBClient:
                          params={"subjectID": subject_id, "locale": "ru"}).get("data") or []
 
     def find_cards(self, vendor_code: str) -> list[dict]:
-        body = {"settings": {"cursor": {"limit": 10}, "filter": {"textSearch": vendor_code, "withPhoto": -1}}}
+        """按供应商编码精确查卡（textSearch 是模糊匹配，必须再按 vendorCode 精确过滤）。"""
+        body = {"settings": {"cursor": {"limit": 100}, "filter": {"textSearch": vendor_code, "withPhoto": -1}}}
         cards = self._req("POST", f"{CONTENT}/content/v2/get/cards/list", "content_read", json=body,
                           timeout=30).get("cards") or []
-        return [c for c in cards if c.get("vendorCode") == vendor_code]
+        return [c for c in cards if str(c.get("vendorCode", "")).strip().lower() == vendor_code.lower()]
 
     def find_trash(self, vendor_code: str) -> list[dict]:
         body = {"settings": {"cursor": {"limit": 100}, "filter": {"textSearch": vendor_code}}}
         cards = self._req("POST", f"{CONTENT}/content/v2/get/cards/trash", "content_read", json=body).get("cards") or []
-        return [c for c in cards if c.get("vendorCode") == vendor_code]
+        return [c for c in cards if str(c.get("vendorCode", "")).strip().lower() == vendor_code.lower()]
 
-    def error_list(self) -> list[dict]:
+    def cards_total(self) -> int:
+        body = {"settings": {"cursor": {"limit": 1}, "filter": {"withPhoto": -1}}}
+        r = self._req("POST", f"{CONTENT}/content/v2/get/cards/list", "content_read", json=body)
+        return int((r.get("cursor") or {}).get("total") or len(r.get("cards") or []))
+
+    def error_list(self, strict: bool = False) -> list[dict]:
+        """创建失败的商品卡（错误草稿）。WB 有新旧两种返回格式，统一成 [{vendorCode, key, errors}]。"""
         try:
-            return self._req("POST", f"{CONTENT}/content/v2/cards/error/list", "content_read", json={},
-                             retries=2, timeout=25).get("data") or []
+            try:
+                r = self._req("POST", f"{CONTENT}/content/v2/cards/error/list", "content_read",
+                              json={"cursor": {"limit": 100}, "order": {"ascending": False}}, retries=2, timeout=25)
+            except WBError as e:
+                if e.status not in (404, 405):
+                    raise
+                r = self._req("GET", f"{CONTENT}/content/v2/cards/error/list", "content_read", retries=2, timeout=25)
         except WBError:
+            if strict:
+                raise
             return []
+        return parse_errors(r.get("data"))
 
     # ---------- Content 写 ----------
     def barcodes(self, count: int) -> list[str]:
@@ -186,6 +213,16 @@ class WBClient:
         """创建商品卡：只提交 1 次，失败/超时/5xx/409 都不重发（ambiguous=True 时上层必须按 vendorCode 回查）。"""
         return self._req("POST", f"{CONTENT}/content/v2/cards/upload", "content_write", json=payload,
                          timeout=60, retries=1, idempotent=False)
+
+    def upload_add(self, imt_id: int, variants: list[dict]) -> dict:
+        """给已有商品卡（imtID）追加新款式，新款式自动合并进这张卡。只提交 1 次。"""
+        return self._req("POST", f"{CONTENT}/content/v2/cards/upload/add", "content_write",
+                         json={"imtID": int(imt_id), "cardsToAdd": variants}, timeout=60, retries=1, idempotent=False)
+
+    def merge(self, imt_id: int, nm_ids: list[int]) -> dict:
+        """把几张卡合并到同一个 imtID（同一商品的不同颜色/规格）。"""
+        return self._req("POST", f"{CONTENT}/content/v2/cards/moveNm", "content_write",
+                         json={"targetIMT": int(imt_id), "nmIDs": sorted(set(nm_ids))}, retries=1, idempotent=False)
 
     def recover(self, nm_ids: list[int]) -> dict:
         return self._req("POST", f"{CONTENT}/content/v2/cards/recover", "content_write",
@@ -209,9 +246,34 @@ class WBClient:
         return r if isinstance(r, list) else r.get("data") or []
 
     def set_stocks(self, warehouse_id: int, rows: list[dict]) -> None:
+        """rows: [{chrtId, sku, amount}]。WB 新接口按 chrtId 写库存；如果被拒（旧接口）再按条码 sku 写一次。"""
         for i in range(0, len(rows), 1000):
-            self._req("PUT", f"{MARKET}/api/v3/stocks/{warehouse_id}", "market", json={"stocks": rows[i:i + 1000]},
-                      timeout=60, retries=4)
+            part = rows[i:i + 1000]
+            try:
+                self._req("PUT", f"{MARKET}/api/v3/stocks/{warehouse_id}", "market", timeout=60, retries=4,
+                          json={"stocks": [{"chrtId": r["chrtId"], "amount": r["amount"]} for r in part]})
+            except WBError as e:
+                if e.status != 400 or not all(r.get("sku") for r in part):
+                    raise
+                self._req("PUT", f"{MARKET}/api/v3/stocks/{warehouse_id}", "market", timeout=60, retries=4,
+                          json={"stocks": [{"sku": r["sku"], "amount": r["amount"]} for r in part]})
+
+
+def parse_errors(data) -> list[dict]:
+    out = []
+    if isinstance(data, list):  # 旧格式：[{vendorCode, updateAt, errors: [...]}]
+        for e in data:
+            out.append({"vendorCode": e.get("vendorCode"), "key": e.get("updateAt") or e.get("updatedAt"),
+                        "errors": [str(x) for x in e.get("errors") or []]})
+    elif isinstance(data, dict):  # 新格式：{items: [{batchUUID, vendorCodes: [...], errors: {vendorCode: [...]}}]}
+        for it in data.get("items") or []:
+            errs = it.get("errors") or {}
+            codes = it.get("vendorCodes") or (list(errs) if isinstance(errs, dict) else [])
+            for vc in codes:
+                ev = errs.get(vc, []) if isinstance(errs, dict) else errs
+                out.append({"vendorCode": vc, "key": it.get("batchUUID") or it.get("updatedAt"),
+                            "errors": [str(x) for x in (ev if isinstance(ev, list) else [ev])]})
+    return out
 
 
 def _detail(r: httpx.Response) -> str:

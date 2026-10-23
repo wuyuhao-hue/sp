@@ -33,8 +33,10 @@ def logo_key(logo_id: str | None) -> str:
 def tech_size(label: str) -> str:
     """从 1688 尺码名里取前导国际码：'M建议80-100斤' → 'M'；'2XL【140-160斤】' → '2XL'。"""
     s = str(label).strip().upper().replace("Ｌ", "L").replace("Ｍ", "M")
-    m = re.match(r"^(XXXL|XXL|XXS|XS|\dXL|XL|S|M|L|F|均码|\d{2,3})", s)
-    return (m.group(1) if m else s)[:15]
+    if re.match(r"^(均码|F\b|FREE|ONE ?SIZE|默认|单码)", s) or not s:
+        return ""  # 均码：WB 上按无尺码商品上架
+    m = re.match(r"^(XXXL|XXL|XXS|XS|\dXL|XL|S|M|L|\d{2,3})", s)
+    return (m.group(1) if m else re.sub(r"[^\w\-/.]", "", s))[:15]
 
 
 def ru_size(tech: str) -> str:
@@ -54,10 +56,12 @@ def guess_color(name: str) -> str:
     return ""
 
 
-def cached(name: str, loader):
-    """WB 官方目录（类目属性、颜色、国家、ТН ВЭД）缓存在 data/wb_cache，避免重复请求。"""
+def cached(name: str, loader, days: float = 7):
+    """WB 官方目录（类目属性、颜色、国家、ТН ВЭД）缓存在 data/wb_cache，7 天内不重复请求。"""
+    import time
+
     f = CACHE / f"{name}.json"
-    if f.exists():
+    if f.exists() and time.time() - f.stat().st_mtime < days * 86400:
         return json.loads(f.read_text("utf-8"))
     data = loader()
     f.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
@@ -110,6 +114,11 @@ def sync(p: dict) -> dict:
                 L["variants"].append({"sku": sku, "sid": st["id"], "enabled": True, "color": guess_color(sku),
                                       "title": "", "index": names.index(sku) + 1 if sku in names else len(have) + 1})
         L["variants"] = [v for v in L["variants"] if v["sku"] in latest]
+        seen: set[int] = set()
+        for v in L["variants"]:  # 编号必须唯一（供应商编码依赖它）
+            if v["index"] in seen:
+                v["index"] = max(seen | {x["index"] for x in L["variants"]}) + 1
+            seen.add(v["index"])
         L["variants"].sort(key=lambda v: v["index"])
         if not L["sizes"]:
             L["sizes"] = [{"label": s, "tech": tech_size(s), "wb": ru_size(tech_size(s)), "enabled": True,
@@ -124,10 +133,19 @@ def sync(p: dict) -> dict:
 
 
 def vendor_code(p: dict, L: dict, v: dict, prefix: str = "ai") -> str:
-    """确定性供应商编码：同一商品 + 同一 logo + 同一颜色永远是同一个编码，是防重复建卡和回查的依据。"""
-    src = p.get("offer_id") or p["id"]
-    lg = (L.get("logo_id") or "n")[:4]
+    """确定性供应商编码：同一商品 + 同一 logo + 同一颜色永远是同一个编码，是防重复建卡和回查的依据。
+    第一次上架时会把编码固定保存在上架单里（L["codes"]），以后改前缀、重新采集都不会变。"""
+    frozen = (L.get("codes") or {}).get(v["sku"])
+    if frozen:
+        return frozen
+    src = re.sub(r"[^\w\-]", "", str(p.get("offer_id") or p["id"]))
+    lg = re.sub(r"[^\w]", "", L.get("logo_id") or "n")[:6]
     return f"{prefix}-{src}-{lg}-{v['index']}"[:72]
+
+
+def one_size(L: dict) -> bool:
+    sizes = [s for s in L["sizes"] if s.get("enabled")]
+    return len(sizes) == 1 and not sizes[0].get("tech")
 
 
 # ---------------- 价格 ----------------
@@ -176,11 +194,15 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
     sizes = [s for s in L["sizes"] if s.get("enabled")]
     if not sizes:
         errors.append("没有勾选任何尺码")
+    single = one_size(L)
     for s in sizes:
-        if not s.get("tech") or len(s["tech"]) > 15:
-            errors.append(f"尺码「{s['label']}」的卖家尺码为空或超过 15 字符")
-        if not s.get("wb"):
+        if not single and (not s.get("tech") or len(s["tech"]) > 15):
+            errors.append(f"尺码「{s['label']}」的卖家尺码为空或超过 15 字符（只有一个均码时可以留空）")
+        if not single and not s.get("wb"):
             errors.append(f"尺码「{s['label']}」没有俄码，请手动填写")
+    techs = [s.get("tech") for s in sizes]
+    if len(set(techs)) < len(techs):
+        errors.append("有重复的卖家尺码")
         if not (s.get("cny_override") or s.get("cny")):
             errors.append(f"尺码「{s['label']}」没有采购价")
     pk = L["package"]
@@ -222,7 +244,14 @@ def preflight(p: dict, L: dict, shop: dict | None, charc_meta: list[dict] | None
 
 # ---------------- 请求体 ----------------
 def build_payload(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: list[dict], prefix: str) -> list[dict]:
-    """barcodes: {vendorCode: [每个尺码一个条码]}"""
+    """barcodes: {vendorCode: [每个尺码一个条码]}。返回 /cards/upload 的请求体（每组最多 30 个款式，同组自动合并）。"""
+    variants = build_variants(p, L, barcodes, charc_meta, prefix)
+    return [{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]} for i in range(0, len(variants), 30)]
+
+
+def build_variants(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: list[dict], prefix: str,
+                   only: set[str] | None = None) -> list[dict]:
+    """only：只生成这些供应商编码的款式（给已有商品卡追加新颜色时用）。"""
     color_id = next((c["charcID"] for c in charc_meta if c["name"].strip().lower() == "цвет"), COLOR_ID)
     country_id = next((c["charcID"] for c in charc_meta if c["name"].lower().startswith("страна производства")), COUNTRY_ID)
     tnved_id = next((c["charcID"] for c in charc_meta if "ТНВЭД" in c["name"].upper().replace(" ", "")), None)
@@ -247,11 +276,14 @@ def build_payload(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: 
     dims = {"length": round(float(pk["length"])), "width": round(float(pk["width"])), "height": round(float(pk["height"])),
             "weightBrutto": max(0.01, round(float(pk["weight"]), 3))}
     sizes = [s for s in L["sizes"] if s.get("enabled")]
+    single = one_size(L)
     variants = []
     for v in L["variants"]:
         if not v.get("enabled"):
             continue
         vc = vendor_code(p, L, v, prefix)
+        if only is not None and vc not in only:
+            continue
         price = variant_price(p, L, v)
         bc = barcodes.get(vc) or []
         variants.append({
@@ -261,7 +293,8 @@ def build_payload(p: dict, L: dict, barcodes: dict[str, list[str]], charc_meta: 
             "brand": L["brand"].strip(),
             "dimensions": dims,
             "characteristics": base + [{"id": color_id, "value": [v["color"]]}],
-            "sizes": [{"techSize": s["tech"], "wbSize": s["wb"], "price": price, "skus": [bc[i]] if i < len(bc) else []}
+            "sizes": [{"price": price, "skus": bc[:1]}] if single else
+                     [{"techSize": s["tech"], "wbSize": s["wb"], "price": price, "skus": [bc[i]] if i < len(bc) else []}
                       for i, s in enumerate(sizes)],
         })
-    return [{"subjectID": int(L["subject_id"]), "variants": variants[i:i + 30]} for i in range(0, len(variants), 30)]
+    return variants

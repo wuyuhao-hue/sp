@@ -414,6 +414,76 @@ def shop_test(sid: str):
     return out
 
 
+@app.post("/api/shops/{sid}/diagnose")
+def shop_diagnose(sid: str, pid: str | None = Body(None), key: str | None = Body(None)):
+    """上架诊断（只读，不写入 WB）：逐个检查上架要用到的 WB 接口和返回格式；
+    选了上架单时再做本地预检并生成「将要提交的商品卡」预览。报告保存在 data/wb_diag，不含令牌。"""
+    from .wb import category
+
+    cli = _wb_call(lambda: wb_shops.client(sid))
+    steps = []
+
+    def step(name, fn):
+        t = time.time()
+        try:
+            detail = fn()
+            steps.append({"name": name, "ok": True, "detail": detail, "ms": int((time.time() - t) * 1000)})
+            return True
+        except Exception as e:  # noqa: BLE001
+            steps.append({"name": name, "ok": False, "detail": str(e)[:400], "ms": int((time.time() - t) * 1000)})
+            return False
+
+    step("Content 连通", lambda: cli.ping())
+    step("类目搜索 Куртки", lambda: [f"{r.get('subjectID')} {r.get('subjectName')}" for r in cli.subjects("Куртки", limit=5)])
+    step("全部类目", lambda: f"{len(category.all_subjects(cli))} 个")
+    step("颜色目录", lambda: f"{len(cli.colors())} 个")
+    step("国家目录", lambda: f"{len(cli.countries())} 个")
+    step("性别目录", lambda: cli.directory("kinds")[:6])
+    step("商品卡数量", lambda: f"{cli.cards_total()} 张")
+    step("错误草稿列表", lambda: [f"{e['vendorCode']}: {'; '.join(e['errors'])[:120]}" for e in cli.error_list(strict=True)[:10]])
+    step("价格接口", lambda: cli.prices_ping() and "正常")
+    step("仓库", lambda: [f"{w.get('id')} {w.get('name')}" for w in cli.warehouses()])
+    preview = None
+    if pid and key:
+        p, L = _listing(pid, key)
+        shop = wb_shops.get(sid)
+        prefix = (shop or {}).get("vendor_prefix") or "ai"
+        if L.get("subject_id"):
+            sub = int(L["subject_id"])
+            step("类目属性", lambda: [f"{c['charcID']} {c['name']}{' *必填' if c.get('required') else ''}"
+                                   for c in wb_upload.charc_meta(cli, sub)][:40])
+            step("海关编码候选", lambda: [r.get("tnved") for r in cli.tnved(sub)][:10])
+            if L.get("brand"):
+                step(f"品牌库查找 {L['brand']}", lambda: {True: "找到", False: "没找到（需要先在 WB 注册品牌）",
+                                                        None: "品牌接口不可用"}[cli.brand_exists(sub, L["brand"])])
+        meta = []
+        try:
+            meta = wb_upload.charc_meta(cli, int(L["subject_id"])) if L.get("subject_id") else []
+        except WBError:
+            pass
+        pf = wb_listing.preflight(p, L, shop, meta)
+        steps.append({"name": "本地预检", "ok": pf["ok"], "detail": pf})
+        for v in L["variants"]:
+            if v.get("enabled"):
+                vc = wb_listing.vendor_code(p, L, v, prefix)
+                step(f"WB 上是否已有 {vc}", lambda vc=vc: [f"nmID {c.get('nmID')} imtID {c.get('imtID')}" for c in cli.find_cards(vc)]
+                     or "没有（上架时会新建）")
+        if pf["ok"]:
+            n = 1 if wb_listing.one_size(L) else len([s for s in L["sizes"] if s.get("enabled")])
+            fake = {wb_listing.vendor_code(p, L, v, prefix): [f"<条码{i + 1}>" for i in range(n)]
+                    for v in L["variants"] if v.get("enabled")}
+            preview = wb_listing.build_payload(p, L, fake, meta, prefix)
+    report = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "version": VERSION, "shop": wb_shops.get(sid)["name"],
+              "token_fingerprint": wb_shops.get(sid)["fingerprint"], "steps": steps, "payload_preview": preview}
+    d = store.DATA / "wb_diag"
+    d.mkdir(exist_ok=True)
+    f = d / f"诊断-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    f.write_text(json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+    report["file"] = str(f)
+    report["dir"] = str(d)
+    return report
+
+
 def _shop_or_current(shop: str | None) -> str:
     sid = shop or store.get_settings().get("wb_shop_id")
     if not sid or not wb_shops.get(sid):
@@ -447,8 +517,7 @@ def wb_directory(kind: str, subject: int | None = None, shop: str | None = None)
         rows = _wb_call(lambda: wb_listing.cached("countries", cli.countries))
         return sorted({r.get("name") for r in rows if r.get("name")})
     if kind in ("seasons", "kinds"):
-        rows = _wb_call(lambda: wb_listing.cached(kind, lambda: cli.directory(kind)))
-        return sorted({r.get("name") for r in rows if r.get("name")})
+        return sorted(set(_wb_call(lambda: wb_listing.cached(kind, lambda: cli.directory(kind)))))
     if kind == "tnved" and subject:
         rows = _wb_call(lambda: wb_listing.cached(f"tnved-{subject}", lambda: cli.tnved(subject)))
         return [str(r.get("tnved")) for r in rows if r.get("tnved")]
@@ -465,7 +534,10 @@ def _listing_summary(p: dict, L: dict) -> dict:
     return {"pid": p["id"], "key": L["key"], "product_title": p.get("title", ""), "offer_id": p.get("offer_id"),
             "title": L.get("title", ""), "logo_name": L.get("logo_name", ""), "subject_name": L.get("subject_name", ""),
             "status": L.get("status", "draft"), "progress": L.get("progress"), "error": L.get("error", ""),
-            "nm": L.get("nm") or {}, "variants": vs, "shop_id": L.get("shop_id")}
+            "nm": L.get("nm") or {}, "variants": vs, "shop_id": L.get("shop_id"), "logo_id": L.get("logo_id"),
+            "ai_filled": bool(L.get("ai_filled")), "stock": L.get("stock") or 0,
+            "price": max([wb_listing.variant_price(p, L, v) for v in L["variants"] if v.get("enabled")] or [0])
+            if (L.get("pricing") or {}).get("configured") else 0}
 
 
 @app.get("/api/listings")
@@ -523,6 +595,9 @@ def listing_save(pid: str, key: str, patch: dict = Body(...)):
                 L[k] = patch[k]
         if "pricing" in patch:
             L["pricing"]["configured"] = True
+        if patch.get("subject_id"):
+            from .wb import category
+            category.remember(p, patch["subject_id"], patch.get("subject_name", ""))
         if L.get("status") in ("failed",):
             L["status"] = "draft"
     _listing(pid, key)
@@ -552,42 +627,85 @@ def listing_preflight(pid: str, key: str, shop: str | None = Body(None, embed=Tr
 def listing_ai_fill(pid: str, key: str, shop: str | None = Body(None, embed=True)):
     from .wb import ai_fill
 
-    p, L = _listing(pid, key)
-    if not L.get("subject_id"):
-        raise HTTPException(400, "请先选择 WB 类目")
-    sid = _shop_or_current(shop)
-    cli = wb_shops.client(sid)
-    meta = _wb_call(lambda: wb_upload.charc_meta(cli, int(L["subject_id"])))
-    colors = wb_directory("colors", shop=sid)
-    countries = wb_directory("countries", shop=sid)
+    _listing(pid, key)
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
     try:
-        tn = wb_directory("tnved", subject=int(L["subject_id"]), shop=sid)
-    except HTTPException:
-        tn = []
-    try:
-        res = ai_fill.fill(p, L, meta, colors, countries, tn)
+        res = ai_fill.fill_listing(pid, key, cli)
+    except WBError as e:
+        raise HTTPException(400, str(e)) from e
     except Exception as e:  # noqa: BLE001
         raise HTTPException(400, f"AI 填写失败：{e}") from e
-
-    def fn(x):
-        LL = x["listings"][key]
-        for k in ("title", "description", "country", "tnved"):
-            if res.get(k):
-                LL[k] = res[k]
-        LL.setdefault("charcs", {}).update(res.get("charcs") or {})
-        for v in LL["variants"]:
-            r = (res.get("variants") or {}).get(v["sku"]) or {}
-            if r.get("color"):
-                v["color"] = r["color"]
-            if r.get("title"):
-                v["title"] = r["title"]
-        if res.get("package_estimate"):
-            LL["package_estimate"] = res["package_estimate"]
-    store.update_product(pid, fn)
     out = listing_get(pid, key)
-    out["ai_notes"] = res.get("notes") or []
-    out["ai_rejected"] = res.get("rejected") or []
+    out["ai_notes"] = res["notes"]
+    out["ai_rejected"] = res["rejected"]
+    if res.get("subject"):
+        out["ai_notes"] = [f"自动匹配类目：{res['subject']['name']}（{res['subject'].get('reason', '')}）"] + out["ai_notes"]
     return out
+
+
+@app.post("/api/listings/{pid}/{key}/suggest-subject")
+def listing_suggest_subject(pid: str, key: str, shop: str | None = Body(None, embed=True)):
+    from .wb import category
+
+    p, _ = _listing(pid, key)
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    sug = _wb_call(lambda: category.suggest(p, cli))
+    subjects = _wb_call(lambda: category.all_subjects(cli))
+    opts = [{"id": c["subjectID"], "name": c["subjectName"], "parent": c.get("parentName")}
+            for c in category.candidates(p, subjects)[:16]]
+    return {"suggest": sug, "options": opts}
+
+
+@app.post("/api/listings/batch-ai")
+def listings_batch_ai(items: list[dict] = Body(..., embed=True), shop: str | None = Body(None)):
+    """批量 AI 填写：自动匹配类目 + 标题/每个颜色的标题/说明/属性/包装/海关编码。"""
+    from .wb import ai_fill
+
+    cli = _wb_call(lambda: wb_shops.client(_shop_or_current(shop)))
+    job = jobs.Job("wb-ai", f"批量 AI 填写 {len(items)} 张商品卡")
+    job.total = len(items)
+
+    def run(j):
+        ok = 0
+        for k, it in enumerate(items):
+            if j.cancelled:
+                break
+            name = ((store.get_product(it["pid"]) or {}).get("title") or "")[:16]
+            try:
+                r = ai_fill.fill_listing(it["pid"], it["key"], cli)
+                ok += 1
+                j.note(f"[{k + 1}/{len(items)}] ✓ {name}" + (f"（类目：{r['subject']['name']}）" if r.get("subject") else ""))
+            except Exception as e:  # noqa: BLE001
+                j.note(f"[{k + 1}/{len(items)}] ✗ {name}：{str(e)[:80]}")
+            j.done += 1
+        j.finish(f"AI 填写完成 {ok}/{len(items)}，请逐张核对后再上架")
+    jobs.run_in_thread(job, run)
+    return job.to_dict()
+
+
+@app.post("/api/listings/batch-edit")
+def listings_batch_edit(items: list[dict] = Body(..., embed=True), patch: dict = Body(...)):
+    """批量修改价格公式/固定价/折扣、包装尺寸重量、库存。patch 里没填的项不改。"""
+    n = 0
+    for it in items:
+        def fn(p):
+            nonlocal n
+            L = (p.get("listings") or {}).get(it["key"])
+            if not L or L.get("status") in ("uploading", "pending_stock"):
+                return
+            pr = patch.get("pricing") or {}
+            if pr:
+                L["pricing"].update({k: v for k, v in pr.items() if v is not None and v != ""})
+                L["pricing"]["configured"] = True
+            pk = patch.get("package") or {}
+            L["package"].update({k: v for k, v in pk.items() if v is not None and v != ""})
+            if patch.get("stock") is not None and patch.get("stock") != "":
+                L["stock"] = int(patch["stock"])
+            if L.get("status") == "failed":
+                L["status"] = "draft"
+            n += 1
+        store.update_product(it["pid"], fn)
+    return {"count": n}
 
 
 @app.post("/api/listings/{pid}/{key}/upload")
