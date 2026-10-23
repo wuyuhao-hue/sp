@@ -20,26 +20,30 @@ for d in (PRODUCTS, LOGOS, EXPORTS, DEBUG, STYLE_REFS):
 
 _lock = threading.RLock()
 
-# 套图模板里可选的图片类型：(中文名, 是否默认印标)
+# 套图模板里可选的图片类型
 SHOT_TYPES = {
-    "hero": "卖点首图（模特+卖点文字）",
+    "hero": "卖点首图（商品+标题+卖点图标）",
+    "hero_model": "卖点首图（模特版）",
     "model_front": "模特正面",
     "model_side": "模特侧面",
     "model_back": "模特背面",
+    "back_info": "背面图+标题文字",
     "flat_front": "平铺/挂拍正面（无模特）",
-    "detail_fabric": "面料特写",
-    "detail_feature": "细节特写（领口/拉链/口袋/内衬）",
+    "material_info": "面料/填充特写+说明文字",
+    "detail_collage": "细节拼图（大图+3个局部+说明）",
+    "detail_fabric": "面料特写（无文字）",
     "lifestyle": "街拍场景",
+    "size_chart": "尺码表（本地生成，数字准确，不耗费用）",
 }
 
 DEFAULT_SHOTS = [
     {"type": "hero", "logo": True},
     {"type": "model_front", "logo": True},
-    {"type": "model_back", "logo": False},
-    {"type": "detail_fabric", "logo": False},
-    {"type": "flat_front", "logo": True},
+    {"type": "back_info", "logo": False},
+    {"type": "material_info", "logo": False},
+    {"type": "detail_collage", "logo": False},
+    {"type": "size_chart", "logo": False},
     {"type": "model_side", "logo": False},
-    {"type": "detail_feature", "logo": False},
     {"type": "lifestyle", "logo": False},
 ]
 
@@ -95,7 +99,10 @@ def new_id() -> str:
 
 # ---------- 设置 ----------
 def get_settings() -> dict:
-    return {**DEFAULT_SETTINGS, **_read(SETTINGS_FILE, {})}
+    s = {**DEFAULT_SETTINGS, **_read(SETTINGS_FILE, {})}
+    shots = [sh for sh in s.get("shots") or [] if sh.get("type") in SHOT_TYPES]
+    s["shots"] = (shots + DEFAULT_SHOTS[len(shots):])[:8] if shots else DEFAULT_SHOTS
+    return s
 
 
 def save_settings(patch: dict) -> dict:

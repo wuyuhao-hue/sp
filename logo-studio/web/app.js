@@ -42,6 +42,10 @@ createApp({
     setsSorted() { return [...((this.current && this.current.sets) || [])].sort((a, b) => b.created - a.created); },
     aiInfo() { return (this.current && this.current.ai) || {}; },
     guessGender() { const t = (this.current && this.current.title) || ''; return /女/.test(t) ? 'female' : /男/.test(t) ? 'male' : 'unisex'; },
+    sizeTableText() {
+      const t = this.aiInfo.size_table;
+      return t && t.header ? [t.header, ...t.rows].map(r => r.join(' | ')).join('\n') : '';
+    },
     lang() { return this.settings.copy_lang || 'ru'; },
     langName() { return LANG_NAME[this.lang]; },
     activeShots() { return (this.settings.shots || []).slice(0, this.settings.shot_count || 6); },

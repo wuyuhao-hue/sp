@@ -15,10 +15,11 @@ from . import ai, store
 GENDER_EN = {"male": "male", "female": "female", "unisex": "adult"}
 
 BASE_RULES = (
-    "Professional e-commerce product photo for a Wildberries clothing listing. Photorealistic, high resolution, "
-    "sharp focus, true-to-life colors. Clean, minimal composition focused only on the product: no clutter, no props "
-    "competing with the garment, no watermark, no border, no collage. Vertical framing; keep the whole subject "
-    "inside the central area with comfortable empty margin at the top and bottom of the frame."
+    "Professional e-commerce image for a Wildberries clothing listing, in the style of top-selling Wildberries cards. "
+    "Photorealistic, high resolution, sharp focus, true-to-life colors, clean and uncluttered: no watermark, no "
+    "border, no props competing with the garment. Vertical framing; keep important content inside the central area "
+    "with comfortable empty margin at the top and bottom of the frame. Any text must be crisp, correctly spelled and "
+    "never cover the garment."
 )
 
 PRODUCT_RULES = (
@@ -32,7 +33,8 @@ OTHER_REFS = (
 )
 STYLE_REFS = (
     "STYLE REFERENCE: input images {a}-{b} are examples of successful listings. Copy only their photographic style, "
-    "lighting, composition and caption layout — never their product, model or text."
+    "lighting, composition, typography and icon/caption layout — never their product, model, wording, and never "
+    "any logo or brand name that appears in them."
 )
 
 LOGO_STYLE = {
@@ -56,29 +58,53 @@ LOGO_COLOR = {
 }
 NO_LOGO = "The garment shows no logo, no brand mark and no text anywhere."
 
+HEADLINE = "a bold headline in {lang} (2-4 words, e.g. the garment type or its main benefit)"
 SHOT_PROMPTS = {
     "hero": (
-        "MAIN LISTING IMAGE: an attractive {model} model wearing the garment, three-quarter body shot facing the camera "
-        "with a natural confident pose, in a bright studio with a soft light-grey to warm-beige gradient background. "
-        "Leave clean empty space on one side and place {points} there, typeset in a modern bold sans-serif with a small "
-        "thin-line icon for each, aligned in a neat column, never covering the garment. No other text."
+        "MAIN LISTING IMAGE: the garment alone on an invisible ghost mannequin (no person), large and placed slightly "
+        "right of center on a clean light-grey studio background. Top-left: " + HEADLINE + " in white letters inside a "
+        "solid black rounded label. Down the left side: a neat vertical column of {points}, each under a simple "
+        "thin-line icon in a circle. Optionally a small round inset near the lower right showing a close-up of the "
+        "lining or fabric. Nothing else."
+    ),
+    "hero_model": (
+        "MAIN LISTING IMAGE: an attractive {model} model wearing the garment, three-quarter body shot facing the camera, "
+        "placed slightly right of center on a clean light-grey studio background. Top-left: " + HEADLINE + " in white "
+        "letters inside a solid black rounded label. Down the left side: a neat vertical column of {points}, each under "
+        "a simple thin-line icon in a circle. Nothing else."
     ),
     "model_front": "A {model} model wearing the garment, front view, standing straight, framed from head to mid-thigh, "
-                   "plain light-grey studio background, soft even lighting.",
+                   "plain light-grey studio background, soft even lighting. No text.",
     "model_side": "A {model} model wearing the garment, 45-degree side view with a natural relaxed pose, framed from head "
-                  "to mid-thigh, plain light studio background.",
-    "model_back": "A {model} model wearing the garment, seen from the back to show the back of the garment, framed from "
-                  "head to mid-thigh, plain light studio background.",
-    "flat_front": "The garment alone, front view, displayed on an invisible ghost mannequin (no person visible), "
-                  "centered on a plain light background with a soft natural shadow.",
+                  "to mid-thigh, plain light studio background. No text.",
+    "model_back": "A {model} model wearing the garment, seen from the back, framed from head to mid-thigh, plain light "
+                  "studio background. No text.",
+    "back_info": (
+        "The garment seen from the back on an invisible ghost mannequin, large and centered on a clean light background. "
+        "At the top: " + HEADLINE + " about fit and comfort, and one smaller subtitle line in {lang}. Optionally a small "
+        "round inset showing the lining. Based only on these real features: {facts}"
+    ),
+    "flat_front": "The garment alone, front view, on an invisible ghost mannequin (no person), centered on a plain light "
+                  "background with a soft natural shadow. No text.",
+    "material_info": (
+        "Close-up of the garment's most important material — its lining, insulation or outer fabric, whichever is most "
+        "characteristic — filling most of the frame, soft dramatic studio light. At the top: " + HEADLINE + " and 1-2 "
+        "short lines in {lang} explaining the benefit. At the bottom: a row of 3 small thin-line icons, each with a 2-3 "
+        "word caption in {lang}. Based only on these real features: {facts}"
+    ),
+    "detail_collage": (
+        "A clean product-detail collage on white: at the top " + HEADLINE + " (e.g. 'quality craftsmanship'); below it "
+        "one wide photo of the upper part of the garment (collar or hood area); below that three equal square close-ups "
+        "of real details of this garment (for example zipper pocket, front zipper, cuff), each with a short {lang} caption "
+        "under it next to a small plus icon. Thin white gutters, consistent lighting."
+    ),
     "detail_fabric": "Close-up macro photo of the garment's fabric and surface texture, showing material quality, "
-                     "stitching and quilting, shallow depth of field, studio light.",
-    "detail_feature": "Close-up photo of one key construction detail of the garment — collar and zipper, pocket, cuff or "
-                      "lining — crisp and clear, studio light.",
+                     "stitching and quilting, shallow depth of field, studio light. No text.",
     "lifestyle": "A {model} model wearing the garment outdoors in a clean modern city setting appropriate for the season, "
-                 "natural daylight, the garment clearly the focus, background softly blurred.",
+                 "natural daylight, the garment clearly the focus, background softly blurred. No text.",
 }
-CAN_LOGO = {"hero", "model_front", "model_side", "flat_front", "lifestyle"}
+CAN_LOGO = {"hero", "hero_model", "model_front", "model_side", "flat_front", "lifestyle"}
+USES_STYLE = {"hero", "hero_model", "back_info", "material_info", "detail_collage"}
 
 SWAP_PROMPT = (
     "The first image is a finished product photo. Replace ONLY the chest logo on the garment with the logo from the "
@@ -123,8 +149,10 @@ def ensure_analysis(product: dict, force: bool = False) -> dict:
     if not s.get("text_model"):
         info.setdefault("gender", _guess_gender(product.get("title", "")))
         return info
-    srcs = [k["image"] for k in sku_list(product)][:3] + product.get("main_images", [])[:3] + \
-        product.get("detail_images", [])[:2]
+    details = product.get("detail_images", [])
+    # 尺码表一般在详情图靠后的位置，前后各取几张
+    srcs = [k["image"] for k in sku_list(product)][:2] + product.get("main_images", [])[:2] + \
+        details[:2] + [u for u in details[-4:] if u not in details[:2]]
     result = ai.analyze(product.get("title", ""), [k["name"] for k in sku_list(product)],
                         product.get("sizes") or [], srcs)
     # 用户手动改过的字段不覆盖
@@ -142,8 +170,11 @@ def build_prompt(product: dict, sku: dict, shot: dict, logo: dict | None, n_prod
     model = GENDER_EN.get(gender, "adult")
     lang = LANG_NAME.get(s.get("copy_lang", "ru"), "Russian")
     pts = info.get(f"selling_points_{s.get('copy_lang', 'ru')}") or []
-    points = (f"3 short selling-point captions in {lang}: " + "; ".join(f'"{p}"' for p in pts)) if pts \
-        else f"3 short selling-point captions in {lang} (max 4 words each) about this garment's real visible features"
+    points = (f"{len(pts)} short selling-point captions in {lang}: " + "; ".join(f'"{p}"' for p in pts)) if pts \
+        else f"4 short selling-point captions in {lang} (2-4 words each) about this garment's real features"
+    facts = info.get("description_en") or "use only what is visible in the product images"
+    if info.get("material_cn"):
+        facts += f" Material: {info['material_cn']}."
     desc = f" Description: {info['description_en']}" if info.get("description_en") else ""
     category = info.get("category_en")
     parts = [
@@ -152,7 +183,7 @@ def build_prompt(product: dict, sku: dict, shot: dict, logo: dict | None, n_prod
                              else f" (color variant \"{sku['name']}\")",
                              others=OTHER_REFS.format(n=n_product) if n_product > 1 else "", desc=desc),
         STYLE_REFS.format(a=n_product + 1, b=n_product + n_style) if n_style else "",
-        SHOT_PROMPTS[shot["type"]].format(model=model, points=points),
+        SHOT_PROMPTS[shot["type"]].format(model=model, points=points, lang=lang, facts=facts),
     ]
     if logo:
         parts.append(LOGO_RULES.format(n=n_product + n_style + 1,
@@ -215,7 +246,11 @@ def _gen_one(pid: str, sid: str, idx: int, job) -> None:
     logo = store.get_logo(st["logo_id"]) if st.get("logo_id") else None
     _update_image(pid, sid, idx, status="running", error="")
     try:
-        if img.get("swap_from"):
+        if img["type"] == "size_chart":
+            from .sizechart import render_size_chart
+
+            out = render_size_chart(p)  # 本地生成，数字准确，不调用 AI
+        elif img.get("swap_from"):
             # 换标：拿另一套里同位置的成品图，把 logo 换掉
             base = Image.open(store.product_dir(pid) / img["swap_from"]).convert("RGB")
             prompt = SWAP_PROMPT.format(style=LOGO_STYLE.get(logo.get("style"), LOGO_STYLE["print"]),
@@ -230,7 +265,7 @@ def _gen_one(pid: str, sid: str, idx: int, job) -> None:
                 except Exception:  # noqa: BLE001
                     pass
             n_product = len(refs)
-            style = _style_refs() if img["type"] == "hero" else []
+            style = _style_refs() if img["type"] in USES_STYLE else []
             refs += style
             use_logo = logo if img.get("logo") and logo else None
             if use_logo:

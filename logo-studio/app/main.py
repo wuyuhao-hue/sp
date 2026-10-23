@@ -139,7 +139,12 @@ async def import_local(files: list[UploadFile] = File(...), title: str = Form(""
 def update_info(pid: str, patch: dict = Body(...)):
     """手动修改 AI 商品理解结果（卖点、俄语标题、模特性别等）。改过的字段之后不会被 AI 覆盖。"""
     _product_or_404(pid)
-    keys = ("title_ru", "selling_points_ru", "selling_points_cn", "gender", "description_en", "category_en")
+    keys = ("title_ru", "selling_points_ru", "selling_points_cn", "selling_points_en", "gender", "description_en",
+            "category_en", "size_table")
+    if isinstance(patch.get("size_table"), str):
+        from .sizechart import parse_table
+
+        patch["size_table"] = parse_table(patch["size_table"]) or None
 
     def fn(p):
         info = p.setdefault("ai", {})
@@ -426,6 +431,20 @@ app.mount("/data/style_refs", StaticFiles(directory=store.STYLE_REFS), name="sty
 app.mount("/static", StaticFiles(directory=WEB), name="static")
 
 
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"  # 每次都向服务确认，更新程序后不会用到旧脚本
+    return resp
+
+
 @app.get("/")
 def index():
-    return FileResponse(WEB / "index.html", headers={"Cache-Control": "no-cache"})
+    from fastapi.responses import HTMLResponse
+
+    # 脚本和样式地址带上版本号，浏览器缓存了旧版本也会重新加载
+    v = int(max((WEB / f).stat().st_mtime for f in ("app.js", "style.css")))
+    html = (WEB / "index.html").read_text("utf-8")
+    html = html.replace("/static/app.js", f"/static/app.js?v={v}").replace("/static/style.css", f"/static/style.css?v={v}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})

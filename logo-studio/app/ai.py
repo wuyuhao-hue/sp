@@ -208,9 +208,12 @@ Return ONLY a JSON object with these keys:
 - "description_en": 2-4 sentences describing exactly what the garment looks like and how it is constructed (fabric, texture, quilting, collar, closure, pockets, cuffs, hem, lining, fit). Facts only, no marketing.
 - "material_cn": fabric/material in Chinese if visible, else ""
 - "season_en": e.g. "autumn/winter"
-- "selling_points_ru": 3 short Russian selling points (max 4 words each) based on real visible features
-- "selling_points_cn": the same 3 points in Chinese
+- "selling_points_ru": 4 short Russian selling points (2-4 words each) based on real features (fabric, warmth, waterproofing, fit, hood, pockets...)
+- "selling_points_cn": the same 4 points in Chinese
 - "title_ru": a Wildberries-style Russian product title (max 60 characters), no brand names
+- "size_table": if any image contains a size chart, copy it EXACTLY as {{"header": [...], "rows": [[...], ...]}} with the
+  column names translated to short Russian (e.g. "Размер", "Длина", "Обхват груди", "Ширина плеч", "Длина рукава",
+  "Рост, см", "Вес, кг"); keep every number exactly as written, one row per size; otherwise null
 """
 
 
@@ -220,7 +223,7 @@ def analyze(title: str, skus: list[str], sizes: list[str], image_srcs: list[str]
         raise RuntimeError("未设置「商品理解模型」")
     content: list[dict] = [{"type": "text", "text": ANALYZE_PROMPT.format(
         title=title, skus=", ".join(skus) or "-", sizes=", ".join(sizes) or "-")}]
-    for src in image_srcs[:8]:
+    for src in image_srcs[:10]:
         try:
             content.append({"type": "image_url",
                             "image_url": {"url": "data:image/jpeg;base64," + _jpeg_b64(load_image(src))}})

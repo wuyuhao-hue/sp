@@ -179,9 +179,12 @@
             <select class="input" :value="aiInfo.gender || guessGender" @change="saveInfo({gender: $event.target.value})">
               <option value="male">男模特</option><option value="female">女模特</option><option value="unisex">中性</option>
             </select></div>
-          <div class="field" style="margin-top:10px"><label>首图卖点（{{ langName }}，每行一个，最多 3 个）</label>
-            <textarea class="input" rows="3" :value="(aiInfo['selling_points_' + lang] || []).join('\n')" @change="saveInfo({['selling_points_' + lang]: $event.target.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 3)})" placeholder="留空则由 AI 根据图片自己写"></textarea></div>
+          <div class="field" style="margin-top:10px"><label>首图卖点（{{ langName }}，每行一个，最多 4 个）</label>
+            <textarea class="input" rows="4" :value="(aiInfo['selling_points_' + lang] || []).join('\n')" @change="saveInfo({['selling_points_' + lang]: $event.target.value.split('\n').map(s => s.trim()).filter(Boolean).slice(0, 4)})" placeholder="留空则由 AI 根据图片自己写"></textarea></div>
           <div class="faint" v-if="aiInfo.selling_points_cn && lang !== 'cn'" style="margin-top:4px">中文：{{ aiInfo.selling_points_cn.join(' / ') }}</div>
+          <div class="field" style="margin-top:10px"><label>尺码表（用于尺码表图片，每行一个尺码，用 | 分隔，第一行是表头）</label>
+            <textarea class="input mono" rows="5" :value="sizeTableText" @change="saveInfo({size_table: $event.target.value})" placeholder="Размер | Длина | Обхват груди | Ширина плеч&#10;L | 73 | 114 | 47&#10;XL | 75 | 118 | 48.5"></textarea>
+            <span class="faint" v-if="!sizeTableText">配置了商品理解模型时，会自动从详情图里读取</span></div>
           <div class="field" style="margin-top:10px"><label>俄语标题（导出用）</label>
             <input class="input" :value="aiInfo.title_ru || ''" @change="saveInfo({title_ru: $event.target.value})"></div>
           <div class="faint" v-if="aiInfo.description_en" style="margin-top:8px;line-height:1.5">{{ aiInfo.description_en }}</div>
