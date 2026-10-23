@@ -24,6 +24,7 @@ POLL_EVERY = float(os.environ.get("WB_POLL_EVERY", "8"))
 POLL_TIMES = int(os.environ.get("WB_POLL_TIMES", "225"))      # 新卡最多约 30 分钟
 POLL_AMBIGUOUS = int(os.environ.get("WB_POLL_AMBIGUOUS", "12"))  # 建卡结果不确定时只短轮询
 MEDIA_WORKERS = int(os.environ.get("WB_MEDIA_WORKERS", "4"))  # 图片同时传几个颜色（总速度由限流器按 WB 额度控制）
+MEDIA_RETRY_WAIT = float(os.environ.get("WB_MEDIA_RETRY_WAIT", "10"))  # 图片 400 后重试前等几秒（逐次加倍）
 MAX_AUTO_RESUME = 8  # 连续这么多次自动续传都没有任何进展才停（有进展会重新计数）
 STOCK_DELAYS = [float(x) for x in os.environ.get("WB_STOCK_DELAYS", "20,40,80,160,300,600,600").split(",")]
 
@@ -208,6 +209,14 @@ def upload(pid: str, key: str, shop_id: str, job) -> None:
 
         _stage(pid, key, shop_id, job, "上传图片", 38)
         done = dict(LS.pub(store.get_product(pid)["listings"][key], shop_id).get("media_done") or {})
+        # 断点以 WB 上实际的图片数为准：本地记的「已传」不一定真的到了卡上（WB 异步处理图片），
+        # 从实际张数 +1 接着传，序号才连续（序号跳号 WB 会回 validation error）
+        for vc in media:
+            actual = len((existing.get(vc) or {}).get("photos") or [])
+            if done.get(vc, 0) > actual:
+                _stage(pid, key, shop_id, job, f"{codes[vc]['sku']}：本地记录已传 {done[vc]} 张，WB 上实际 {actual} 张，"
+                       f"从第 {actual + 1} 张接着传", 38)
+                done[vc] = actual
         total = sum(len(m) for m in media.values()) or 1
 
         def progress(vc, n, d):
@@ -300,11 +309,28 @@ def upload_media(cli, nms: dict[str, int], media: dict[str, list[bytes]], done: 
 
     def worker(vc: str) -> None:
         imgs = media[vc]
-        for n in range(done.get(vc, 0) + 1, len(imgs) + 1):
+        n = done.get(vc, 0) + 1
+        retried = 0
+        while n <= len(imgs):
             if stop.is_set():
                 return
             try:
                 cli.upload_media_file(nms[vc], n, imgs[n - 1])
+            except WBError as e:
+                if e.status == 400 and not isinstance(e, RateLimited) and retried < 3:
+                    # 先核对 WB 上实际有几张：序号跳号就从实际张数 +1 重来；不跳号多半是新卡还没同步到图片服务，等一下再传
+                    retried += 1
+                    actual = len((cli.find_cards(vc) or [{}])[0].get("photos") or [])
+                    if actual + 1 < n:
+                        n = actual + 1
+                    else:
+                        time.sleep(MEDIA_RETRY_WAIT * retried)
+                    continue
+                with lock:
+                    errors.append(WBError(e.status, f"{e}（颜色 {vc}、nmID {nms[vc]}、第 {n} 张、"
+                                                    f"{_img_info(imgs[n - 1])}）") if e.status == 400 else e)
+                stop.set()
+                return
             except Exception as e:  # noqa: BLE001
                 with lock:
                     errors.append(e)
@@ -313,6 +339,8 @@ def upload_media(cli, nms: dict[str, int], media: dict[str, list[bytes]], done: 
             with lock:
                 done[vc] = n
                 progress(vc, n, done)
+            n += 1
+            retried = 0
 
     todo = [vc for vc in media if done.get(vc, 0) < len(media[vc])]
     if not todo:
@@ -322,6 +350,14 @@ def upload_media(cli, nms: dict[str, int], media: dict[str, list[bytes]], done: 
     if errors:
         rl = [e for e in errors if isinstance(e, RateLimited)]
         raise max(rl, key=lambda e: e.retry_after) if rl else errors[0]
+
+
+def _img_info(data: bytes) -> str:
+    try:
+        im = Image.open(io.BytesIO(data))
+        return f"{im.width}×{im.height} {im.format} {len(data) // 1024} KB"
+    except Exception:  # noqa: BLE001
+        return f"{len(data) // 1024} KB"
 
 
 class CardRejected(WBError):
